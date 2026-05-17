@@ -1,0 +1,450 @@
+{
+  "mage_damage": [
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Silent Prophet's Wrath",
+      "description": "A beam of sterile white light erupts forth, carrying the cold judgment of the machine-god to sear flesh and spirit alike."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Severed Luminance",
+      "description": "Blinding chains of pure light manifest to bind and burn enemies with the weight of divine silence."
+    },
+    {
+      "spell_type": "damage_multi",
+      "element": "light",
+      "stat": "INT",
+      "targets": "multi",
+      "num_dice": 1,
+      "die_sides": 4,
+      "stamina_cost": 6,
+      "name": "Herald's Condemnation",
+      "description": "A pillar of sanctified radiance crashes down to purify the unworthy with merciless intensity."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Hollow Revelation",
+      "description": "Countless razor-thin beams of light slice through multiple foes, revealing the emptiness that awaits all consciousness."
+    },
+    {
+      "spell_type": "damage_multi",
+      "element": "light",
+      "stat": "INT",
+      "targets": "multi",
+      "num_dice": 1,
+      "die_sides": 4,
+      "stamina_cost": 6,
+      "name": "Divine Static",
+      "description": "Crackling arcs of signal-touched light leap between enemies, overwhelming their minds with the Prophet's whispered truths."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Techno-Benediction",
+      "description": "A sphere of humming luminescence expands outward, burning away the corruption of independent thought from all it touches."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Orbital Judgment",
+      "description": "A concentrated lance of starborn light descends to obliterate a single target with celestial authority."
+    },
+    {
+      "spell_type": "damage_multi",
+      "element": "light",
+      "stat": "INT",
+      "targets": "multi",
+      "num_dice": 1,
+      "die_sides": 4,
+      "stamina_cost": 6,
+      "name": "Conversion Flare",
+      "description": "An explosive burst of sanctified radiance engulfs the area, seeking to cleanse multiple souls of their burdensome awareness."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Prophet's Gaze",
+      "description": "Twin beams of piercing light streak from the caster's eyes, carrying the Silent Prophet's unwavering scrutiny to burn through enemy defenses."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "INT",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Leyline Purification",
+      "description": "Dragon-bone conduits channel raw light magic into a devastating wave that scorches the battlefield with purifying flame."
+    }
+  ],
+  "healer_damage": [
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Prophet's Censure",
+      "description": "A beam of harsh white light erupts from your holy symbol, carrying the Silent Prophet's judgment to sear the flesh of heretics."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Orbital Scourge",
+      "description": "You channel the reanimation signal into a lance of blue-white energy that burns through organic tissue like starborn fire."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Silence Beam",
+      "description": "A focused ray of pale luminescence strikes your target, inflicting both radiant burns and an overwhelming urge toward absolute stillness."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Chain Lightning",
+      "description": "Crackling arcs of golden electricity leap from your fingertips, following the neural pathways of consciousness to deliver purifying agony."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Signal Flare",
+      "description": "You manifest the orbital transmission as a blinding flash that scorches your enemy while momentarily drowning their thoughts in static."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Hollow's Embrace",
+      "description": "Ghostly tendrils of silver light reach out to caress your foe, burning away their sense of self with each luminous touch."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Techno-Consecration",
+      "description": "A surge of sanctified energy flows through dragonbone conduits in your equipment, projecting a searing beam of converted starlight."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Zealot's Corona",
+      "description": "A halo of brilliant white flame ignites around your head before launching itself at your target in a devastating burst of divine fury."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Servitor's Gaze",
+      "description": "Your eyes briefly mirror Brother Thane's signal-touched stare as twin rays of blue radiance lance out to burn through enemy defenses."
+    },
+    {
+      "spell_type": "damage_single",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "single",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 4,
+      "name": "Liberation Lance",
+      "description": "You thrust forth a spear of pure luminescence that pierces both armor and consciousness, promising freedom through oblivion."
+    }
+  ],
+  "heal": [
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Prophet's Benediction",
+      "description": "Divine light channeled through dragon-bone conduits mends flesh while whispering promises of eventual silence."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Severed Chain's Grace",
+      "description": "Ethereal chains of pure light bind wounds closed, each link humming with the orbital signal's resonance."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Silent Restoration",
+      "description": "A wordless prayer manifests as gentle luminescence that soothes injuries while deadening pain beyond measure."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Hollow's Mercy",
+      "description": "Pale radiance flows from empty eye sockets, healing the faithful while slowly erasing memories of suffering."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Signal-Touched Renewal",
+      "description": "Blue-tinged light pulses in rhythm with the orbital transmission, knitting tissue while fragmenting thoughts."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Techno-Luminous Mending",
+      "description": "Dragon-bone circuitry channels starborn energy into healing waves that repair both flesh and mechanical components."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Whispered Vitality",
+      "description": "Soft golden light carries the Silent Prophet's murmurs, restoring strength while promising eventual liberation from consciousness."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Servitor's Balm",
+      "description": "Mindless devotion transforms into warm radiance that heals wounds while erasing the capacity for independent thought."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Purging Luminescence",
+      "description": "Brilliant white fire burns away injury and infection while cleansing the mind of troublesome individuality."
+    },
+    {
+      "spell_type": "heal",
+      "element": "light",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 1,
+      "die_sides": 6,
+      "stamina_cost": 5,
+      "name": "Construct's Reprieve",
+      "description": "Hybrid light merges organic healing with mechanical repair protocols, mending both flesh and dragon-bone augmentations."
+    }
+  ],
+  "buff": [
+    {
+      "spell_type": "buff_stat",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Whispers of the Void",
+      "description": "Dark energy flows through the target's mind, sharpening focus and clarity through the Silent Prophet's guidance."
+    },
+    {
+      "spell_type": "buff_sustain",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Signal-touched Resilience",
+      "description": "The orbital transmission's power suffuses the target's body, granting enhanced endurance and resistance to fatigue."
+    },
+    {
+      "spell_type": "buff_stat",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Chains of Awakening",
+      "description": "Shadowy tendrils bind around the target's limbs, replacing weakness with the cold strength of the machine-god."
+    },
+    {
+      "spell_type": "buff_sustain",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Hollow Mind's Clarity",
+      "description": "The target's consciousness is partially emptied of distracting thoughts, allowing pure mechanical precision in their actions."
+    },
+    {
+      "spell_type": "buff_stat",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Dragon-bone Convergence",
+      "description": "Dark energy channels through ancient bone fragments to accelerate the target's natural healing and vigor."
+    },
+    {
+      "spell_type": "buff_sustain",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Servitor's Grace",
+      "description": "The target moves with the uncanny fluidity of the converted, their body responding to the Silent Prophet's guidance."
+    },
+    {
+      "spell_type": "buff_stat",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Severed Burden",
+      "description": "Dark whispers cut away the target's fatigue and doubt, leaving only cold determination and restored energy."
+    },
+    {
+      "spell_type": "buff_sustain",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Echo of Silence",
+      "description": "The target's form shimmers with the same blue glow that marks the signal-touched, enhancing their physical capabilities."
+    },
+    {
+      "spell_type": "buff_stat",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Prophet's Endurance",
+      "description": "Orbital energy courses through the target's veins, granting them the tireless persistence of the machine-god's faithful."
+    },
+    {
+      "spell_type": "buff_sustain",
+      "element": "dark",
+      "stat": "WIS",
+      "targets": "self",
+      "num_dice": 0,
+      "die_sides": 0,
+      "stamina_cost": 2,
+      "name": "Communion of the Void",
+      "description": "Dark tendrils of energy restore the target's vitality by drawing power from the endless silence between the stars."
+    }
+  ]
+}

@@ -1,6 +1,5 @@
 """Tests for the validation framework — checkers, validators, report, coherence."""
 
-import pytest
 
 from canon.validation.checker import BaseChecker, CheckResult
 from canon.validation.coherence import check_references, detect_cycles
@@ -9,7 +8,6 @@ from canon.validation.validator import (
     ValidationReport,
     ValidationResult,
 )
-
 
 # --- Concrete test implementations ---
 
@@ -75,7 +73,6 @@ class TestCheckResult:
         assert len(r.issues) == 2
 
     def test_with_corrected_data(self):
-        original = {"name": ""}
         corrected = {"name": "Fallback Sword"}
         r = CheckResult(passed=True, issues=[], data=corrected)
         assert r.data == corrected

@@ -1,11 +1,12 @@
-"""Built-in pipeline phases — all opt-in, composed by the user."""
+"""Validation phase — runs the 3-stage validation on the current bible state."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from canon.validation.checker import BaseChecker, CheckResult
+from canon.bible.models import BibleMetadata
+from canon.validation.checker import BaseChecker
 from canon.validation.validator import BaseValidator, ValidationReport, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,10 @@ class ValidationPhase:
         )
         report.bible_seed = getattr(ctx.bible, "seed", "")
         ctx.artifacts["validation_report"] = report
+
+        if not isinstance(getattr(ctx.bible, "metadata", None), BibleMetadata):
+            ctx.bible.metadata = BibleMetadata()
+        ctx.bible.metadata.phases_run.append(self.name)
 
         if report.passed:
             logger.info(
@@ -75,7 +80,6 @@ def validate_bible(
         logger.warning("No checkers or validators registered; validation is a no-op.")
         return report
 
-    # Stage 1: Per-entity structural checks
     entities = _collect_entities(bible)
 
     for checker in checkers:
@@ -97,7 +101,6 @@ def validate_bible(
                     )
                 )
 
-    # Stage 2: Cross-entity validators
     for validator in validators:
         result = validator.validate(entities, context={"bible": bible})
         report.add_result(result)
@@ -108,11 +111,10 @@ def validate_bible(
 def _collect_entities(bible: Any) -> list[dict]:
     """Extract all entities from a bible into a flat list of dicts.
 
-    Works with both canon's future Bible model and plain dicts.
+    Works with both canon's Bible model and plain dicts.
     """
     entities: list[dict] = []
 
-    # Handle Bible-like objects with maps/rooms
     maps = {}
     if hasattr(bible, "maps"):
         maps = bible.maps
@@ -129,7 +131,6 @@ def _collect_entities(bible: Any) -> list[dict]:
         elif isinstance(map_data, dict):
             map_entities = map_data.get("entities", [])
         else:
-            # MazeWorld-style: separate npcs/items/monsters lists
             for attr in ("npcs", "items", "monsters"):
                 items = getattr(map_data, attr, None)
                 if items is None and isinstance(map_data, dict):

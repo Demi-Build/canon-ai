@@ -1,0 +1,228 @@
+[
+  {
+    "archetype": "",
+    "name": "Iron Sentinel",
+    "description": "A heavily armored defender who holds the line.",
+    "flavor_text": null,
+    "starting_weapon": null,
+    "portrait_prompt": null,
+    "portrait_path": null,
+    "category": null,
+    "stat_template": {
+      "str": 16,
+      "con": 14,
+      "dex": 8
+    },
+    "stat_budget": null,
+    "stat_roles": {},
+    "role_tags": [
+      "tank",
+      "defender"
+    ],
+    "abilities": [],
+    "spells": [],
+    "ability_pool": [
+      {
+        "name": "shield_bash",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      },
+      {
+        "name": "taunt",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      }
+    ],
+    "spell_pool": [],
+    "starting_equipment": [
+      "tower_shield",
+      "plate_armor"
+    ],
+    "lore": "Born of conflict, the Iron Sentinel embodies resilience.",
+    "extra": {}
+  },
+  {
+    "archetype": "",
+    "name": "Arcane Weaver",
+    "description": "A scholar of the hidden arts, bending reality through study.",
+    "flavor_text": null,
+    "starting_weapon": null,
+    "portrait_prompt": null,
+    "portrait_path": null,
+    "category": null,
+    "stat_template": {
+      "int": 18,
+      "wis": 12,
+      "str": 6
+    },
+    "stat_budget": null,
+    "stat_roles": {},
+    "role_tags": [
+      "dps",
+      "support"
+    ],
+    "abilities": [],
+    "spells": [],
+    "ability_pool": [
+      {
+        "name": "arcane_bolt",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      }
+    ],
+    "spell_pool": [
+      {
+        "name": "fireball",
+        "spell_type": "damage_single",
+        "element": "fire",
+        "stat": "INT",
+        "targets": "single",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 0,
+        "buff_duration": 0,
+        "stamina_cost": 0,
+        "description": ""
+      },
+      {
+        "name": "ice_shard",
+        "spell_type": "damage_single",
+        "element": "fire",
+        "stat": "INT",
+        "targets": "single",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 0,
+        "buff_duration": 0,
+        "stamina_cost": 0,
+        "description": ""
+      }
+    ],
+    "starting_equipment": [
+      "staff",
+      "spellbook"
+    ],
+    "lore": "Magic is language; the Arcane Weaver speaks it fluently.",
+    "extra": {}
+  },
+  {
+    "archetype": "",
+    "name": "Verdant Mender",
+    "description": "A healer who draws power from nature to restore allies.",
+    "flavor_text": null,
+    "starting_weapon": null,
+    "portrait_prompt": null,
+    "portrait_path": null,
+    "category": null,
+    "stat_template": {
+      "wis": 16,
+      "cha": 14,
+      "str": 8
+    },
+    "stat_budget": null,
+    "stat_roles": {},
+    "role_tags": [
+      "healer",
+      "support"
+    ],
+    "abilities": [],
+    "spells": [],
+    "ability_pool": [
+      {
+        "name": "nature_heal",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      }
+    ],
+    "spell_pool": [
+      {
+        "name": "regenerate",
+        "spell_type": "damage_single",
+        "element": "fire",
+        "stat": "INT",
+        "targets": "single",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 0,
+        "buff_duration": 0,
+        "stamina_cost": 0,
+        "description": ""
+      },
+      {
+        "name": "cleanse",
+        "spell_type": "damage_single",
+        "element": "fire",
+        "stat": "INT",
+        "targets": "single",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 0,
+        "buff_duration": 0,
+        "stamina_cost": 0,
+        "description": ""
+      }
+    ],
+    "starting_equipment": [
+      "herb_pouch",
+      "wooden_staff"
+    ],
+    "lore": "Life finds a way; the Verdant Mender ensures it.",
+    "extra": {}
+  },
+  {
+    "archetype": "",
+    "name": "Shadow Trickster",
+    "description": "A mercurial figure who thrives in chaos and misdirection.",
+    "flavor_text": null,
+    "starting_weapon": null,
+    "portrait_prompt": null,
+    "portrait_path": null,
+    "category": null,
+    "stat_template": {
+      "dex": 18,
+      "cha": 14,
+      "con": 8
+    },
+    "stat_budget": null,
+    "stat_roles": {},
+    "role_tags": [
+      "dps",
+      "utility"
+    ],
+    "abilities": [],
+    "spells": [],
+    "ability_pool": [
+      {
+        "name": "vanish",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      },
+      {
+        "name": "pocket_sand",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 0
+      }
+    ],
+    "spell_pool": [],
+    "starting_equipment": [
+      "throwing_knives",
+      "smoke_bomb"
+    ],
+    "lore": "The best trick is the one they never see coming.",
+    "extra": {}
+  }
+]

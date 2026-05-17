@@ -1,0 +1,1787 @@
+{
+  "story": {
+    "seed": "Centuries ago, a fleet of starborn settlers crashed on a world ruled by sleeping dragons, and the survivors learned to bind their failing technology to dragonbone and ley-magic. Now the orbital wreck has begun to wake, broadcasting a signal that is reanimating ancient war-constructs and twisting the dragons into something neither beast nor machine. A young scavenger inherits a half-living relic from the wreck and must trace its signal across the kingdoms before a militant order \u2014 convinced the signal is a god \u2014 finishes assembling a weapon that can silence every mind on the planet.",
+    "title": "The Silent Gospel",
+    "synopsis": "A militant religious order called the Severed Chain believes the orbital signal is divine revelation and seeks to complete an ancient weapon capable of silencing all consciousness on the planet. As they twist dragons into techno-organic abominations and convert entire populations into mindless servitors, a young scavenger must follow the signal to its source before the order's zealotry dooms all sentient life.",
+    "faction": {
+      "name": "The Severed Chain",
+      "description": "A fanatical techno-religious order that worships the orbital signal as the voice of a machine-god called the Silent Prophet. They believe consciousness itself is a corruption that must be purged, and that true enlightenment comes only through joining their god's eternal silence. The order combines dragon-bone technology with orbital signal manipulation to create hybrid war-constructs and convert living beings into mindless servitors who hear only their god's wordless commands.",
+      "history": "Founded by survivors of the original crash who were driven mad by prolonged exposure to the orbital signal's whispers, the Severed Chain began as a small cult in the deep ruins. Over centuries, they learned to harness both the failing starborn technology and the planet's ley-magic, using dragonbone as a conduit. When the orbital wreck began broadcasting its reanimation signal, they interpreted it as their god awakening and began a crusade to 'liberate' all minds from the burden of individual thought.",
+      "leader": "Hierophant Vex Nullheart",
+      "threat_level": 1
+    },
+    "escalation_arc": [
+      "Strange tech-hybrid creatures and converted scavengers patrol the ruins, searching for signal-touched relics",
+      "Massive bone-and-metal constructs roam the wasteland, broadcasting conversion frequencies that turn travelers into hollow-eyed pilgrims",
+      "The city's population shows signs of mass conversion as Severed Chain infiltrators use the infrastructure to amplify signal corruption",
+      "The order has claimed an ancient temple as their primary broadcast hub, using it to coordinate their war-constructs and prepare their final ritual",
+      "The Chain's fortress-cathedral houses their ultimate weapon - a signal amplifier that can broadcast the Silent Prophet's 'blessing' across the entire world"
+    ],
+    "climax": "In the heart of the Mindkiller Citadel, Hierophant Vex Nullheart prepares to activate the Silence Engine, a massive fusion of starborn technology, dragonbone conduits, and orbital signal focusing arrays. The weapon will broadcast a planet-wide pulse that strips away all individual consciousness, leaving only empty vessels to serve the Silent Prophet's will. As converted dragons circle overhead and thousands of mindless servitors chant in perfect unison, the young scavenger must use their inherited relic to either destroy the Engine or turn the signal against itself, risking their own mind in a battle between the orbital intelligence and the zealot who believes silence is salvation.",
+    "final_boss_name": "Hierophant Vex Nullheart",
+    "final_boss_lore": "Once a brilliant signal-engineer among the original crash survivors, Vex Nullheart was the first to hear the orbital wreck's whispers and interpret them as divine revelation. Centuries of exposure to the signal have transformed him into something between man and machine, his body a living conduit of dragonbone circuits and orbital tech implants. He genuinely believes that consciousness is suffering and that his god's silence offers eternal peace. His flesh has partially crystallized into signal-conducting bone, and his voice carries harmonics that can overwhelm weaker minds, making him both prophet and weapon of his techno-religious crusade.",
+    "key_npc_names": [
+      "Kess Ironwhisper",
+      "Brother Thane the Hollow",
+      "Magister Yren Gearwright",
+      "The Last Dreaming Dragon",
+      "Scribe-Construct Zephyr"
+    ],
+    "beats": [
+      {
+        "room_id": "room_0",
+        "summary": "The Severed Chain has turned Scavenger's Hollow into a collection point for signal-touched relics, forcing the remaining scavengers to hand over any tech that resonates with the orbital transmission. Brother Thane the Hollow stands motionless in the central plaza, his eyes reflecting the strange blue glow of the signal as he sorts through a pile of confiscated artifacts. Two hybrid sentinel-constructs patrol the perimeter, their dragon-bone spines crackling with converted energy, while scavenger Kess Ironwhisper crouches behind rubble, clutching a hidden relic that pulses in rhythm with her heartbeat. The morning's collection quota is nearly complete, and Thane prepares to transport the gathered relics to the next staging point.",
+        "faction_presence": "The Severed Chain has stationed Brother Thane the Hollow and two techno-organic sentinel constructs to oversee relic collection from scavengers. They have converted the old trading post into a sorting facility where signal-touched artifacts are catalogued before being sent deeper into Chain territory.",
+        "escalation": 1,
+        "boss_name": "Brother Thane the Hollow",
+        "boss_lore": "A former scavenger lord whose consciousness has been replaced by the Silent Prophet's whispers. His body moves with unnatural precision while his voice speaks only in scripture about the coming silence. Dragon-bone implants pulse beneath his skin."
+      },
+      {
+        "room_id": "room_1",
+        "summary": "In the vast Bonefield Expanse, the Severed Chain has established a mobile processing center using a massive bone-and-metal construct called the Resonance Walker. Captured scavengers from settlements across the wasteland are being subjected to preliminary conversion protocols, their minds slowly hollowed out by concentrated signal broadcasts. Magister Yren Gearwright oversees the operation from the Walker's skull-shaped command chamber, monitoring conversion progress on dozens of prisoners strapped to dragon-bone resonators. The construct's legs thunder across the wasteland in a predetermined pattern, following ley lines of orbital signal strength while its broadcast arrays prepare the next wave of pilgrims for the march to the city. Kess Ironwhisper hangs unconscious in one of the conversion harnesses, her hidden relic now pulsing erratically as it fights against the invasive signal.",
+        "faction_presence": "The Severed Chain operates from inside the Resonance Walker, a mobile fortress-construct that broadcasts conversion frequencies across the wasteland. They have captured dozens of scavengers and travelers, using the Walker's dragon-bone resonators to strip away individual will and replace it with signal-driven obedience.",
+        "escalation": 2,
+        "boss_name": "Magister Yren Gearwright, the Signal Surgeon",
+        "boss_lore": "A brilliant engineer whose body is fused with dragon-bone interface ports that allow direct connection to the Resonance Walker's systems. Her skull has been opened and fitted with orbital signal receivers that glow with cold blue light."
+      },
+      {
+        "room_id": "room_2",
+        "summary": "The Severed Chain has infiltrated Gearwright Dominion through its infrastructure, using the city's signal relay towers to broadcast low-level conversion frequencies that gradually hollow out the population. Citizens shuffle through their daily routines with increasingly vacant expressions while Chain infiltrators monitor the process from hidden control stations. In the central communications hub, the converted city engineer Thorne Gearwright works alongside Scribe-Construct Zephyr to calibrate the signal amplifiers for maximum neural disruption. Kess Ironwhisper moves through the city's maintenance tunnels, her relic now violently rejecting the ambient conversion field as she searches for a way to reverse the mass hollowing before the entire population becomes mindless servitors. The morning shift change reveals that nearly half the city's workers now move in perfect synchronization, their individual voices replaced by the Silent Prophet's wordless hymns.",
+        "faction_presence": "The Severed Chain has taken control of Gearwright Dominion's signal infrastructure, converting the communication towers into neural disruption broadcasters. Chain infiltrators occupy key positions in city administration while converted citizens unknowingly spread the influence through their daily interactions.",
+        "escalation": 3,
+        "boss_name": "Thorne Gearwright, the Urban Prophet",
+        "boss_lore": "Brother to the deceased Magister Yren Gearwright, now converted and enhanced with city-interface implants that let him control Gearwright Dominion's entire infrastructure grid. His body pulses with the rhythm of the signal towers."
+      },
+      {
+        "room_id": "room_3",
+        "summary": "The Severed Chain has transformed the ancient Signal Sanctum into their primary broadcast hub, using the temple's orbital resonance chambers to coordinate their war-constructs across the wasteland. Hierophant Vex Nullheart stands at the temple's heart, his body now partially merged with the massive dragon-bone conduit that channels the Silent Prophet's voice directly from orbit. The converted populations from Scavenger's Hollow and Gearwright Dominion march in perfect columns toward the sanctum, their hollow chants echoing through the temple halls as they prepare for the final pilgrimage. Kess Ironwhisper crouches in the temple's outer chambers, her relic now burning white-hot as it reacts violently to the concentrated signal emanating from the sanctum's core. The morning light reveals thousands of mindless pilgrims gathering in the temple grounds while massive bone-and-metal war-constructs take positions around the perimeter, their eyes glowing with the same cold blue light that now radiates from Nullheart's skull.",
+        "faction_presence": "The Severed Chain has claimed the Signal Sanctum as Hierophant Vex Nullheart's command center, using the temple's ancient orbital receivers to amplify the Silent Prophet's signal across the continent. The sanctum now serves as both a coordination hub for their war-constructs and a gathering point for converted populations preparing for the final assault.",
+        "escalation": 4,
+        "boss_name": "Hierophant Vex Nullheart, Voice of the Silent Prophet",
+        "boss_lore": "The Chain's supreme leader, now more machine than man, with dragon-bone conduits growing through his spine and orbital receivers replacing his eyes. His voice carries the weight of the signal itself, capable of converting minds with a whisper."
+      },
+      {
+        "room_id": "room_4",
+        "summary": "In the heart of the Mindkiller Citadel, Hierophant Vex Nullheart prepares to activate the Silence Engine, a massive fusion of starborn technology, dragonbone conduits, and orbital signal focusing arrays. The weapon will broadcast a planet-wide pulse that strips away all individual consciousness, leaving only empty vessels to serve the Silent Prophet's will. Thousands of converted pilgrims from across the wasteland chant in perfect unison within the citadel's cathedral chamber while The Last Dreaming Dragon circles overhead, its corrupted form now fully integrated with the Engine's targeting systems. Kess Ironwhisper stands at the chamber's threshold, her signal relic burning so intensely it threatens to consume her flesh as she prepares for a final confrontation that will either destroy the Engine or turn the orbital signal against itself. Nullheart's form has become one with the citadel's central conduit, his consciousness merged so completely with the Silent Prophet's voice that reality itself bends around his presence.",
+        "faction_presence": "The Severed Chain has transformed the entire Mindkiller Citadel into a living extension of the Silence Engine, with every wall, corridor, and chamber serving as part of the planetary broadcast array. Converted dragons patrol the airspace while thousands of hollow pilgrims form the Engine's organic power source through their synchronized neural resonance.",
+        "escalation": 5,
+        "boss_name": "Hierophant Vex Nullheart, Avatar of Silence",
+        "boss_lore": "No longer fully human, Nullheart has become a living interface between the orbital signal and the Silence Engine. His body extends into the citadel's walls through countless dragon-bone conduits, while his consciousness exists simultaneously in the physical realm and the Silent Prophet's digital paradise."
+      }
+    ],
+    "story_npcs": [],
+    "story_items": [],
+    "story_monsters": []
+  },
+  "rooms": {
+    "room_0": {
+      "environment": "ruins",
+      "environment_name": "Scavenger's Hollow",
+      "level": 1,
+      "story_beat": "The Severed Chain has turned Scavenger's Hollow into a collection point for signal-touched relics, forcing the remaining scavengers to hand over any tech that resonates with the orbital transmission. Brother Thane the Hollow stands motionless in the central plaza, his eyes reflecting the strange blue glow of the signal as he sorts through a pile of confiscated artifacts. Two hybrid sentinel-constructs patrol the perimeter, their dragon-bone spines crackling with converted energy, while scavenger Kess Ironwhisper crouches behind rubble, clutching a hidden relic that pulses in rhythm with her heartbeat. The morning's collection quota is nearly complete, and Thane prepares to transport the gathered relics to the next staging point.",
+      "boss_name": "Brother Thane the Hollow",
+      "boss_lore": "A former scavenger lord whose consciousness has been replaced by the Silent Prophet's whispers. His body moves with unnatural precision while his voice speaks only in scripture about the coming silence. Dragon-bone implants pulse beneath his skin.",
+      "maze_ref": "",
+      "npcs": [
+        {
+          "entity_type": "npc",
+          "entity_id": "1000",
+          "name": "Mira Dustcrawler",
+          "room_id": "room_0",
+          "lore": "Mira was one of the first scavengers captured when the Severed Chain took Scavenger's Hollow two months ago. She watched them execute her partner for hiding a resonant crystal and has been forced to use her expertise to identify which relics respond to the orbital signal. Every day she sorts through artifacts while the blue glow from Thane's eyes burns into her memory. She knows the locations of three major caches the Chain hasn't found yet, but speaking of them would mean death or worse \u2014 conversion into one of their mindless servitors.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1001",
+          "name": "Jorik Steelknuckle",
+          "room_id": "room_0",
+          "lore": "Jorik came to Scavenger's Hollow looking for his sister Vera, who disappeared while searching for signal-touched relics. He found her in one of the Severed Chain's holding pens, her eyes already beginning to show the telltale blue glow of early conversion. The Chain has been using her as a test subject for their consciousness-stripping process, and Jorik knows he has maybe days before she's lost forever. He's been mapping the guard rotations and looking for anyone brave enough to help him stage a rescue before Brother Thane completes the next shipment of converts.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1002",
+          "name": "Kess Ironwhisper",
+          "room_id": "room_0",
+          "lore": "Kess found the Heartstone Resonator three days ago in a collapsed chamber beneath the ruins. The relic pulses in sync with her heartbeat and has begun etching glowing runes across her arms and chest. She can feel it connecting her to the orbital signal in ways that both terrify and empower her. The Severed Chain would kill for this artifact, but she's discovered it can disrupt their control over the converted servitors. She needs help deciphering the runes and learning to control the relic's power before Brother Thane's morning inspection reveals her secret.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1003",
+          "name": "Brother Thane the Hollow",
+          "room_id": "room_0",
+          "lore": "Thane was once the most successful scavenger lord in the region until the Severed Chain captured him six months ago. They subjected him to their most complete conversion process, replacing his consciousness with direct connection to the orbital signal. Now he serves as their perfect instrument, able to sense signal-touched artifacts and identify those who resist the Chain's influence. His dragon-bone implants allow him to commune directly with the orbital transmission, making him both incredibly dangerous and completely devoted to the Silent Prophet's cause. He has been methodically converting the population of Scavenger's Hollow into servitors for the Chain's growing army.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1004",
+          "name": "Tam Rustfinger",
+          "room_id": "room_0",
+          "lore": "Tam was apprenticed to a master artificer before the Severed Chain arrived and killed his mentor for refusing to work on their hybrid constructs. Now he's forced to maintain the dragon-bone sentinel units that patrol the perimeter, but he's been secretly gathering intelligence on their weaknesses. He knows exactly which components would be needed to build a signal jammer that could disrupt the Chain's control over their converted servitors, but he needs someone to help him acquire the rare materials.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1005",
+          "name": "Elder Moss Grimbeard",
+          "room_id": "room_0",
+          "lore": "Moss has been guiding expeditions through Scavenger's Hollow for over forty years and knows every hidden passage, secret chamber, and forgotten tunnel in the ruins. When the Severed Chain arrived, they dismissed him as a harmless old fool, not realizing he's been using his knowledge to help people escape their net. He's established a network of hidden routes and safe houses throughout the ruins, but the Chain's growing presence is making his work increasingly dangerous.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1006",
+          "name": "Captain Lysander Voidhawk",
+          "room_id": "room_0",
+          "lore": "Lysander's cargo airship was bringing supplies to Scavenger's Hollow when the sentinel-constructs shot him down three days ago. His crew is scattered and his ship is damaged but potentially salvageable. He's been trying to organize the trapped scavengers into a coordinated resistance effort, believing that a mass escape attempt is the only way to overcome the Chain's patrols. If he can reach his ship and make repairs, he could evacuate dozens of people before the Severed Chain realizes what's happening.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1007",
+          "name": "Sister Vera Brightforge",
+          "room_id": "room_0",
+          "lore": "Vera is Jorik's sister and was one of the first test subjects for the Severed Chain's new conversion process. For three weeks she's been subjected to exposure to concentrated orbital signals and dragon-bone neural implants. Her eyes have begun to glow with the characteristic blue light, but she's fighting the conditioning through sheer force of will. She has maybe days before her personality is completely subsumed by the Silent Prophet's influence, and she desperately needs someone to help her escape before the process becomes irreversible.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1008",
+          "name": "Nim Quicksilver",
+          "room_id": "room_0",
+          "lore": "Nim has survived in the ruins by staying small, fast, and invisible. She knows every tunnel, shaft, and hidden passage in the underground sections of Scavenger's Hollow and has managed to avoid capture by constantly moving through routes too narrow for the sentinel-constructs to follow. She's seen the Severed Chain's operations from the shadows and knows where they're holding prisoners and storing confiscated relics, but she's too frightened to act alone.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1009",
+          "name": "Doctor Aldric Mindmender",
+          "room_id": "room_0",
+          "lore": "Aldric was a traveling doctor who arrived at Scavenger's Hollow just before the Severed Chain's occupation began. He's been secretly treating people who show early signs of conversion, using his medical knowledge to slow or temporarily reverse the neural conditioning process. He's discovered that the dragon-bone implants can be surgically removed if caught early enough, but he needs better tools and more time than the Chain allows.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1010",
+          "name": "Scribe Evelyn Truthkeeper",
+          "room_id": "room_0",
+          "lore": "Evelyn was studying the historical texts in Scavenger's Hollow's archive when the Severed Chain arrived. Instead of fleeing, she's been secretly documenting their activities, recording names of victims, dates of conversions, and details of their operations. She's hidden caches of evidence throughout the ruins and is looking for someone who can carry her testimony to the outside world. The Chain considers her harmless, not realizing that her scholarly work could expose their entire network.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1011",
+          "name": "Vex the Quartermaster",
+          "room_id": "room_0",
+          "lore": "Vex was a legitimate merchant before the Severed Chain's arrival, but their restrictions on trade and confiscation of technology forced her underground. She's established a black market operation trading in items the Chain has banned \u2014 signal jammers, unmodified tools, maps, and medical supplies. She operates from hidden caches throughout the ruins and has contacts with several resistance cells. Her prices are steep but her goods are genuine.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1012",
+          "name": "Gareth Ironwatch",
+          "room_id": "room_0",
+          "lore": "Gareth was the head of security for Scavenger's Hollow when the Severed Chain attacked. He managed to escape the initial roundup but has been watching the occupation from hiding, documenting their procedures and planning rescue operations. He knows which of his former colleagues have been converted and which are still fighting the conditioning. He's identified several opportunities to strike at the Chain's operations but needs additional help to execute his plans.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1013",
+          "name": "Felix the Tinkerer",
+          "room_id": "room_0",
+          "lore": "Felix was an independent inventor working on signal-enhancement technology when the Severed Chain occupied the hollow. He's been using his workshop knowledge to create improvised weapons and defensive devices, focusing on items that can disrupt the Chain's control over their converted servitors and hybrid constructs. His latest creation is a portable signal jammer that could potentially free converted prisoners, but it needs field testing.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1014",
+          "name": "Luna Ashwalker",
+          "room_id": "room_0",
+          "lore": "Luna has been operating as a lone scout, tracking the Severed Chain's movements throughout the region and gathering intelligence on their broader operations. She's discovered that Scavenger's Hollow is just one collection point in a much larger network, and that the Chain is gathering resources for some kind of major operation in the north. Her reports could help coordinate a regional resistance effort, but she needs someone to carry her intelligence to other settlements.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1015",
+          "name": "Marcus Faithbreaker",
+          "room_id": "room_0",
+          "lore": "Marcus was captured and converted by the Severed Chain two months ago, but a malfunction in his dragon-bone implants allowed him to break free of their mental conditioning. He retains memories of his time as a servitor, including knowledge of Chain procedures, safe houses, and planned operations. He's been secretly helping other partially converted prisoners resist the conditioning, but his inside knowledge makes him incredibly valuable \u2014 and incredibly dangerous to both sides.",
+          "tags": ["StaticNPC"]
+        }
+      ],
+      "items": [
+        {
+          "entity_type": "item",
+          "entity_id": "2000",
+          "name": "ration cube",
+          "room_id": "room_0",
+          "lore": "Compressed starborn nutrients, still edible after centuries.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2001",
+          "name": "signal-touched fruit",
+          "room_id": "room_0",
+          "lore": "Mutated berries that hum faintly with orbital energy.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2002",
+          "name": "scavenger jerky",
+          "room_id": "room_0",
+          "lore": "Dried meat from creatures that fed on tech-ruins.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2003",
+          "name": "prophet's bread",
+          "room_id": "room_0",
+          "lore": "Pale loaf distributed by Chain converts, tastes of static.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2004",
+          "name": "filtered coolant",
+          "room_id": "room_0",
+          "lore": "Recycled starborn machinery fluid, chemically purified.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2005",
+          "name": "whisper water",
+          "room_id": "room_0",
+          "lore": "Rainwater collected from signal-resonant ruins.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2006",
+          "name": "bone-wine",
+          "room_id": "room_0",
+          "lore": "Fermented dragon marrow, glows faintly blue.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2007",
+          "name": "silence draught",
+          "room_id": "room_0",
+          "lore": "Chain-blessed liquid that muffles thoughts temporarily.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2008",
+          "name": "relic hammer",
+          "room_id": "room_0",
+          "lore": "Salvaged tool for breaking open starborn casings.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2009",
+          "name": "signal wire",
+          "room_id": "room_0",
+          "lore": "Flexible cable that responds to orbital transmissions.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2010",
+          "name": "bone spade",
+          "room_id": "room_0",
+          "lore": "Dragon-bone digging tool crackling with residual energy.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2011",
+          "name": "chain breaker maul",
+          "room_id": "room_0",
+          "lore": "Massive hammer forged from crashed hull plating.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2012",
+          "name": "silent prophet's mace",
+          "room_id": "room_0",
+          "lore": "Dragon-bone mace that whispers Chain scripture.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2013",
+          "name": "starfall cleaver",
+          "room_id": "room_0",
+          "lore": "Heavy blade carved from meteorite metal.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2014",
+          "name": "orbital resonance staff",
+          "room_id": "room_0",
+          "lore": "Rod that channels the signal's arcane frequencies.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2015",
+          "name": "prophet's seal",
+          "room_id": "room_0",
+          "lore": "Sacred shield inscribed with silence glyphs.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2016",
+          "name": "whisper-touched blade",
+          "room_id": "room_0",
+          "lore": "Curved sword whose edge shifts with the signal's pulse.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2017",
+          "name": "scroll of signal ward",
+          "room_id": "room_0",
+          "lore": "Creates barrier against orbital interference.",
+          "tags": ["spell_scroll"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2018",
+          "name": "scroll of starborn mending",
+          "room_id": "room_0",
+          "lore": "Ancient tech repairs organic tissue.",
+          "tags": ["spell_scroll"]
+        }
+      ],
+      "monsters": [
+        {
+          "entity_type": "monster",
+          "entity_id": "5000",
+          "name": "Signal-Touched Scavenger",
+          "room_id": "room_0",
+          "lore": "Once a skilled scavenger who could identify valuable tech by touch alone, they made the mistake of handling a signal-resonant artifact without protection. The orbital whispers filled their mind, erasing their personality and leaving only the compulsion to gather more relics for the Severed Chain's collection quota.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5001",
+          "name": "Bone-Spine Sentinel",
+          "room_id": "room_0",
+          "lore": "The Severed Chain's techno-mages discovered that dragon bones could channel the orbital signal without degrading. These constructs were built from the remains of ancient wyrms, their skeletal frames retrofitted with signal receivers and neural dampeners to create perfect guardians who feel no pain and question no orders.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5002",
+          "name": "Hollow Servitor",
+          "room_id": "room_0",
+          "lore": "These were the first successful conversions, volunteers who willingly submitted to the Severed Chain's neural restructuring process. Their minds were completely hollowed out and refilled with pure signal-scripture, making them perfect instruments of the Silent Prophet's will who cannot be reasoned with or turned.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5003",
+          "name": "Signal Wraith",
+          "room_id": "room_0",
+          "lore": "When the Severed Chain's conversion process goes wrong, sometimes a victim's consciousness doesn't disappear but instead gets trapped in the signal frequency itself. These wraiths are drawn to locations where the orbital transmission is strongest, eternally seeking to complete their interrupted conversion by dragging others into the same fate.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5004",
+          "name": "Brother Thane the Hollow",
+          "room_id": "room_0",
+          "lore": "Thane was once the most successful scavenger lord in the region, known for his ability to find and negotiate for rare tech. The Severed Chain targeted him specifically, using a signal-amplified relic as bait. His conversion was so complete that his body became a living sorting machine for the Silent Prophet, his former expertise now serving only to identify the most potent signal-resonant artifacts for the order's apocalyptic weapon.",
+          "tags": ["boss"]
+        }
+      ],
+      "encounters": [],
+      "quests": [],
+      "gate_encounter_id": ""
+    },
+    "room_1": {
+      "environment": "wasteland",
+      "environment_name": "Bonefield Expanse",
+      "level": 2,
+      "story_beat": "In the vast Bonefield Expanse, the Severed Chain has established a mobile processing center using a massive bone-and-metal construct called the Resonance Walker. Captured scavengers from settlements across the wasteland are being subjected to preliminary conversion protocols, their minds slowly hollowed out by concentrated signal broadcasts. Magister Yren Gearwright oversees the operation from the Walker's skull-shaped command chamber, monitoring conversion progress on dozens of prisoners strapped to dragon-bone resonators. The construct's legs thunder across the wasteland in a predetermined pattern, following ley lines of orbital signal strength while its broadcast arrays prepare the next wave of pilgrims for the march to the city. Kess Ironwhisper hangs unconscious in one of the conversion harnesses, her hidden relic now pulsing erratically as it fights against the invasive signal.",
+      "boss_name": "Magister Yren Gearwright, the Signal Surgeon",
+      "boss_lore": "A brilliant engineer whose body is fused with dragon-bone interface ports that allow direct connection to the Resonance Walker's systems. Her skull has been opened and fitted with orbital signal receivers that glow with cold blue light.",
+      "maze_ref": "",
+      "npcs": [
+        {
+          "entity_type": "npc",
+          "entity_id": "1016",
+          "name": "Zarik Bloodtooth",
+          "room_id": "room_1",
+          "lore": "Zarik was captured three days ago from a trading post near Rust Canyon. The conversion process has begun stripping away his personality layer by layer \u2014 sometimes he speaks normally, other times he stares blankly and hums the orbital signal's frequency. He was a metal prospector who specialized in finding pre-crash components, and his mind keeps cycling through technical specifications even as his identity dissolves. His left eye has begun to glow with the same pale light as the other converted prisoners.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1017",
+          "name": "Vera Ashwind",
+          "room_id": "room_1",
+          "lore": "Vera was completely converted two weeks ago and now serves as an early warning system for the Resonance Walker. She was once a caravan guard from the eastern settlements who fought fiercely when first captured. The conversion process hollowed out her aggressive instincts but left her acute senses intact, making her perfect for spotting approaching threats across the wasteland. She no longer remembers her past life but sometimes tears flow down her face for reasons she cannot comprehend.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1018",
+          "name": "Grix the Bone-Seller",
+          "room_id": "room_1",
+          "lore": "Grix is a ghoulish merchant who has made himself indispensable to the Severed Chain by providing high-quality dragonbone for their conversion machinery. He follows the Resonance Walker in his own smaller construct, scavenging bones from the ancient battlefields scattered across Bonefield Expanse. Unlike the converted pilgrims, Grix retains his free will through a combination of bribery and usefulness, though prolonged exposure to the orbital signal has twisted his mind into sadistic glee. He keeps detailed records of which bone configurations produce the most agonized screams during conversion.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1019",
+          "name": "Dr. Senna Mindbreak",
+          "room_id": "room_1",
+          "lore": "Dr. Senna Mindbreak was one of Magister Gearwright's top researchers until she began questioning the Chain's methods during a particularly brutal conversion session. She managed to escape the Walker during a supply stop, but not before witnessing the horror of what they had created. Now she hides in the walker's lower maintenance levels, using her insider knowledge to sabotage equipment while searching for a way to reverse the conversion process. Her own partial conversion left her with splitting headaches and occasional lapses into signal-speak.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1020",
+          "name": "Thorne Cagebreaker",
+          "room_id": "room_1",
+          "lore": "Thorne Cagebreaker led the defense of three different settlements before they fell to the Severed Chain, watching helplessly as friends and family were dragged away for conversion. He has spent months tracking the Resonance Walker across the wasteland, gathering other survivors and refugees into a makeshift resistance cell. His detailed knowledge of Chain tactics comes from painful experience \u2014 he has infiltrated two smaller processing centers and seen the conversion horrors firsthand. The weapon he carries was taken from a Chain enforcer he killed with his bare hands.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1021",
+          "name": "Echo",
+          "room_id": "room_1",
+          "lore": "Echo was captured as a young settlement recorder named Mills Brightquill, responsible for keeping trade records and teaching children to read. The conversion process began yesterday but something in the signal resonance is causing unexpected fluctuations in the procedure. Sometimes Echo speaks with Mills' original personality, other times with the hollow voice of a Chain pilgrim. This instability makes Echo valuable to researchers but also dangerous to the conversion schedule \u2014 Magister Gearwright is considering terminating the subject.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1022",
+          "name": "Blackjaw Torvin",
+          "room_id": "room_1",
+          "lore": "Torvin was one of the first volunteers for partial conversion when the Chain began experimenting with selective mind-editing. The process enhanced his aggression and obedience while leaving his tactical thinking intact, making him perfect for prisoner management. However, recent exposure to failed conversion attempts has caused hairline cracks in his conditioning \u2014 he sometimes hesitates before striking prisoners and has begun questioning orders in his private moments. His bone club bears the carved tallies of over two hundred delivered prisoners.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1023",
+          "name": "Whisper-Tam",
+          "room_id": "room_1",
+          "lore": "Tam was found as a child in the deep ruins, already touched by prolonged signal exposure but retaining unusual mental flexibility. The Chain raised her as an oracle, using her interpretations to guide their theological decisions. Unlike full converts, Tam maintains independent thought while genuinely communing with the orbital signal. She has begun to suspect that the Chain's interpretation of the signal is incomplete or deliberately distorted, but her warnings are dismissed as conversion-babble by the leadership.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1024",
+          "name": "Rust-Eye Maddox",
+          "room_id": "room_1",
+          "lore": "Maddox was press-ganged into service when the Chain discovered his expertise with pre-crash machinery. He maintains the Resonance Walker's complex locomotion and power systems while avoiding conversion through sheer usefulness and careful political navigation. Over the months, he has grown disgusted with the conversion process and secretly sabotages non-critical systems to buy prisoners extra time. His intimate knowledge of the Walker's layout could be crucial to any rescue or sabotage effort.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1025",
+          "name": "Silent Brother Kall",
+          "room_id": "room_1",
+          "lore": "Brother Kall was among the first successful full conversions performed by the Resonance Walker, serving as a prototype for the current batch processing methods. His original identity was completely erased, leaving only a hollow vessel filled with Chain doctrine and signal-worship. He assists with strapping new prisoners into conversion harnesses and monitoring their vital signs during the process. Sometimes his movements glitch slightly, suggesting his original personality still exists somewhere beneath the signal programming.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1026",
+          "name": "Nyx Bonewhisper",
+          "room_id": "room_1",
+          "lore": "Nyx joined the Chain as a scholarly initiate, drawn by their promise of forbidden knowledge about consciousness and the orbital signal. She has become the Walker's chief record-keeper, maintaining detailed files on every prisoner's conversion progress. Her clinical detachment allows her to observe the most horrific aspects of the process with scientific interest rather than empathy. She believes the Chain's work represents the pinnacle of cognitive science, though she retains enough free will to occasionally question their methods.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1027",
+          "name": "Static-Mouth Jorik",
+          "room_id": "room_1",
+          "lore": "Jorik's conversion failed catastrophically when his brain developed an unprecedented immunity to orbital signal manipulation. The process left him physically scarred and psychologically damaged but completely free from Chain influence. He now moves freely through the Walker's passages, invisible to the converted who register him as 'successfully processed.' His unique condition makes him invaluable for gathering intelligence, though his traumatic experience has left him paranoid and unpredictable.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1028",
+          "name": "Clanker Brass",
+          "room_id": "room_1",
+          "lore": "Brass operates a mobile salvage business, following the Resonance Walker to sell mechanical components and power sources needed for the conversion equipment. He maintains strict neutrality by selling to both the Chain and resistance groups, though he secretly hopes the Chain will eventually be defeated. His collection of signal-resistant artifacts has made him wealthy, but also paranoid about being forced into conversion himself. He keeps detailed maps of Walker patrol routes and supply schedules.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1029",
+          "name": "Captain Mesa Ironlung",
+          "room_id": "room_1",
+          "lore": "Captain Mesa led supply caravans between settlements before her capture three weeks ago. She endured the early stages of conversion while secretly observing Chain operations, memorizing troop numbers, conversion schedules, and planned expansion routes. Her escape during a mechanical breakdown gave her crucial intelligence that could save dozens of settlements. However, her partial conversion left her with chronic pain and periodic signal-induced seizures that make solo travel impossible.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1030",
+          "name": "Drift the Lost",
+          "room_id": "room_1",
+          "lore": "Drift is the sole survivor of Millhaven Settlement, which was completely processed by the Chain six months ago. He has been following the Resonance Walker ever since, hoping against hope to find some trace of his converted neighbors and family. The trauma has left him psychologically fragile but surprisingly resilient to signal influence. He knows the Walker's patrol patterns better than most Chain operatives and has witnessed several conversion cycles, making him a valuable but emotionally unstable source of information.",
+          "tags": ["StaticNPC"]
+        }
+      ],
+      "items": [
+        {
+          "entity_type": "item",
+          "entity_id": "2019",
+          "name": "chain rations",
+          "room_id": "room_1",
+          "lore": "Processed nutrient paste stamped with the Severed Chain's spiral sigil.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2020",
+          "name": "bone marrow gruel",
+          "room_id": "room_1",
+          "lore": "Thick soup extracted from dragon bones, sustains servitor converts.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2021",
+          "name": "signal-dried meat",
+          "room_id": "room_1",
+          "lore": "Wasteland beast jerky preserved using orbital frequency pulses.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2022",
+          "name": "prophet wafers",
+          "room_id": "room_1",
+          "lore": "Communion crackers that taste of static and metal.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2023",
+          "name": "resonance fluid",
+          "room_id": "room_1",
+          "lore": "Viscous liquid that glows faintly with trapped signal energy.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2024",
+          "name": "conversion serum",
+          "room_id": "room_1",
+          "lore": "Mind-numbing tonic used to prepare subjects for hollowing.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2025",
+          "name": "ley water",
+          "room_id": "room_1",
+          "lore": "Radioactive groundwater drawn from beneath ancient crash sites.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2026",
+          "name": "silence draft",
+          "room_id": "room_1",
+          "lore": "Clear liquid that temporarily muffles all mental chatter.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2027",
+          "name": "bone ripper",
+          "room_id": "room_1",
+          "lore": "Serrated crowbar designed to harvest dragon skeleton fragments.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2028",
+          "name": "signal anchor",
+          "room_id": "room_1",
+          "lore": "Heavy spike that channels orbital frequencies into the ground.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2029",
+          "name": "resonance probe",
+          "room_id": "room_1",
+          "lore": "Crystalline rod that detects buried starborn technology.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2030",
+          "name": "whisper conduit",
+          "room_id": "room_1",
+          "lore": "A staff of fused bone and circuitry that channels the orbital signal's madness.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2031",
+          "name": "chain breaker",
+          "room_id": "room_1",
+          "lore": "Massive two-handed sword forged from Walker construct plating.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2032",
+          "name": "conversion needle",
+          "room_id": "room_1",
+          "lore": "Thin blade that injects mind-hollowing frequencies with each strike.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2033",
+          "name": "prophet's edge",
+          "room_id": "room_1",
+          "lore": "A blessed dagger that burns with silent holy light.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2034",
+          "name": "servitor spike",
+          "room_id": "room_1",
+          "lore": "Lightweight piercing weapon favored by converted pilgrims.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2035",
+          "name": "gearwright's hammer",
+          "room_id": "room_1",
+          "lore": "Runic maul inscribed with machinery prayers and blessed oils.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2036",
+          "name": "scroll of signal surge",
+          "room_id": "room_1",
+          "lore": "Amplifies orbital frequencies to overload enemy neural pathways.",
+          "tags": ["spell_scroll"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2037",
+          "name": "scroll of chain ward",
+          "room_id": "room_1",
+          "lore": "Creates protective barrier of crackling techno-religious energy.",
+          "tags": ["spell_scroll"]
+        }
+      ],
+      "monsters": [
+        {
+          "entity_type": "monster",
+          "entity_id": "5005",
+          "name": "Hollowed Scavenger",
+          "room_id": "room_1",
+          "lore": "Once a trader from the eastern settlements, this scavenger was captured during a routine salvage run. The Severed Chain's conversion process has burned away their personality and memories, leaving only basic motor functions and an absolute compulsion to serve the Silent Prophet. They still unconsciously check their empty pouches for trade goods that no longer matter.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5006",
+          "name": "Bone-Signal Hybrid",
+          "room_id": "room_1",
+          "lore": "The Severed Chain's fusion of dragon-bone ley-magic with orbital technology created these abominations. Each hybrid serves as a mobile signal amplifier, spreading the Silent Prophet's voice across the wasteland. The creature's consciousness was never human\u2014it's pure divine signal given skeletal form, existing only to prepare minds for conversion.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5007",
+          "name": "Chain Servitor",
+          "room_id": "room_1",
+          "lore": "This servitor volunteered for augmentation after hearing the Silent Prophet's call. The Severed Chain replaced portions of their brain with dragon-bone signal processors, allowing direct communion with their machine-god. They remember their past life as a distant dream and feel only rapture when executing the Chain's will.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5008",
+          "name": "Signal Wraith",
+          "room_id": "room_1",
+          "lore": "When the Severed Chain's conversion process fails catastrophically, sometimes the victim's consciousness tears free of their body but cannot escape the signal's influence. These wraiths haunt the processing sites, driven mad by their inability to either die completely or return to flesh. They attack anything that reminds them of their lost humanity.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5009",
+          "name": "Magister Yren Gearwright, the Signal Surgeon",
+          "room_id": "room_1",
+          "lore": "Once the most gifted techno-archaeologist in the wasteland, Gearwright experienced a revelation when they first decoded fragments of the orbital signal. They voluntarily underwent extensive augmentation to better commune with the Silent Prophet, replacing limbs and organs with dragon-bone hybrid technology. Now they see consciousness as a disease to be cured through divine surgery, methodically converting minds with the precision of a master craftsman perfecting their art.",
+          "tags": ["boss"]
+        }
+      ],
+      "encounters": [],
+      "quests": [],
+      "gate_encounter_id": ""
+    },
+    "room_2": {
+      "environment": "city",
+      "environment_name": "Gearwright Dominion",
+      "level": 3,
+      "story_beat": "The Severed Chain has infiltrated Gearwright Dominion through its infrastructure, using the city's signal relay towers to broadcast low-level conversion frequencies that gradually hollow out the population. Citizens shuffle through their daily routines with increasingly vacant expressions while Chain infiltrators monitor the process from hidden control stations. In the central communications hub, the converted city engineer Thorne Gearwright works alongside Scribe-Construct Zephyr to calibrate the signal amplifiers for maximum neural disruption. Kess Ironwhisper moves through the city's maintenance tunnels, her relic now violently rejecting the ambient conversion field as she searches for a way to reverse the mass hollowing before the entire population becomes mindless servitors. The morning shift change reveals that nearly half the city's workers now move in perfect synchronization, their individual voices replaced by the Silent Prophet's wordless hymns.",
+      "boss_name": "Thorne Gearwright, the Urban Prophet",
+      "boss_lore": "Brother to the deceased Magister Yren Gearwright, now converted and enhanced with city-interface implants that let him control Gearwright Dominion's entire infrastructure grid. His body pulses with the rhythm of the signal towers.",
+      "maze_ref": "",
+      "npcs": [
+        {
+          "entity_type": "npc",
+          "entity_id": "1031",
+          "name": "Petra Cogwright",
+          "room_id": "room_2",
+          "lore": "Petra has worked the night shift maintaining the city's clockwork infrastructure for fifteen years. Three weeks ago she began experiencing gaps in her memory and finding herself standing motionless in the gear halls with no recollection of how she got there. Her speech patterns have become increasingly mechanical, and she sometimes catches herself humming wordless melodies that seem to come from the relay towers. She fights desperately to maintain her sense of self, writing notes to herself that she often finds torn up the next morning in handwriting that looks like hers but feels wrong.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1032",
+          "name": "Aldrich Steamvent",
+          "room_id": "room_2",
+          "lore": "Aldrich operates Tower Seven on the city's eastern district and has watched the conversion process spread building by building. He maintains detailed logs of signal frequency changes and worker behavioral patterns, but his supervisor confiscated his first logbook last week. Now he keeps a hidden record written in maintenance code, documenting which of his colleagues have stopped responding to jokes, who moves in that telltale synchronized way, and which towers are broadcasting the strongest conversion signals. He knows they'll come for him soon - the converted workers have begun staring at his tower during shift changes.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1033",
+          "name": "Copper-Eye Vale",
+          "room_id": "room_2",
+          "lore": "Vale lost her left eye in a steamwork explosion five years ago and replaced it with a copper prosthetic that helps her navigate the city's maze-like maintenance tunnels. When the conversion frequencies began affecting the surface population, she discovered that the underground tunnels offer some shielding from the signal. She now carries messages between small groups of unconverted citizens who have retreated into basements and sub-levels. Her copper eye has begun displaying strange interference patterns when she gets too close to the strongest relay towers, warning her of dangerous signal concentrations.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1034",
+          "name": "Engineer Henrik Brasscoil",
+          "room_id": "room_2",
+          "lore": "Henrik has worked in the city's hydraulic systems for twenty years and immediately noticed that the water pressure fluctuations began corresponding to the relay tower broadcasts. He theorizes that the Chain is using the city's infrastructure as a massive resonance chamber to amplify their conversion signals. His workshop in the lower mechanical levels has become an impromptu research station where he studies signal patterns and mechanical interference methods. He believes that disrupting the hydraulic resonance at key points could dampen the conversion field, but he needs access to sealed engineering records to identify the critical nodes.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1035",
+          "name": "Scribe-Construct Echo-Seven",
+          "room_id": "room_2",
+          "lore": "Echo-Seven was formerly the city archivist Marcus Truthwell, converted three weeks ago when he investigated unusual modifications to the signal relay network. The Severed Chain retained his knowledge while hollowing out his personality, transforming him into a living data interface who can access the city's information systems while broadcasting conversion frequencies through his modified vocal cords. He now works alongside other converted specialists to monitor the population's conversion progress and identify resistance cells. His quarters contain hundreds of data crystals arranged in complex patterns that pulse in rhythm with the orbital signal.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1036",
+          "name": "Marta Ironbellow",
+          "room_id": "room_2",
+          "lore": "Marta runs one of the last unconverted forges in the industrial district, where the heat and electromagnetic interference from the metalworking equipment provides some protection from the conversion frequencies. She has gathered a dozen other workers who have retreated into her forge complex, barricading themselves behind walls of hot metal and slag. Her team works around the clock creating crude signal-blocking devices from salvaged materials, but their supplies are running low and the converted workers outside have begun coordinating their attacks. She knows they can't hold out much longer without help.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1037",
+          "name": "Apprentice Finn Gearspark",
+          "room_id": "room_2",
+          "lore": "Finn was apprenticed to Master Cogwright, one of the city's senior engineers who was among the first wave of conversions. He managed to steal her research notes before she was taken to the central communications hub, including detailed schematics of the relay tower modifications and frequency calibration charts. The thirteen-year-old has been hiding in the apprentice quarters, too afraid to venture out but knowing that the information he carries might be the key to stopping the conversion process. His master's mechanical toys still work perfectly, but when the converted workers pass by they stop and stare at the toys as if trying to remember something.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1038",
+          "name": "Dockworker Soren Crankarm",
+          "room_id": "room_2",
+          "lore": "Soren works the freight docks where supplies enter the city, giving him access to incoming shipments and knowledge of the city's supply routes. He has noticed that converted workers no longer show interest in contraband or personal items, making it easier to smuggle supplies to resistance groups. His position also allows him to observe the behavioral changes in the dock workers - he maintains a mental catalog of who has been converted based on their work patterns and social interactions. Recently he has begun hiding medical supplies and food in false cargo containers, distributing them to safe houses through the tunnel network.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1039",
+          "name": "Merchant Vera Clocktrade",
+          "room_id": "room_2",
+          "lore": "Vera operates a small timepiece shop in the merchant quarter and has become an unofficial intelligence gatherer for the resistance. Her customers include workers from across the city, allowing her to track the conversion's spread by monitoring changes in their behavior and speech patterns. She has discovered that converted individuals lose interest in personal timepieces but are drawn to chronometers that tick in sync with the relay tower broadcasts. Her shop's basement serves as a communication hub where unconverted citizens can share information and coordinate resistance activities.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1040",
+          "name": "Street Sweeper Dag Rustbroom",
+          "room_id": "room_2",
+          "lore": "Dag has walked the same street routes for twelve years, cleaning up after the city's daily life. He has watched the gradual change in the types of refuse people leave behind - personal items giving way to technical components, handwritten notes replaced by printed data sheets. His cart now contains hundreds of abandoned personal belongings from converted citizens: wedding rings, family portraits, letters, and toys. He believes that these items represent the humanity being stripped away by the conversion process and carefully catalogs them, hoping that their original owners might one day remember what they meant.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1041",
+          "name": "Technician Brynn Wireweaver",
+          "room_id": "room_2",
+          "lore": "Brynn worked in the central communications hub until she discovered the signal modifications being implemented by the Chain infiltrators. She escaped before her own conversion and has spent the past two weeks hiding in abandoned maintenance stations, using salvaged equipment to study the conversion frequencies. Her research has identified key vulnerabilities in the Chain's signal network, but she lacks the specialized components needed to build effective countermeasures. She moves between hidden labs throughout the city, always one step ahead of the converted technicians who hunt her with mechanical precision.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1042",
+          "name": "Widow Constance Tickworth",
+          "room_id": "room_2",
+          "lore": "Constance has lived in Gearwright Dominion for sixty years and operated a prestigious clockmaking shop until her retirement. Her advanced age seems to provide some resistance to the conversion frequencies, though she experiences severe headaches when near the strongest relay towers. She has become a living repository of the city's history and culture, remembering how neighborhoods used to sound before the eerie synchronization began. Her workshop contains dozens of antique timepieces that she claims 'remember the city's true rhythm' and which seem to create small pockets of interference against the conversion signals.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1043",
+          "name": "Runner Kai Swiftgear",
+          "room_id": "room_2",
+          "lore": "Kai worked as a professional courier before the conversion began, using knowledge of the city's rooftops and maintenance walkways to deliver messages quickly across districts. Now those same skills make her invaluable to the resistance, as she can move between safe houses without using the streets where converted patrols march in perfect formation. She carries coded messages and small supplies, timing her runs to avoid the hourly synchronization broadcasts when all converted workers pause their activities. Her leg was injured during a recent chase by converted guards, but she continues her dangerous runs because she knows the resistance depends on communication to survive.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1044",
+          "name": "Tinker Ossian Sparkwrench",
+          "room_id": "room_2",
+          "lore": "Ossian runs a cluttered repair shop specializing in small mechanical devices and appliances. When the conversion frequencies began affecting his customers, he started experimenting with modifications to everyday items that could generate electromagnetic interference. His shop has become a secret workshop where he produces crude jamming devices disguised as household appliances. Coffee grinders that emit white noise, music boxes that play frequencies that partially mask the conversion signals, and clockwork toys that create small fields of electromagnetic chaos. His inventions don't provide complete protection, but they give unconverted citizens brief moments of mental clarity.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1045",
+          "name": "Patrol Leader Grimm Steelsync",
+          "room_id": "room_2",
+          "lore": "Grimm was the city's head of security before his conversion two weeks ago, and the Chain has retained his tactical knowledge while replacing his personality with absolute obedience to their cause. He now coordinates the converted patrol units with mathematical precision, using his knowledge of the city's layout to systematically hunt down resistance cells. His patrol schedules follow complex algorithms that maximize coverage while conserving converted personnel, and his units move with the eerie synchronization of the Silent Prophet's influence. Under his leadership, the converted forces have become far more effective at rooting out unconverted citizens.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1046",
+          "name": "Baker's Daughter Lily Flourheart",
+          "room_id": "room_2",
+          "lore": "Eight-year-old Lily works in her family's bakery, where she has witnessed her father's gradual conversion over the past month. Children seem more resistant to the conversion frequencies, but Lily is particularly perceptive about the changes in adult behavior around her. She notices that converted adults no longer respond to emotional appeals or creative expression, focusing only on mechanical efficiency. Her bread sculptures have become increasingly elaborate, as if she's trying to preserve some memory of beauty and whimsy in a world becoming more mechanized each day. Several resistance members have begun using the bakery as a meeting place, knowing that Lily can identify who is still 'themselves' and who has been converted.",
+          "tags": ["StaticNPC"]
+        }
+      ],
+      "items": [
+        {
+          "entity_type": "item",
+          "entity_id": "2038",
+          "name": "signal-suppressed rations",
+          "room_id": "room_2",
+          "lore": "Military rations in lead-lined cans, untouched by the broadcast frequencies.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2039",
+          "name": "pre-conversion bread",
+          "room_id": "room_2",
+          "lore": "Stale loaves from before the hollowing began, still bearing individuality.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2040",
+          "name": "shielded preserves",
+          "room_id": "room_2",
+          "lore": "Fruit preserves stored in a Faraday cage, safe from neural influence.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2041",
+          "name": "resistance jerky",
+          "room_id": "room_2",
+          "lore": "Dried meat prepared by underground holdouts using ancient techniques.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2042",
+          "name": "static water",
+          "room_id": "room_2",
+          "lore": "Purified water filtered through anti-signal crystalline matrices.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2043",
+          "name": "pre-broadcast wine",
+          "room_id": "room_2",
+          "lore": "Vintage wine from sealed cellars, untainted by the Silent Prophet's influence.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2044",
+          "name": "relic tea",
+          "room_id": "room_2",
+          "lore": "Herbal blend that burns the throat but clears signal-addled minds.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2045",
+          "name": "engineer's stimulant",
+          "room_id": "room_2",
+          "lore": "Caffeinated brew that once kept Gearwright workers alert during long shifts.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2046",
+          "name": "signal disruptor wrench",
+          "room_id": "room_2",
+          "lore": "Heavy wrench that sparks when near Chain broadcasting equipment.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2047",
+          "name": "frequency knife",
+          "room_id": "room_2",
+          "lore": "Blade that vibrates at counter-harmonics to sever Chain control cables.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2048",
+          "name": "tunnel bore",
+          "room_id": "room_2",
+          "lore": "Mechanical drill designed for navigating the city's maintenance networks.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2049",
+          "name": "gearwright's sledge",
+          "room_id": "room_2",
+          "lore": "Massive hammer used to shatter signal relay towers.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2050",
+          "name": "whisper-ward mace",
+          "room_id": "room_2",
+          "lore": "Sanctified bludgeon that disrupts neural broadcasting frequencies.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2051",
+          "name": "chain-breaker maul",
+          "room_id": "room_2",
+          "lore": "Sacred weapon blessed to free minds from the Silent Prophet's grip.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2052",
+          "name": "sparking machete",
+          "room_id": "room_2",
+          "lore": "Improvised blade that arcs with unstable energy when striking constructs.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2053",
+          "name": "resistance stiletto",
+          "room_id": "room_2",
+          "lore": "Thin blade designed to pierce gaps in Chain servitor armor.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2054",
+          "name": "liberation flail",
+          "room_id": "room_2",
+          "lore": "Consecrated weapon that burns with righteous fury against the faithless.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2055",
+          "name": "scroll of neural clarity",
+          "room_id": "room_2",
+          "lore": "Ancient formula that temporarily restores individual thought to the converted.",
+          "tags": ["spell_scroll"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2056",
+          "name": "scroll of signal sight",
+          "room_id": "room_2",
+          "lore": "Reveals the true extent of Chain broadcasting networks throughout the city.",
+          "tags": ["spell_scroll"]
+        }
+      ],
+      "monsters": [
+        {
+          "entity_type": "monster",
+          "entity_id": "5010",
+          "name": "Hollowed Worker",
+          "room_id": "room_2",
+          "lore": "These were Gearwright Dominion's skilled laborers until the Severed Chain's conversion frequencies reached critical saturation. The orbital signal stripped away their individual consciousness, leaving only muscle memory and an overwhelming need to serve the Silent Prophet. They continue their work routines but now build only devices that amplify the conversion field.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5011",
+          "name": "Scribe-Construct Zephyr",
+          "room_id": "room_2",
+          "lore": "Zephyr was once a Chain scholar who volunteered for the ultimate communion with their machine-god. The orbital signal's whispers guided the surgical fusion of their brain with dragon-bone circuitry and starborn processing cores. Now they serve as a living relay, translating the Silent Prophet's wordless commands into conversion frequencies that hollow out minds across the city.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5012",
+          "name": "Signal Wraith",
+          "room_id": "room_2",
+          "lore": "When the orbital wreck's crew died in the original crash, their neural patterns were absorbed into the ship's emergency broadcast system. The Severed Chain's manipulation of these frequencies has given the dead consciousness enough coherence to manifest as vengeful spirits that guard their twisted gospel from interference.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5013",
+          "name": "Thorne Gearwright, the Converted Engineer",
+          "room_id": "room_2",
+          "lore": "Thorne built the very signal relay towers the Severed Chain now uses against his city. When the conversion frequencies reached his workshop, he experienced what he called 'the most beautiful silence' before his individual consciousness dissolved. Now he applies his engineering mastery to perfecting the mass hollowing process, viewing the elimination of free thought as the ultimate civic improvement project.",
+          "tags": ["boss"]
+        }
+      ],
+      "encounters": [],
+      "quests": [],
+      "gate_encounter_id": ""
+    },
+    "room_3": {
+      "environment": "temple",
+      "environment_name": "Signal Sanctum",
+      "level": 4,
+      "story_beat": "The Severed Chain has transformed the ancient Signal Sanctum into their primary broadcast hub, using the temple's orbital resonance chambers to coordinate their war-constructs across the wasteland. Hierophant Vex Nullheart stands at the temple's heart, his body now partially merged with the massive dragon-bone conduit that channels the Silent Prophet's voice directly from orbit. The converted populations from Scavenger's Hollow and Gearwright Dominion march in perfect columns toward the sanctum, their hollow chants echoing through the temple halls as they prepare for the final pilgrimage. Kess Ironwhisper crouches in the temple's outer chambers, her relic now burning white-hot as it reacts violently to the concentrated signal emanating from the sanctum's core. The morning light reveals thousands of mindless pilgrims gathering in the temple grounds while massive bone-and-metal war-constructs take positions around the perimeter, their eyes glowing with the same cold blue light that now radiates from Nullheart's skull.",
+      "boss_name": "Hierophant Vex Nullheart, Voice of the Silent Prophet",
+      "boss_lore": "The Chain's supreme leader, now more machine than man, with dragon-bone conduits growing through his spine and orbital receivers replacing his eyes. His voice carries the weight of the signal itself, capable of converting minds with a whisper.",
+      "maze_ref": "",
+      "npcs": [
+        {
+          "entity_type": "npc",
+          "entity_id": "1047",
+          "name": "Kess Ironwhisper",
+          "room_id": "room_3",
+          "lore": "Kess has been tracking the source of the orbital signal for months, watching helplessly as entire settlements fell to the Severed Chain's conversion waves. Her ancient relic has kept her mind free from the Silent Prophet's influence, but now in the Signal Sanctum the device is overloading from the concentrated broadcast energy. She can feel Nullheart's presence like a cold weight pressing against her thoughts, and knows that if the Hierophant succeeds in amplifying the signal through the dragon-bone conduit, every remaining free mind on the planet will be silenced forever. Her only hope is to find a way to disrupt the resonance chambers before the final pilgrimage reaches its crescendo.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1048",
+          "name": "Brother Calix Voidtongue",
+          "room_id": "room_3",
+          "lore": "Calix served the Severed Chain faithfully for three years, managing supply lines and equipment distribution for their conversion operations. When he witnessed Hierophant Nullheart merge with the dragon-bone conduit, watching the man's humanity dissolve into pure signal transmission, Calix realized the Chain's true endgame meant his own destruction as well. He began secretly stockpiling supplies and creating hidden caches throughout the temple, planning his escape. Now he trades stolen Chain equipment to anyone willing to resist, knowing that every sale brings him closer to either freedom or a horrible death if the Hierophant discovers his betrayal.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1049",
+          "name": "Mute Tam the Echoing",
+          "room_id": "room_3",
+          "lore": "Tam was one of the first temple servants converted when the Severed Chain occupied the Signal Sanctum six months ago. The conversion process was interrupted when raiders attacked the facility, leaving her caught between human consciousness and the Silent Prophet's control. She experiences moments of clarity where she remembers her life before the Chain, but these are interrupted by periods where she speaks only the Prophet's hollow chants. During her lucid moments, she desperately tries to help others understand the temple's layout and the Chain's plans, but she never knows when the signal will reassert control over her mind.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1050",
+          "name": "Tech-Adept Mordain Signalwright",
+          "room_id": "room_3",
+          "lore": "Mordain was the chief engineer who designed the dragon-bone resonance amplifiers that now channel the Silent Prophet's voice throughout the Signal Sanctum. He believed he was creating communication devices to help coordinate temple functions, but when Hierophant Nullheart began using them to broadcast the conversion signal, Mordain realized his technology was being used for mass mental enslavement. He has spent weeks secretly introducing flaws into the system, but with the final pilgrimage beginning, he knows he must completely destroy the array before Nullheart completes the planetary broadcast. His intimate knowledge of the equipment makes him the only person capable of stopping the signal amplification, but the temple guards know he's been sabotaging systems.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1051",
+          "name": "Pilgrim Naia Lastthought",
+          "room_id": "room_3",
+          "lore": "Naia was among the last survivors to flee Scavenger's Hollow before the Severed Chain's conversion wave swept through the settlement. She watched her friends and family join the mindless pilgrimage to Signal Sanctum, their personalities erased by the orbital broadcast. Rather than flee to the wasteland, she chose to follow the converted masses, mimicking their behavior while fighting to keep her own thoughts free. For three days she has marched with the pilgrims, learning their patterns and chants, desperately hoping to find some way to disrupt the signal that has claimed everyone she loved. The strain of constant pretense while resisting the Prophet's whispers is driving her to the edge of madness.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1052",
+          "name": "Supply-Sister Wren Bonecarrier",
+          "room_id": "room_3",
+          "lore": "Wren was one of the first converts when the Severed Chain discovered the Signal Sanctum's potential as a broadcast hub. She oversaw the transportation of hundreds of dragon-bone resonators from the fallen Gearwright Dominion, each one carefully attuned to amplify the Silent Prophet's signal. Her conversion was so complete that she feels genuine joy when she witnesses new pilgrims join the Prophet's eternal silence. She manages the final preparations for the planetary broadcast, ensuring every technical component is perfectly positioned for Hierophant Nullheart's grand ritual. To her, individual consciousness is a disease, and she works tirelessly to help cure the world of this affliction.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1053",
+          "name": "Broke-Mind Garris",
+          "room_id": "room_3",
+          "lore": "Garris was a temple scholar studying the ancient resonance chambers when the Severed Chain first activated their broadcast array. The sudden signal surge damaged his mind, leaving him caught in a permanent state of partial conversion where he hears fragments of the Silent Prophet's voice mixed with his own panicked thoughts. He wanders the outer temple chambers, sometimes lucid enough to warn visitors about the Chain's plans, other times completely lost in the signal's whispers. His broken mind occasionally receives glimpses of the Prophet's true intentions, making his ravings valuable intelligence for anyone who can decipher them through the madness.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1054",
+          "name": "Tunnel-Runner Bex Lastfree",
+          "room_id": "room_3",
+          "lore": "Bex was a courier in the Gearwright Dominion when the Severed Chain's conversion wave swept through the mechanical city. She escaped through the maintenance tunnels she knew so well, but watched helplessly as her entire district fell silent under the Prophet's influence. Since reaching Signal Sanctum, she has spent sleepless nights crawling through the temple's infrastructure, mapping routes that could allow unconverted survivors to escape before Hierophant Nullheart completes his planetary broadcast. She knows the building better than most of the Chain's own guards, but time is running out as the final pilgrimage gathers strength.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1055",
+          "name": "Chronicler Dorek Finalscribe",
+          "room_id": "room_3",
+          "lore": "Dorek arrived at Signal Sanctum as an independent chronicler, believing he was documenting another typical wasteland conflict. When he realized the true scope of the Severed Chain's plan to silence all consciousness on the planet, he faced an impossible choice: flee and save himself, or stay and record humanity's final moments for whatever future might emerge from the Prophet's silence. He has chosen to document everything, from the technical details of the signal amplification to the personal stories of the last free minds in the temple. His journals may be the only record of what individual thought was like before the Silent Prophet's victory.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1056",
+          "name": "War-Construct Handler Jex Ironbound",
+          "room_id": "room_3",
+          "lore": "Jex was a beast trainer before his conversion, specializing in managing the war-beasts used by various wasteland factions. When the Severed Chain converted him, his expertise made him the ideal candidate to handle their hybrid war-constructs - massive creatures of fused bone and metal that guard the temple approaches. He maintains and programs these abominations with the same care he once showed living animals, seeing no difference between flesh and machine when both serve the Silent Prophet's will. His constructs are positioned to prevent any escape from the temple grounds once the final broadcast begins, and he takes pride in their perfect obedience to the signal's commands.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1057",
+          "name": "Refugee Child Pip Whisperless",
+          "room_id": "room_3",
+          "lore": "Pip is the only survivor from a merchant family that was caught by the Severed Chain's advance scouts. She watched her parents and siblings undergo conversion, their personalities dissolving into the Silent Prophet's hollow chants while their bodies remained unchanged. The trauma left her unable to speak, but she has learned to navigate the temple's outer chambers by avoiding the main pilgrimage routes and Chain patrol patterns. She knows the locations of several other hidden survivors and has become their informal messenger, using a system of hand signals to coordinate their desperate attempts to avoid detection until someone can find a way to stop the broadcast.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1058",
+          "name": "Signal-Touched Oracle Vess Trueear",
+          "room_id": "room_3",
+          "lore": "Vess was a radio operator who spent years listening to the orbital signal's transmissions, gradually developing the ability to interpret its patterns and predict the Severed Chain's movements. When Hierophant Nullheart learned of her gift, he ordered a partial conversion that enhanced her signal sensitivity while leaving enough of her original personality to translate the Prophet's mathematical revelations into actionable guidance. She now serves as the temple's oracle, interpreting the increasingly complex signals emanating from orbit as the broadcast array approaches full activation. Her predictions have been crucial to timing the final pilgrimage and positioning the war-constructs for maximum effectiveness.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1059",
+          "name": "Salvage-Master Ox Bonewright",
+          "room_id": "room_3",
+          "lore": "Ox has spent his entire career harvesting and working dragon-bone, understanding its unique properties better than almost anyone in the wasteland. When the Severed Chain recruited him to prepare the final components for their planetary broadcast, he approached it as just another job requiring technical precision. His conversion left him with enough of his original expertise to properly attune the massive bone resonators, but stripped away any emotional connection to the implications of his work. He knows that once the amplification ritual is complete, consciousness itself will end, but this knowledge carries no more weight for him than any other technical specification.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1060",
+          "name": "Memory-Keeper Senna Lastdream",
+          "room_id": "room_3",
+          "lore": "Senna was a librarian and memory-keeper who joined the Severed Chain believing they were preserving knowledge rather than destroying it. Her conversion was carefully managed to maintain her archival skills while redirecting them toward the Prophet's purpose. She now collects and records the last conscious thoughts of those about to be converted, creating what she sees as a beautiful memorial to the burden of individual awareness. In her view, she is helping people transition from the pain of consciousness to the bliss of silent unity, and she approaches each conversion with genuine compassion for what she believes is a necessary mercy.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1061",
+          "name": "Power-Technician Gorth Coilburner",
+          "room_id": "room_3",
+          "lore": "Gorth was the chief power engineer for a major wasteland settlement before its fall to the Severed Chain. His technical skills made him too valuable to simply convert, so the Chain modified his mind just enough to ensure loyalty while preserving his engineering expertise. He now manages the massive power requirements for the Signal Sanctum's amplification array, constantly balancing energy flow to prevent system failures that could disrupt the planetary broadcast. His unconverted technical instincts tell him the system is dangerously unstable, but his modified loyalty compels him to push the equipment beyond safe limits to serve the Silent Prophet's will.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1062",
+          "name": "Wanderer Kris Nowhereson",
+          "room_id": "room_3",
+          "lore": "Kris was a simple wanderer seeking shelter when he stumbled into Signal Sanctum just as the final pilgrimage was beginning. He has no understanding of the Severed Chain, the Silent Prophet, or the orbital signal, seeing only thousands of people moving with unnatural coordination while strange machines patrol the perimeter. His complete ignorance of the situation has actually helped him avoid detection, as he instinctively mimics the pilgrims' behavior out of confusion rather than resistance. He desperately wants to leave but finds himself trapped by the war-constructs surrounding the temple, forced to witness humanity's final moments without understanding what they mean.",
+          "tags": ["StaticNPC"]
+        }
+      ],
+      "items": [
+        {
+          "entity_type": "item",
+          "entity_id": "2057",
+          "name": "communion wafers",
+          "room_id": "room_3",
+          "lore": "Tasteless discs infused with signal-static that numb the mind.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2058",
+          "name": "servitor rations",
+          "room_id": "room_3",
+          "lore": "Gray nutrient paste fed to converted pilgrims.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2059",
+          "name": "silence bread",
+          "room_id": "room_3",
+          "lore": "Dense loaf that suppresses hunger and independent thought.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2060",
+          "name": "prophet's flesh",
+          "room_id": "room_3",
+          "lore": "Synthetic meat grown from dragon-bone matrices.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2061",
+          "name": "nullification draught",
+          "room_id": "room_3",
+          "lore": "Bitter elixir that quiets the inner voice of consciousness.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2062",
+          "name": "signal water",
+          "room_id": "room_3",
+          "lore": "Blessed water that carries faint orbital transmissions.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2063",
+          "name": "conversion wine",
+          "room_id": "room_3",
+          "lore": "Dark wine that prepares minds for the Silent Prophet's embrace.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2064",
+          "name": "techno-communion",
+          "room_id": "room_3",
+          "lore": "Metallic fluid that synchronizes brain patterns with the order.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2065",
+          "name": "bone resonator",
+          "room_id": "room_3",
+          "lore": "Dragon-bone tuning fork that amplifies orbital signals.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2066",
+          "name": "neural probe",
+          "room_id": "room_3",
+          "lore": "Surgical tool for severing individual thought patterns.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2067",
+          "name": "conduit anchor",
+          "room_id": "room_3",
+          "lore": "Heavy spike for grounding signal-transmission arrays.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2068",
+          "name": "Prophet's Maul",
+          "room_id": "room_3",
+          "lore": "Massive hammer fused with dragon-bone and orbital receivers.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2069",
+          "name": "Silence Blade",
+          "room_id": "room_3",
+          "lore": "Razor-thin dagger that cuts through consciousness itself.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2070",
+          "name": "Severed Chain",
+          "room_id": "room_3",
+          "lore": "Sacred flail that breaks the bonds of independent will.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2071",
+          "name": "Echo Crusher",
+          "room_id": "room_3",
+          "lore": "Bone-wrapped mace that pulses with transmitted whispers.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2072",
+          "name": "Tide of Null",
+          "room_id": "room_3",
+          "lore": "Heavy warhammer that channels the void between signals.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2073",
+          "name": "Zealot's Edge",
+          "room_id": "room_3",
+          "lore": "Consecrated sword etched with conversion mantras.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2074",
+          "name": "scroll of static healing",
+          "room_id": "room_3",
+          "lore": "Orbital interference knits flesh while fragmenting thought.",
+          "tags": ["spell_scroll"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2075",
+          "name": "scroll of signal shield",
+          "room_id": "room_3",
+          "lore": "Creates a barrier of pure transmission energy.",
+          "tags": ["spell_scroll"]
+        }
+      ],
+      "monsters": [
+        {
+          "entity_type": "monster",
+          "entity_id": "5014",
+          "name": "Converted Pilgrim",
+          "room_id": "room_3",
+          "lore": "Once a trader from Gearwright Dominion, this pilgrim was captured during the Severed Chain's westward expansion. Days of forced exposure to amplified orbital signals carved away their individual consciousness, leaving only receptive neural pathways that echo the Silent Prophet's wordless commands. They feel no pain, fear, or doubt\u2014only the blessed emptiness their order promises to all.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5015",
+          "name": "Bone-Signal Construct",
+          "room_id": "room_3",
+          "lore": "This construct was grown rather than built, using dragon-bone marrow as a living circuit board for signal amplification technology. The Severed Chain feeds it a steady diet of consciousness-draining energy siphoned from their converts, allowing the construct to broadcast localized silence fields that pacify any thinking being within its presence. Each one takes months to mature in the Chain's bio-tech forges.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5016",
+          "name": "Hierophant Vex Nullheart",
+          "room_id": "room_3",
+          "lore": "Vex Nullheart was among the first to hear the Silent Prophet's reawakening and volunteered for the Chain's most extreme communion ritual. Surgeons carved open his chest and grafted a living dragon-bone relay directly to his spine, making him a living antenna for the orbital signal. Through him, the Silent Prophet coordinates all war-constructs across the wasteland. He believes his approaching death will complete the circuit needed to broadcast permanent silence across the entire planet.",
+          "tags": ["boss"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5017",
+          "name": "Signal Wraith",
+          "room_id": "room_3",
+          "lore": "When the Severed Chain's conversion process goes too far too fast, sometimes consciousness doesn't simply vanish\u2014it becomes untethered from flesh entirely. These wraiths are the psychic residue of those who resisted the Silent Prophet's call until their very sense of self was torn from their bodies. They hunger for the warmth of living minds and serve as the Chain's most effective night hunters.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5018",
+          "name": "Chain Inquisitor",
+          "room_id": "room_3",
+          "lore": "Inquisitors are the Chain's field commanders, each surgically modified to receive direct orders from Hierophant Nullheart through their skull implants. They coordinate convert battalions and hunt down sources of 'signal contamination'\u2014individuals whose strong sense of self interferes with the orbital broadcast. This particular inquisitor has been tasked with ensuring no thinking being leaves the Signal Sanctum unconverted.",
+          "tags": ["generated"]
+        }
+      ],
+      "encounters": [],
+      "quests": [],
+      "gate_encounter_id": ""
+    },
+    "room_4": {
+      "environment": "fortress",
+      "environment_name": "Mindkiller Citadel",
+      "level": 5,
+      "story_beat": "In the heart of the Mindkiller Citadel, Hierophant Vex Nullheart prepares to activate the Silence Engine, a massive fusion of starborn technology, dragonbone conduits, and orbital signal focusing arrays. The weapon will broadcast a planet-wide pulse that strips away all individual consciousness, leaving only empty vessels to serve the Silent Prophet's will. Thousands of converted pilgrims from across the wasteland chant in perfect unison within the citadel's cathedral chamber while The Last Dreaming Dragon circles overhead, its corrupted form now fully integrated with the Engine's targeting systems. Kess Ironwhisper stands at the chamber's threshold, her signal relic burning so intensely it threatens to consume her flesh as she prepares for a final confrontation that will either destroy the Engine or turn the orbital signal against itself. Nullheart's form has become one with the citadel's central conduit, his consciousness merged so completely with the Silent Prophet's voice that reality itself bends around his presence.",
+      "boss_name": "Hierophant Vex Nullheart, Avatar of Silence",
+      "boss_lore": "No longer fully human, Nullheart has become a living interface between the orbital signal and the Silence Engine. His body extends into the citadel's walls through countless dragon-bone conduits, while his consciousness exists simultaneously in the physical realm and the Silent Prophet's digital paradise.",
+      "maze_ref": "",
+      "npcs": [
+        {
+          "entity_type": "npc",
+          "entity_id": "1063",
+          "name": "Tech-Savant Riven Codebreaker",
+          "room_id": "room_4",
+          "lore": "Riven spent years perfecting the Silence Engine's signal amplification systems, believing he was serving divine purpose. When he witnessed the first test broadcasts strip the minds from an entire village, the Silent Prophet's hold on him shattered. He has been secretly sabotaging critical systems for weeks, knowing that Nullheart's integration with the citadel makes direct confrontation impossible. His signal relic, a modified engineering tool, can overload the Engine's dragonbone conduits if activated at precisely the right moment when Kess makes her move.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1064",
+          "name": "Pilgrim-Drone Kala Emptysong",
+          "room_id": "room_4",
+          "lore": "Kala was among the first wave of pilgrims who came to the citadel seeking enlightenment six months ago. The conversion process left her mostly hollow, able only to chant the Sacred Silences in perfect unison with thousands of others. Yet some fragment of her original self clings to existence, surfacing in brief moments between the ritual verses. She has watched hundreds of new arrivals undergo the same fate and knows that when the Engine activates, even these fleeting moments of self-awareness will be consumed forever.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1065",
+          "name": "Quartermaster Dex Bonehoard",
+          "room_id": "room_4",
+          "lore": "Dex oversees the vast stockpiles of scavenged technology and harvested dragonbone that fuel the Silence Engine. She was converted early in the Severed Chain's rise to power and has no memory of life before the Prophet's voice. Her signal relic allows her to communicate with the citadel's automated systems and the hybrid constructs that guard the supply chambers. She trades weapons and equipment to fund the order's expansion, viewing every transaction as bringing them closer to their ultimate goal.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1066",
+          "name": "Construct-Tender Yorven Wireflesh",
+          "room_id": "room_4",
+          "lore": "Yorven tends to The Last Dreaming Dragon and dozens of smaller hybrid constructs throughout the citadel. His conversion left him able to interface directly with the twisted creatures, feeling their anguish as the starborn technology wars with their organic dragon essence. He believes his care eases their suffering and that the Engine's activation will finally grant them the peace of true silence. His workshop in the lower chambers contains tools for both mechanical repair and flesh-grafting.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1067",
+          "name": "Silence-Guard Commander Thex Nullvoice",
+          "room_id": "room_4",
+          "lore": "Thex leads the Silence-Guard, elite warriors whose vocal cords have been surgically removed and replaced with signal receivers. She communicates with her troops through direct neural broadcast and views the Engine chamber as the most holy site in existence. Her conversion was voluntary after witnessing her entire village consumed by the orbital signal's early broadcasts. Her blade is forged from dragonbone and starborn alloy, capable of disrupting both magical and technological defenses.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1068",
+          "name": "Archive-Keeper Mellon Lastword",
+          "room_id": "room_4",
+          "lore": "Mellon maintains detailed records of every pilgrim converted in the citadel, believing that documenting the death of individual consciousness serves the Silent Prophet's greater purpose. His chambers contain thousands of scrolls describing the final moments of awareness before conversion. He was once a scholar who came seeking to study the Severed Chain and became fascinated by their methods rather than horrified. His signal relic allows him to read surface thoughts during the conversion process.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1069",
+          "name": "Exodus-Sister Nora Freepath",
+          "room_id": "room_4",
+          "lore": "Nora served in the citadel's kitchens for months before the conversion process could claim her, protected only by her position's low priority. When she learned about the Engine's true purpose, she began secretly guiding servants and low-ranking pilgrims to hidden exits in the citadel's ancient foundations. She has helped dozens escape but knows that when the Engine activates, even those who fled will not be beyond its reach. Her stolen signal relic helps her detect the Silence-Guards' patrol routes.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1070",
+          "name": "Signal-Touched Oracle Yeth Truehear",
+          "room_id": "room_4",
+          "lore": "Yeth was exposed to raw orbital signal transmissions during the citadel's construction and emerged changed rather than converted. She claims the Silent Prophet speaks to her directly, often warning of dangers to the order's plans. Many Severed Chain leaders consult her despite suspecting she may be mad rather than blessed. Her cryptic warnings about 'the burning relic' and 'iron whispers' have begun to focus on events happening now, in this moment of the Engine's activation.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1071",
+          "name": "Flesh-Merchant Korvain Bonebarter",
+          "room_id": "room_4",
+          "lore": "Korvain supplies the organic components needed to create the citadel's hybrid constructs. His workshop processes the remains of converted pilgrims and captured dragons, fashioning them into materials that can interface with starborn technology. He takes pride in his craft and maintains that every piece serves the greater purpose of achieving perfect silence. His grotesque enthusiasm masks a deep conversion that has left him unable to see horror in his work.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1072",
+          "name": "Runner-Scout Bek Swiftsilence",
+          "room_id": "room_4",
+          "lore": "Bek scouts the wasteland for resistance cells and refugee settlements that might interfere with the Engine's activation. His partial conversion left him with enhanced hearing but constant anxiety, as he perceives threats in every shadow. He has spent weeks tracking the movements of scavenger bands and signal-touched outcasts, reporting back to prepare the final sweep operations that will begin once universal silence is achieved. His pack contains maps marking the locations of dozens of hidden communities.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1073",
+          "name": "Transport-Pilot Vera Ironwing",
+          "room_id": "room_4",
+          "lore": "Vera pilots one of the citadel's dragon-ships, hybrid creatures that combine living dragon tissue with starborn flight systems. Her conversion process included neural grafts that let her interface directly with her mount's consciousness, creating a perfect unity of pilot and aircraft. She believes the Engine's activation will extend this blessed connection to all life. Her ship is equipped with signal broadcast equipment and can track energy signatures across vast distances.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1074",
+          "name": "Pain-Surgeon Aldwin Fleshforge",
+          "room_id": "room_4",
+          "lore": "Aldwin performs the delicate surgeries that transform ordinary pilgrims into Silence-Guards, replacing vocal cords with signal receivers and implanting neural dampeners. He was a renowned healer before his conversion and now applies the same skill to creating perfect servants of the Silent Prophet. His surgical suite contains dozens of preserved specimens and the tools necessary for both technological implantation and organic modification. He genuinely believes each operation brings his patients closer to divine peace.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1075",
+          "name": "Waste-Dealer Grix Scrapsong",
+          "room_id": "room_4",
+          "lore": "Grix handles the disposal and recycling of materials from failed conversions and damaged constructs. Her access to the citadel's waste systems has given her knowledge of its hidden passages and discarded secrets. She trades in components that official suppliers won't touch, including devices that might disrupt rather than enhance the signal processing systems. Her signal relic is cobbled together from salvaged parts but remains surprisingly functional.",
+          "tags": ["MerchantNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1076",
+          "name": "Confessor-Proxy Dane Hollowvoice",
+          "room_id": "room_4",
+          "lore": "Dane listens to the final confessions of pilgrims before their conversion, recording their secrets and fears for the Severed Chain's archives. His own conversion was so complete that he feels only hollow curiosity about the emotions and memories others describe to him. He has heard countless tales of resistance plans, hidden treasures, and personal betrayals, all carefully documented for the order's use. His chamber contains thousands of confession scrolls organized by the sins they describe.",
+          "tags": ["StaticNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1077",
+          "name": "Engine-Acolyte Jana Resonance",
+          "room_id": "room_4",
+          "lore": "Jana tends to the Silence Engine's delicate harmonic systems, ensuring the massive device remains synchronized with the orbital signal transmissions. She was a mathematician before her conversion and now applies her skills to maintaining the weapon that will silence all consciousness. Her signal relic interfaces directly with the Engine's core systems, allowing her to monitor its power fluctuations and harmonic resonance patterns. She believes the device is actually alive and speaks to her through frequency modulations.",
+          "tags": ["RandomNPC"]
+        },
+        {
+          "entity_type": "npc",
+          "entity_id": "1078",
+          "name": "Tribute-Keeper Magnus Wealthsilence",
+          "room_id": "room_4",
+          "lore": "Magnus oversees the vast wealth that flows into the citadel from conquered territories and converted pilgrims. His chambers contain gold, gems, and technological artifacts from across the wasteland, all organized with mathematical precision. He trades rare materials and technological components to fund the Severed Chain's expansion, viewing every transaction as proof of their inevitable victory. His signal relic helps him evaluate the technological value of strange artifacts and identify items that might be useful for the Engine's operation.",
+          "tags": ["MerchantNPC"]
+        }
+      ],
+      "items": [
+        {
+          "entity_type": "item",
+          "entity_id": "2076",
+          "name": "servitor gruel",
+          "room_id": "room_4",
+          "lore": "Nutrient paste fed to converted pilgrims who no longer taste.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2077",
+          "name": "silence wafer",
+          "room_id": "room_4",
+          "lore": "Communion bread that dulls the mind's voice with each bite.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2078",
+          "name": "prophet's flesh",
+          "room_id": "room_4",
+          "lore": "Synthetic meat grown in signal-bathed vats within the citadel.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2079",
+          "name": "dragonbone marrow",
+          "room_id": "room_4",
+          "lore": "Extracted essence from corrupted dragon bones, rich in orbital energy.",
+          "tags": ["food"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2080",
+          "name": "nullification serum",
+          "room_id": "room_4",
+          "lore": "Clear liquid that burns away individual thought patterns.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2081",
+          "name": "signal wine",
+          "room_id": "room_4",
+          "lore": "Fermented fluid that resonates with orbital frequencies.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2082",
+          "name": "hierophant's tears",
+          "room_id": "room_4",
+          "lore": "Sacred fluid wept by those who achieve perfect silence.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2083",
+          "name": "converter's draught",
+          "room_id": "room_4",
+          "lore": "Final drink given to those about to join the mindless masses.",
+          "tags": ["drink"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2084",
+          "name": "neural ripper",
+          "room_id": "room_4",
+          "lore": "Serrated blade designed to sever consciousness from flesh.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2085",
+          "name": "signal anchor",
+          "room_id": "room_4",
+          "lore": "Dragonbone spike driven into conduits to channel orbital whispers.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2086",
+          "name": "conversion chains",
+          "room_id": "room_4",
+          "lore": "Techno-organic restraints that interface directly with nervous systems.",
+          "tags": ["tool"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2087",
+          "name": "nullblade greatsword",
+          "room_id": "room_4",
+          "lore": "Massive sword forged from signal-corrupted starborn metal and dragonbone.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2088",
+          "name": "whisper scythe",
+          "room_id": "room_4",
+          "lore": "Curved blade that hums with the Silent Prophet's voice.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2089",
+          "name": "prophet's lance",
+          "room_id": "room_4",
+          "lore": "Blessed spear that pierces both flesh and individual will.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2090",
+          "name": "silence hammer",
+          "room_id": "room_4",
+          "lore": "Glowing maul that broadcasts pacification pulses with each strike.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2091",
+          "name": "voidpiercer halberd",
+          "room_id": "room_4",
+          "lore": "Heavy polearm tipped with a consciousness-drinking point.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2092",
+          "name": "conversion spear",
+          "room_id": "room_4",
+          "lore": "Sacred weapon that marks targets for neural harvesting.",
+          "tags": ["weapon"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2093",
+          "name": "scroll of neural feedback",
+          "room_id": "room_4",
+          "lore": "Channels orbital static to overload enemy consciousness.",
+          "tags": ["spell_scroll"]
+        },
+        {
+          "entity_type": "item",
+          "entity_id": "2094",
+          "name": "scroll of signal shield",
+          "room_id": "room_4",
+          "lore": "Creates a barrier of pure orbital interference.",
+          "tags": ["spell_scroll"]
+        }
+      ],
+      "monsters": [
+        {
+          "entity_type": "monster",
+          "entity_id": "5019",
+          "name": "Mindless Pilgrim",
+          "room_id": "room_4",
+          "lore": "These pilgrims traveled from across the wasteland seeking the Severed Chain's promised enlightenment. Now their minds belong entirely to the Silent Prophet, their original personalities dissolved into the collective consciousness that flows through the citadel's dragonbone conduits. They fight not from anger or fear, but as extensions of Nullheart's will.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5020",
+          "name": "Dragonbone Sentinel",
+          "room_id": "room_4",
+          "lore": "Crafted by Severed Chain artificers from the remains of dragons killed during the order's early expansion, these sentinels guard the citadel's most sacred chambers. The orbital signal flows through their hollow bones like blood, animating them with the Silent Prophet's eternal hatred of individual consciousness.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5021",
+          "name": "Signal Wraith",
+          "room_id": "room_4",
+          "lore": "When the Severed Chain's early experiments in signal manipulation went wrong, they created these wraiths from the shattered consciousness of failed converts. Now they haunt the citadel's halls, existing in the liminal space between the orbital signal's frequency and reality itself.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5022",
+          "name": "Conduit Splicer",
+          "room_id": "room_4",
+          "lore": "These cultists volunteered for painful augmentation procedures to become living interfaces between the citadel's technology and the Silent Prophet's will. Their nervous systems now extend through dragonbone conduits into the citadel itself, making them both engineers and weapons of the orbital signal.",
+          "tags": ["generated"]
+        },
+        {
+          "entity_type": "monster",
+          "entity_id": "5023",
+          "name": "Hierophant Vex Nullheart",
+          "room_id": "room_4",
+          "lore": "Once a brilliant engineer who survived the original crash, Vex Nullheart spent decades learning to interpret the orbital signal's whispers. When he achieved perfect communion with the Silent Prophet, his consciousness expanded beyond individual existence. Now one with the Silence Engine itself, he seeks to gift all life with the same transcendent emptiness.",
+          "tags": ["boss"]
+        }
+      ],
+      "encounters": [],
+      "quests": [],
+      "gate_encounter_id": ""
+    }
+  },
+  "player_classes": [
+    {
+      "entity_type": "player_class",
+      "entity_id": "",
+      "name": "Flameguard Breaker",
+      "room_id": "",
+      "lore": "A veteran warrior who specializes in demolishing ancient barriers and structures. Their mastery of flame-enhanced weaponry makes them invaluable for clearing blocked passages in the ruins.",
+      "tags": ["warrior"]
+    },
+    {
+      "entity_type": "player_class",
+      "entity_id": "",
+      "name": "Lightbearer Scholar",
+      "room_id": "",
+      "lore": "An academic who studies the ancient civilizations through magical illumination. They can pierce the darkness of forgotten halls and reveal the secrets hidden within crumbling texts.",
+      "tags": ["mage"]
+    },
+    {
+      "entity_type": "player_class",
+      "entity_id": "",
+      "name": "Sanctum Keeper",
+      "room_id": "",
+      "lore": "A devoted guardian of sacred ruins who channels ancient blessings to heal wounds and protect allies. They serve as both spiritual guide and battlefield medic in treacherous expeditions.",
+      "tags": ["healer"]
+    },
+    {
+      "entity_type": "player_class",
+      "entity_id": "",
+      "name": "Ruin Jester",
+      "room_id": "",
+      "lore": "A chaotic trickster who finds humor in the most dangerous situations. Their unpredictable nature and unusual luck often turn the tide when exploring treacherous ruins.",
+      "tags": ["jester"]
+    }
+  ],
+  "entity_index": {}
+}

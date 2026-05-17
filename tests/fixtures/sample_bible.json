@@ -1,0 +1,28 @@
+{
+  "canon_version": "0.1",
+  "seed": "sample",
+  "story": {
+    "title": "",
+    "synopsis": "",
+    "seed": "sample",
+    "factions": [],
+    "primary_antagonist_faction_id": null,
+    "escalation_arc": [],
+    "climax": null,
+    "final_entity_id": null,
+    "final_entity_lore": null,
+    "beats": [],
+    "key_character_names": []
+  },
+  "maps": {},
+  "characters": [],
+  "class_archetypes": {},
+  "dialogues": {},
+  "metadata": {
+    "generated_at": "2026-05-03T18:31:03.612113Z",
+    "model_stack": {},
+    "phases_run": [],
+    "total_cost": 0.0,
+    "total_llm_calls": 0
+  }
+}
