@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from canon.persistence import IDAllocator
 from canon.pipeline.stats import GenerationStats
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ class Phase(Protocol):
 
     name: str
 
-    def run(self, ctx: "PipelineContext") -> None: ...
+    def run(self, ctx: PipelineContext) -> None: ...
 
 
 @dataclass
@@ -49,6 +50,18 @@ class PipelineContext:
     checkers: list[Any] = field(default_factory=list)
     validators: list[Any] = field(default_factory=list)
     artifacts: dict[str, Any] = field(default_factory=dict)
+    id_allocator: IDAllocator = field(
+        default_factory=lambda: IDAllocator(
+            bases={
+                "npc": 1000,
+                "item": 2000,
+                "event": 3000,
+                "quest": 4000,
+                "monster": 5000,
+                "class": 6000,
+            }
+        )
+    )
 
 
 def run_pipeline(

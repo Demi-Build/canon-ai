@@ -1,0 +1,22 @@
+{
+  "llm_backend": "api",
+  "image_backend": "api",
+  "music_backend": "api",
+  "sfx_backend": "elevenlabs",
+  "llm_calls": 211,
+  "input_tokens": 341289,
+  "output_tokens": 231284,
+  "total_tokens": 572573,
+  "images_attempted": 688,
+  "images_succeeded": 688,
+  "music_attempted": 10,
+  "music_succeeded": 10,
+  "sfx_attempted": 28,
+  "sfx_succeeded": 28,
+  "llm_cost_usd": 4.4931,
+  "image_cost_usd": 27.3824,
+  "audio_cost_usd": 1.88,
+  "total_cost_usd": 33.7555,
+  "generation_time_seconds": 5580.2,
+  "generation_time_human": "93m 00s"
+}

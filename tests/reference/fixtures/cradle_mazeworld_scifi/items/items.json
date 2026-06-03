@@ -1,0 +1,1311 @@
+{
+  "2000": {
+    "category": "food",
+    "name": "ration cube",
+    "desc": "Compressed starborn nutrients, still edible after centuries.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 7,
+      "health_value": 1,
+      "uses": 1,
+      "price": 5
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_ration_cube.png"
+  },
+  "2001": {
+    "category": "food",
+    "name": "signal-touched fruit",
+    "desc": "Mutated berries that hum faintly with orbital energy.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 10,
+      "health_value": 6,
+      "uses": 1,
+      "price": 12
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal-touched_fruit.png"
+  },
+  "2002": {
+    "category": "food",
+    "name": "scavenger jerky",
+    "desc": "Dried meat from creatures that fed on tech-ruins.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 8,
+      "health_value": 5,
+      "uses": 1,
+      "price": 15
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scavenger_jerky.png"
+  },
+  "2003": {
+    "category": "food",
+    "name": "prophet's bread",
+    "desc": "Pale loaf distributed by Chain converts, tastes of static.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 12,
+      "health_value": 4,
+      "uses": 1,
+      "price": 8
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_bread.png"
+  },
+  "2004": {
+    "category": "drink",
+    "name": "filtered coolant",
+    "desc": "Recycled starborn machinery fluid, chemically purified.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 5,
+      "health_value": 5,
+      "uses": 1,
+      "price": 10
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_filtered_coolant.png"
+  },
+  "2005": {
+    "category": "drink",
+    "name": "whisper water",
+    "desc": "Rainwater collected from signal-resonant ruins.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 14,
+      "health_value": 1,
+      "uses": 1,
+      "price": 7
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_whisper_water.png"
+  },
+  "2006": {
+    "category": "drink",
+    "name": "bone-wine",
+    "desc": "Fermented dragon marrow, glows faintly blue.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 11,
+      "health_value": 5,
+      "uses": 1,
+      "price": 7
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_bone-wine.png"
+  },
+  "2007": {
+    "category": "drink",
+    "name": "silence draught",
+    "desc": "Chain-blessed liquid that muffles thoughts temporarily.",
+    "room_level": 1,
+    "item_stats": {
+      "stamina_value": 9,
+      "health_value": 5,
+      "uses": 1,
+      "price": 15
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_draught.png"
+  },
+  "2008": {
+    "category": "tool",
+    "name": "relic hammer",
+    "desc": "Salvaged tool for breaking open starborn casings.",
+    "room_level": 1,
+    "item_stats": {
+      "attribute": "bludgeoning",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 23
+    }
+  },
+  "2009": {
+    "category": "tool",
+    "name": "signal wire",
+    "desc": "Flexible cable that responds to orbital transmissions.",
+    "room_level": 1,
+    "item_stats": {
+      "attribute": "climbing",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 12
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal_wire.png"
+  },
+  "2010": {
+    "category": "tool",
+    "name": "bone spade",
+    "desc": "Dragon-bone digging tool crackling with residual energy.",
+    "room_level": 1,
+    "item_stats": {
+      "attribute": "digging",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 18
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_bone_spade.png"
+  },
+  "2011": {
+    "category": "weapon",
+    "name": "chain breaker maul",
+    "desc": "Massive hammer forged from crashed hull plating.",
+    "weapon_type": "heavy",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "STR",
+      "price": 31
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_chain_breaker_maul.png"
+  },
+  "2012": {
+    "category": "weapon",
+    "name": "silent prophet's mace",
+    "desc": "Dragon-bone mace that whispers Chain scripture.",
+    "weapon_type": "sacred",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d6",
+      "stat_modifier": "CON",
+      "price": 25
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silent_prophet's_mace.png"
+  },
+  "2013": {
+    "category": "weapon",
+    "name": "starfall cleaver",
+    "desc": "Heavy blade carved from meteorite metal.",
+    "weapon_type": "heavy",
+    "damage_type": "slashing",
+    "weapon_category": "martial",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "STR",
+      "price": 32
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_starfall_cleaver.png"
+  },
+  "2014": {
+    "category": "weapon",
+    "name": "orbital resonance staff",
+    "desc": "Rod that channels the signal's arcane frequencies.",
+    "weapon_type": "arcane",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d4",
+      "stat_modifier": "INT",
+      "price": 11
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_orbital_resonance_staff.png"
+  },
+  "2015": {
+    "category": "weapon",
+    "name": "prophet's seal",
+    "desc": "Sacred shield inscribed with silence glyphs.",
+    "weapon_type": "sacred",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d6",
+      "stat_modifier": "CON",
+      "price": 22
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_seal.png"
+  },
+  "2016": {
+    "category": "weapon",
+    "name": "whisper-touched blade",
+    "desc": "Curved sword whose edge shifts with the signal's pulse.",
+    "weapon_type": "enchanted",
+    "damage_type": "slashing",
+    "weapon_category": "simple",
+    "room_level": 1,
+    "item_stats": {
+      "attack_dice": "1d4",
+      "stat_modifier": "WIS",
+      "price": 13
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_whisper-touched_blade.png"
+  },
+  "2017": {
+    "category": "spell_scroll",
+    "name": "scroll of signal ward",
+    "desc": "Creates barrier against orbital interference.",
+    "spell_effect": "shield",
+    "room_level": 1,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 25
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_signal_ward.png"
+  },
+  "2018": {
+    "category": "spell_scroll",
+    "name": "scroll of starborn mending",
+    "desc": "Ancient tech repairs organic tissue.",
+    "spell_effect": "heal",
+    "room_level": 1,
+    "item_stats": {
+      "health_value": 25,
+      "stamina_value": 0,
+      "price": 30
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_starborn_mending.png"
+  },
+  "2019": {
+    "category": "food",
+    "name": "chain rations",
+    "desc": "Processed nutrient paste stamped with the Severed Chain's spiral sigil.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 14,
+      "health_value": 6,
+      "uses": 1,
+      "price": 6
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_chain_rations.png"
+  },
+  "2020": {
+    "category": "food",
+    "name": "bone marrow gruel",
+    "desc": "Thick soup extracted from dragon bones, sustains servitor converts.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 6,
+      "uses": 1,
+      "price": 11
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_bone_marrow_gruel.png"
+  },
+  "2021": {
+    "category": "food",
+    "name": "signal-dried meat",
+    "desc": "Wasteland beast jerky preserved using orbital frequency pulses.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 22,
+      "health_value": 2,
+      "uses": 1,
+      "price": 7
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal-dried_meat.png"
+  },
+  "2022": {
+    "category": "food",
+    "name": "prophet wafers",
+    "desc": "Communion crackers that taste of static and metal.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 6,
+      "health_value": 2,
+      "uses": 1,
+      "price": 10
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet_wafers.png"
+  },
+  "2023": {
+    "category": "drink",
+    "name": "resonance fluid",
+    "desc": "Viscous liquid that glows faintly with trapped signal energy.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 3,
+      "health_value": 3,
+      "uses": 1,
+      "price": 10
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_resonance_fluid.png"
+  },
+  "2024": {
+    "category": "drink",
+    "name": "conversion serum",
+    "desc": "Mind-numbing tonic used to prepare subjects for hollowing.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 14,
+      "health_value": 6,
+      "uses": 1,
+      "price": 18
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conversion_serum.png"
+  },
+  "2025": {
+    "category": "drink",
+    "name": "ley water",
+    "desc": "Radioactive groundwater drawn from beneath ancient crash sites.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 1,
+      "uses": 1,
+      "price": 14
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_ley_water.png"
+  },
+  "2026": {
+    "category": "drink",
+    "name": "silence draft",
+    "desc": "Clear liquid that temporarily muffles all mental chatter.",
+    "room_level": 2,
+    "item_stats": {
+      "stamina_value": 19,
+      "health_value": 5,
+      "uses": 1,
+      "price": 6
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_draft.png"
+  },
+  "2027": {
+    "category": "tool",
+    "name": "bone ripper",
+    "desc": "Serrated crowbar designed to harvest dragon skeleton fragments.",
+    "room_level": 2,
+    "item_stats": {
+      "attribute": "cutting",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 29
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_bone_ripper.png"
+  },
+  "2028": {
+    "category": "tool",
+    "name": "signal anchor",
+    "desc": "Heavy spike that channels orbital frequencies into the ground.",
+    "room_level": 2,
+    "item_stats": {
+      "attribute": "bludgeon",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 28
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal_anchor.png"
+  },
+  "2029": {
+    "category": "tool",
+    "name": "resonance probe",
+    "desc": "Crystalline rod that detects buried starborn technology.",
+    "room_level": 2,
+    "item_stats": {
+      "attribute": "digging",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 20
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_resonance_probe.png"
+  },
+  "2030": {
+    "category": "weapon",
+    "name": "whisper conduit",
+    "desc": "A staff of fused bone and circuitry that channels the orbital signal's madness.",
+    "weapon_type": "arcane",
+    "damage_type": "slashing",
+    "weapon_category": "simple",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d6",
+      "stat_modifier": "INT",
+      "price": 25
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_whisper_conduit.png"
+  },
+  "2031": {
+    "category": "weapon",
+    "name": "chain breaker",
+    "desc": "Massive two-handed sword forged from Walker construct plating.",
+    "weapon_type": "heavy",
+    "damage_type": "piercing",
+    "weapon_category": "simple",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "STR",
+      "price": 55
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_chain_breaker.png"
+  },
+  "2032": {
+    "category": "weapon",
+    "name": "conversion needle",
+    "desc": "Thin blade that injects mind-hollowing frequencies with each strike.",
+    "weapon_type": "light",
+    "damage_type": "piercing",
+    "weapon_category": "simple",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "DEX",
+      "price": 33
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conversion_needle.png"
+  },
+  "2033": {
+    "category": "weapon",
+    "name": "prophet's edge",
+    "desc": "A blessed dagger that burns with silent holy light.",
+    "weapon_type": "light",
+    "damage_type": "slashing",
+    "weapon_category": "simple",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "DEX",
+      "price": 37
+    },
+    "magic_element": "light",
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_edge.png"
+  },
+  "2034": {
+    "category": "weapon",
+    "name": "servitor spike",
+    "desc": "Lightweight piercing weapon favored by converted pilgrims.",
+    "weapon_type": "light",
+    "damage_type": "piercing",
+    "weapon_category": "martial",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "DEX",
+      "price": 31
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_servitor_spike.png"
+  },
+  "2035": {
+    "category": "weapon",
+    "name": "gearwright's hammer",
+    "desc": "Runic maul inscribed with machinery prayers and blessed oils.",
+    "weapon_type": "enchanted",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 2,
+    "item_stats": {
+      "attack_dice": "1d6",
+      "stat_modifier": "WIS",
+      "price": 25
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_gearwright's_hammer.png"
+  },
+  "2036": {
+    "category": "spell_scroll",
+    "name": "scroll of signal surge",
+    "desc": "Amplifies orbital frequencies to overload enemy neural pathways.",
+    "spell_effect": "damage",
+    "room_level": 2,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 32
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_signal_surge.png"
+  },
+  "2037": {
+    "category": "spell_scroll",
+    "name": "scroll of chain ward",
+    "desc": "Creates protective barrier of crackling techno-religious energy.",
+    "spell_effect": "shield",
+    "room_level": 2,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 46
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_chain_ward.png"
+  },
+  "2038": {
+    "category": "food",
+    "name": "signal-suppressed rations",
+    "desc": "Military rations in lead-lined cans, untouched by the broadcast frequencies.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 20,
+      "health_value": 6,
+      "uses": 1,
+      "price": 16
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal-suppressed_rations.png"
+  },
+  "2039": {
+    "category": "food",
+    "name": "pre-conversion bread",
+    "desc": "Stale loaves from before the hollowing began, still bearing individuality.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 19,
+      "health_value": 8,
+      "uses": 1,
+      "price": 11
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_pre-conversion_bread.png"
+  },
+  "2040": {
+    "category": "food",
+    "name": "shielded preserves",
+    "desc": "Fruit preserves stored in a Faraday cage, safe from neural influence.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 19,
+      "health_value": 6,
+      "uses": 1,
+      "price": 8
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_shielded_preserves.png"
+  },
+  "2041": {
+    "category": "food",
+    "name": "resistance jerky",
+    "desc": "Dried meat prepared by underground holdouts using ancient techniques.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 22,
+      "health_value": 1,
+      "uses": 1,
+      "price": 9
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_resistance_jerky.png"
+  },
+  "2042": {
+    "category": "drink",
+    "name": "static water",
+    "desc": "Purified water filtered through anti-signal crystalline matrices.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 14,
+      "health_value": 6,
+      "uses": 1,
+      "price": 9
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_static_water.png"
+  },
+  "2043": {
+    "category": "drink",
+    "name": "pre-broadcast wine",
+    "desc": "Vintage wine from sealed cellars, untainted by the Silent Prophet's influence.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 22,
+      "health_value": 8,
+      "uses": 1,
+      "price": 24
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_pre-broadcast_wine.png"
+  },
+  "2044": {
+    "category": "drink",
+    "name": "relic tea",
+    "desc": "Herbal blend that burns the throat but clears signal-addled minds.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 9,
+      "health_value": 4,
+      "uses": 1,
+      "price": 11
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_relic_tea.png"
+  },
+  "2045": {
+    "category": "drink",
+    "name": "engineer's stimulant",
+    "desc": "Caffeinated brew that once kept Gearwright workers alert during long shifts.",
+    "room_level": 3,
+    "item_stats": {
+      "stamina_value": 16,
+      "health_value": 3,
+      "uses": 1,
+      "price": 20
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_engineer's_stimulant.png"
+  },
+  "2046": {
+    "category": "tool",
+    "name": "signal disruptor wrench",
+    "desc": "Heavy wrench that sparks when near Chain broadcasting equipment.",
+    "room_level": 3,
+    "item_stats": {
+      "attribute": "bludgeon",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 32
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal_disruptor_wrench.png"
+  },
+  "2047": {
+    "category": "tool",
+    "name": "frequency knife",
+    "desc": "Blade that vibrates at counter-harmonics to sever Chain control cables.",
+    "room_level": 3,
+    "item_stats": {
+      "attribute": "cutting",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 25
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_frequency_knife.png"
+  },
+  "2048": {
+    "category": "tool",
+    "name": "tunnel bore",
+    "desc": "Mechanical drill designed for navigating the city's maintenance networks.",
+    "room_level": 3,
+    "item_stats": {
+      "attribute": "digging",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 32
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_tunnel_bore.png"
+  },
+  "2049": {
+    "category": "weapon",
+    "name": "gearwright's sledge",
+    "desc": "Massive hammer used to shatter signal relay towers.",
+    "weapon_type": "heavy",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "STR",
+      "price": 70
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_gearwright's_sledge.png"
+  },
+  "2050": {
+    "category": "weapon",
+    "name": "whisper-ward mace",
+    "desc": "Sanctified bludgeon that disrupts neural broadcasting frequencies.",
+    "weapon_type": "enchanted",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d8",
+      "stat_modifier": "WIS",
+      "price": 37
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_whisper-ward_mace.png"
+  },
+  "2051": {
+    "category": "weapon",
+    "name": "chain-breaker maul",
+    "desc": "Sacred weapon blessed to free minds from the Silent Prophet's grip.",
+    "weapon_type": "sacred",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "CON",
+      "price": 48
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_chain-breaker_maul.png"
+  },
+  "2052": {
+    "category": "weapon",
+    "name": "sparking machete",
+    "desc": "Improvised blade that arcs with unstable energy when striking constructs.",
+    "weapon_type": "wild",
+    "damage_type": "slashing",
+    "weapon_category": "martial",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "LUCK",
+      "price": 53
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_sparking_machete.png"
+  },
+  "2053": {
+    "category": "weapon",
+    "name": "resistance stiletto",
+    "desc": "Thin blade designed to pierce gaps in Chain servitor armor.",
+    "weapon_type": "light",
+    "damage_type": "piercing",
+    "weapon_category": "simple",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "DEX",
+      "price": 49
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_resistance_stiletto.png"
+  },
+  "2054": {
+    "category": "weapon",
+    "name": "liberation flail",
+    "desc": "Consecrated weapon that burns with righteous fury against the faithless.",
+    "weapon_type": "sacred",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 3,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "CON",
+      "price": 55
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_liberation_flail.png"
+  },
+  "2055": {
+    "category": "spell_scroll",
+    "name": "scroll of neural clarity",
+    "desc": "Ancient formula that temporarily restores individual thought to the converted.",
+    "spell_effect": "heal",
+    "room_level": 3,
+    "item_stats": {
+      "health_value": 32,
+      "stamina_value": 0,
+      "price": 64
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_neural_clarity.png"
+  },
+  "2056": {
+    "category": "spell_scroll",
+    "name": "scroll of signal sight",
+    "desc": "Reveals the true extent of Chain broadcasting networks throughout the city.",
+    "spell_effect": "reveal",
+    "room_level": 3,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 40
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_signal_sight.png"
+  },
+  "2057": {
+    "category": "food",
+    "name": "communion wafers",
+    "desc": "Tasteless discs infused with signal-static that numb the mind.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 4,
+      "uses": 1,
+      "price": 22
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_communion_wafers.png"
+  },
+  "2058": {
+    "category": "food",
+    "name": "servitor rations",
+    "desc": "Gray nutrient paste fed to converted pilgrims.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 28,
+      "health_value": 2,
+      "uses": 1,
+      "price": 28
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_servitor_rations.png"
+  },
+  "2059": {
+    "category": "food",
+    "name": "silence bread",
+    "desc": "Dense loaf that suppresses hunger and independent thought.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 6,
+      "uses": 1,
+      "price": 18
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_bread.png"
+  },
+  "2060": {
+    "category": "food",
+    "name": "prophet's flesh",
+    "desc": "Synthetic meat grown from dragon-bone matrices.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 2,
+      "uses": 1,
+      "price": 28
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_flesh.png"
+  },
+  "2061": {
+    "category": "drink",
+    "name": "nullification draught",
+    "desc": "Bitter elixir that quiets the inner voice of consciousness.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 4,
+      "uses": 1,
+      "price": 16
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_nullification_draught.png"
+  },
+  "2062": {
+    "category": "drink",
+    "name": "signal water",
+    "desc": "Blessed water that carries faint orbital transmissions.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 20,
+      "health_value": 6,
+      "uses": 1,
+      "price": 24
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal_water.png"
+  },
+  "2063": {
+    "category": "drink",
+    "name": "conversion wine",
+    "desc": "Dark wine that prepares minds for the Silent Prophet's embrace.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 26,
+      "health_value": 2,
+      "uses": 1,
+      "price": 18
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conversion_wine.png"
+  },
+  "2064": {
+    "category": "drink",
+    "name": "techno-communion",
+    "desc": "Metallic fluid that synchronizes brain patterns with the order.",
+    "room_level": 4,
+    "item_stats": {
+      "stamina_value": 32,
+      "health_value": 8,
+      "uses": 1,
+      "price": 24
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_techno-communion.png"
+  },
+  "2065": {
+    "category": "tool",
+    "name": "bone resonator",
+    "desc": "Dragon-bone tuning fork that amplifies orbital signals.",
+    "room_level": 4,
+    "item_stats": {
+      "attribute": "bludgeon",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 40
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_bone_resonator.png"
+  },
+  "2066": {
+    "category": "tool",
+    "name": "neural probe",
+    "desc": "Surgical tool for severing individual thought patterns.",
+    "room_level": 4,
+    "item_stats": {
+      "attribute": "cutting",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 34
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_neural_probe.png"
+  },
+  "2067": {
+    "category": "tool",
+    "name": "conduit anchor",
+    "desc": "Heavy spike for grounding signal-transmission arrays.",
+    "room_level": 4,
+    "item_stats": {
+      "attribute": "digging",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 36
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conduit_anchor.png"
+  },
+  "2068": {
+    "category": "weapon",
+    "name": "Prophet's Maul",
+    "desc": "Massive hammer fused with dragon-bone and orbital receivers.",
+    "weapon_type": "heavy",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "2d6",
+      "stat_modifier": "STR",
+      "price": 24
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_maul.png"
+  },
+  "2069": {
+    "category": "weapon",
+    "name": "Silence Blade",
+    "desc": "Razor-thin dagger that cuts through consciousness itself.",
+    "weapon_type": "light",
+    "damage_type": "slashing",
+    "weapon_category": "martial",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "DEX",
+      "price": 67
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_blade.png"
+  },
+  "2070": {
+    "category": "weapon",
+    "name": "Severed Chain",
+    "desc": "Sacred flail that breaks the bonds of independent will.",
+    "weapon_type": "sacred",
+    "damage_type": "slashing",
+    "weapon_category": "simple",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "CON",
+      "price": 70
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_severed_chain.png"
+  },
+  "2071": {
+    "category": "weapon",
+    "name": "Echo Crusher",
+    "desc": "Bone-wrapped mace that pulses with transmitted whispers.",
+    "weapon_type": "enchanted",
+    "damage_type": "bludgeoning",
+    "weapon_category": "martial",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "1d10",
+      "stat_modifier": "WIS",
+      "price": 42
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_echo_crusher.png"
+  },
+  "2072": {
+    "category": "weapon",
+    "name": "Tide of Null",
+    "desc": "Heavy warhammer that channels the void between signals.",
+    "weapon_type": "heavy",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "2d6",
+      "stat_modifier": "STR",
+      "price": 15
+    },
+    "magic_element": "water",
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_tide_of_null.png"
+  },
+  "2073": {
+    "category": "weapon",
+    "name": "Zealot's Edge",
+    "desc": "Consecrated sword etched with conversion mantras.",
+    "weapon_type": "sacred",
+    "damage_type": "slashing",
+    "weapon_category": "martial",
+    "room_level": 4,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "CON",
+      "price": 65
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_zealot's_edge.png"
+  },
+  "2074": {
+    "category": "spell_scroll",
+    "name": "scroll of static healing",
+    "desc": "Orbital interference knits flesh while fragmenting thought.",
+    "spell_effect": "heal",
+    "room_level": 4,
+    "item_stats": {
+      "health_value": 37,
+      "stamina_value": 0,
+      "price": 54
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_static_healing.png"
+  },
+  "2075": {
+    "category": "spell_scroll",
+    "name": "scroll of signal shield",
+    "desc": "Creates a barrier of pure transmission energy.",
+    "spell_effect": "shield",
+    "room_level": 4,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 76
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_signal_shield.png"
+  },
+  "2076": {
+    "category": "food",
+    "name": "servitor gruel",
+    "desc": "Nutrient paste fed to converted pilgrims who no longer taste.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 8,
+      "uses": 1,
+      "price": 20
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_servitor_gruel.png"
+  },
+  "2077": {
+    "category": "food",
+    "name": "silence wafer",
+    "desc": "Communion bread that dulls the mind's voice with each bite.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 14,
+      "health_value": 10,
+      "uses": 1,
+      "price": 20
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_wafer.png"
+  },
+  "2078": {
+    "category": "food",
+    "name": "prophet's flesh",
+    "desc": "Synthetic meat grown in signal-bathed vats within the citadel.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 16,
+      "health_value": 10,
+      "uses": 1,
+      "price": 24
+    }
+  },
+  "2079": {
+    "category": "food",
+    "name": "dragonbone marrow",
+    "desc": "Extracted essence from corrupted dragon bones, rich in orbital energy.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 10,
+      "uses": 1,
+      "price": 12
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_dragonbone_marrow.png"
+  },
+  "2080": {
+    "category": "drink",
+    "name": "nullification serum",
+    "desc": "Clear liquid that burns away individual thought patterns.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 18,
+      "health_value": 6,
+      "uses": 1,
+      "price": 30
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_nullification_serum.png"
+  },
+  "2081": {
+    "category": "drink",
+    "name": "signal wine",
+    "desc": "Fermented fluid that resonates with orbital frequencies.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 36,
+      "health_value": 8,
+      "uses": 1,
+      "price": 30
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_signal_wine.png"
+  },
+  "2082": {
+    "category": "drink",
+    "name": "hierophant's tears",
+    "desc": "Sacred fluid wept by those who achieve perfect silence.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 30,
+      "health_value": 6,
+      "uses": 1,
+      "price": 14
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_hierophant's_tears.png"
+  },
+  "2083": {
+    "category": "drink",
+    "name": "converter's draught",
+    "desc": "Final drink given to those about to join the mindless masses.",
+    "room_level": 5,
+    "item_stats": {
+      "stamina_value": 16,
+      "health_value": 2,
+      "uses": 1,
+      "price": 30
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_converter's_draught.png"
+  },
+  "2084": {
+    "category": "tool",
+    "name": "neural ripper",
+    "desc": "Serrated blade designed to sever consciousness from flesh.",
+    "room_level": 5,
+    "item_stats": {
+      "attribute": "cutting",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 36
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_neural_ripper.png"
+  },
+  "2085": {
+    "category": "tool",
+    "name": "signal anchor",
+    "desc": "Dragonbone spike driven into conduits to channel orbital whispers.",
+    "room_level": 5,
+    "item_stats": {
+      "attribute": "digging",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 44
+    }
+  },
+  "2086": {
+    "category": "tool",
+    "name": "conversion chains",
+    "desc": "Techno-organic restraints that interface directly with nervous systems.",
+    "room_level": 5,
+    "item_stats": {
+      "attribute": "climbing",
+      "stamina_value": -5,
+      "health_value": 0,
+      "uses": 3,
+      "price": 26
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conversion_chains.png"
+  },
+  "2087": {
+    "category": "weapon",
+    "name": "nullblade greatsword",
+    "desc": "Massive sword forged from signal-corrupted starborn metal and dragonbone.",
+    "weapon_type": "heavy",
+    "damage_type": "piercing",
+    "weapon_category": "simple",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "2d8",
+      "stat_modifier": "STR",
+      "price": 10
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_nullblade_greatsword.png"
+  },
+  "2088": {
+    "category": "weapon",
+    "name": "whisper scythe",
+    "desc": "Curved blade that hums with the Silent Prophet's voice.",
+    "weapon_type": "arcane",
+    "damage_type": "slashing",
+    "weapon_category": "simple",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "INT",
+      "price": 60
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_whisper_scythe.png"
+  },
+  "2089": {
+    "category": "weapon",
+    "name": "prophet's lance",
+    "desc": "Blessed spear that pierces both flesh and individual will.",
+    "weapon_type": "sacred",
+    "damage_type": "piercing",
+    "weapon_category": "martial",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "2d6",
+      "stat_modifier": "CON",
+      "price": 13
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_prophet's_lance.png"
+  },
+  "2090": {
+    "category": "weapon",
+    "name": "silence hammer",
+    "desc": "Glowing maul that broadcasts pacification pulses with each strike.",
+    "weapon_type": "arcane",
+    "damage_type": "bludgeoning",
+    "weapon_category": "simple",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "1d12",
+      "stat_modifier": "INT",
+      "price": 63
+    },
+    "magic_element": "light",
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_silence_hammer.png"
+  },
+  "2091": {
+    "category": "weapon",
+    "name": "voidpiercer halberd",
+    "desc": "Heavy polearm tipped with a consciousness-drinking point.",
+    "weapon_type": "heavy",
+    "damage_type": "piercing",
+    "weapon_category": "martial",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "2d8",
+      "stat_modifier": "STR",
+      "price": 12
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_voidpiercer_halberd.png"
+  },
+  "2092": {
+    "category": "weapon",
+    "name": "conversion spear",
+    "desc": "Sacred weapon that marks targets for neural harvesting.",
+    "weapon_type": "sacred",
+    "damage_type": "piercing",
+    "weapon_category": "simple",
+    "room_level": 5,
+    "item_stats": {
+      "attack_dice": "2d6",
+      "stat_modifier": "CON",
+      "price": 14
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_conversion_spear.png"
+  },
+  "2093": {
+    "category": "spell_scroll",
+    "name": "scroll of neural feedback",
+    "desc": "Channels orbital static to overload enemy consciousness.",
+    "spell_effect": "damage",
+    "room_level": 5,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 78
+    },
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/items/item_scroll_of_neural_feedback.png"
+  },
+  "2094": {
+    "category": "spell_scroll",
+    "name": "scroll of signal shield",
+    "desc": "Creates a barrier of pure orbital interference.",
+    "spell_effect": "shield",
+    "room_level": 5,
+    "item_stats": {
+      "health_value": 0,
+      "stamina_value": 0,
+      "price": 76
+    }
+  }
+}

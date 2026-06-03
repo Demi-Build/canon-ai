@@ -8,7 +8,6 @@ from canon.pipeline.retry import retry_with_feedback
 from canon.pipeline.runner import Phase, PipelineContext, run_phase, run_pipeline
 from canon.pipeline.stats import GenerationStats
 
-
 # --- Minimal test fixtures ---
 
 
@@ -257,3 +256,83 @@ class TestGenerationStats:
         d = stats.to_dict()
         assert d["llm_calls"] == 1
         assert "test" in d["by_phase"]
+
+    # -----------------------------------------------------------------------
+    # New v0.2 tests
+    # -----------------------------------------------------------------------
+
+    def test_total_cost_usd_is_sum_of_costs(self):
+        """total_cost_usd = llm_cost_usd + image_cost_usd + audio_cost_usd."""
+        stats = GenerationStats()
+        stats.llm_cost_usd = 4.49
+        stats.image_cost_usd = 27.38
+        stats.audio_cost_usd = 1.88
+        assert stats.total_cost_usd == pytest.approx(33.75)
+
+    def test_generation_time_human_formats_correctly(self):
+        """93 minutes 0 seconds -> '93m 00s'."""
+        stats = GenerationStats()
+        stats.generation_time_seconds = 5580.0
+        assert stats.generation_time_human == "93m 00s"
+
+    def test_generation_time_human_minutes_and_seconds(self):
+        """2 minutes 5 seconds -> '2m 05s'."""
+        stats = GenerationStats()
+        stats.generation_time_seconds = 125.0
+        assert stats.generation_time_human == "2m 05s"
+
+    def test_to_dict_includes_v0_2_keys(self):
+        """to_dict() includes all v0.2 keys for mazeworld compatibility."""
+        stats = GenerationStats()
+        d = stats.to_dict()
+        v0_2_keys = [
+            "llm_backend",
+            "image_backend",
+            "music_backend",
+            "sfx_backend",
+            "total_tokens",
+            "images_attempted",
+            "images_succeeded",
+            "music_attempted",
+            "music_succeeded",
+            "sfx_attempted",
+            "sfx_succeeded",
+            "llm_cost_usd",
+            "image_cost_usd",
+            "audio_cost_usd",
+            "total_cost_usd",
+            "generation_time_seconds",
+            "generation_time_human",
+        ]
+        for key in v0_2_keys:
+            assert key in d, f"Missing key in to_dict(): {key!r}"
+
+    def test_record_call_increments_llm_cost_usd(self):
+        """record_call() increments llm_cost_usd alongside total_cost."""
+        stats = GenerationStats()
+        stats.record_call("story", cost=0.05)
+        stats.record_call("story", cost=0.10)
+        assert stats.llm_cost_usd == pytest.approx(0.15)
+        assert stats.total_cost == pytest.approx(0.15)
+
+    def test_total_tokens_property(self):
+        """total_tokens == total_input_tokens + total_output_tokens."""
+        stats = GenerationStats()
+        stats.record_call("story", input_tokens=100, output_tokens=50)
+        assert stats.total_tokens == 150
+
+    def test_new_fields_start_at_zero_or_empty(self):
+        """All new v0.2 fields have safe zero/empty defaults."""
+        stats = GenerationStats()
+        assert stats.llm_backend == ""
+        assert stats.image_backend == ""
+        assert stats.music_backend == ""
+        assert stats.sfx_backend == ""
+        assert stats.music_attempted == 0
+        assert stats.music_succeeded == 0
+        assert stats.sfx_attempted == 0
+        assert stats.sfx_succeeded == 0
+        assert stats.llm_cost_usd == 0.0
+        assert stats.image_cost_usd == 0.0
+        assert stats.audio_cost_usd == 0.0
+        assert stats.generation_time_seconds == 0.0

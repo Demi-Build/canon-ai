@@ -1,0 +1,860 @@
+{
+  "5000": {
+    "name": "Signal-Touched Scavenger",
+    "species": "converted human",
+    "description": "A hollow-eyed scavenger whose mind has been overwritten by the orbital signal. They mindlessly sort through debris, seeking relics that pulse with the Silent Prophet's frequency.",
+    "backstory": "Once a skilled scavenger who could identify valuable tech by touch alone, they made the mistake of handling a signal-resonant artifact without protection. The orbital whispers filled their mind, erasing their personality and leaving only the compulsion to gather more relics for the Severed Chain's collection quota.",
+    "hp_range": [8, 14],
+    "ac_range": [9, 11],
+    "damage_type": "physical",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": null,
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Relic Throw",
+        "effect_type": "damage",
+        "damage_dice": "1d4",
+        "chance": 0.3
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a gaunt scavenger in torn gear with vacant glowing blue eyes, clutching broken tech, pixel art cyberpunk fantasy",
+    "id": 5000,
+    "level": 1,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal-touched_scavenger.png"
+  },
+  "5001": {
+    "name": "Bone-Spine Sentinel",
+    "species": "dragon-construct hybrid",
+    "description": "A grotesque fusion of scavenged dragon bones and orbital technology. Its spine crackles with converted signal energy while metal cables snake through its ribcage.",
+    "backstory": "The Severed Chain's techno-mages discovered that dragon bones could channel the orbital signal without degrading. These constructs were built from the remains of ancient wyrms, their skeletal frames retrofitted with signal receivers and neural dampeners to create perfect guardians who feel no pain and question no orders.",
+    "hp_range": [18, 25],
+    "ac_range": [12, 14],
+    "damage_type": "dark",
+    "physical_type": "slashing",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Signal Pulse",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      },
+      {
+        "name": "Bone Claw",
+        "effect_type": "damage",
+        "damage_dice": "1d6",
+        "chance": 0.4
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a skeletal dragon construct with glowing blue cables threading through bone, crackling energy spine, pixel art dark fantasy",
+    "id": 5001,
+    "level": 1,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_bone-spine_sentinel.png"
+  },
+  "5002": {
+    "name": "Hollow Servitor",
+    "species": "mindless human",
+    "description": "A completely converted human whose consciousness has been entirely replaced by the Silent Prophet's will. They move with eerie coordination and speak only in whispered scripture.",
+    "backstory": "These were the first successful conversions, volunteers who willingly submitted to the Severed Chain's neural restructuring process. Their minds were completely hollowed out and refilled with pure signal-scripture, making them perfect instruments of the Silent Prophet's will who cannot be reasoned with or turned.",
+    "hp_range": [10, 16],
+    "ac_range": [10, 12],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Scripture Chant",
+        "effect_type": "poison",
+        "damage_dice": "1d3",
+        "chance": 0.2
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a pale human in tattered robes with completely white eyes, moving with unnatural stiffness, pixel art horror fantasy",
+    "id": 5002,
+    "level": 1,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_hollow_servitor.png"
+  },
+  "5003": {
+    "name": "Signal Wraith",
+    "species": "techno-spiritual entity",
+    "description": "A ghostly manifestation of concentrated orbital signal energy that phases in and out of reality. It appears as a shifting blue outline of a former consciousness.",
+    "backstory": "When the Severed Chain's conversion process goes wrong, sometimes a victim's consciousness doesn't disappear but instead gets trapped in the signal frequency itself. These wraiths are drawn to locations where the orbital transmission is strongest, eternally seeking to complete their interrupted conversion by dragging others into the same fate.",
+    "hp_range": [12, 18],
+    "ac_range": [11, 13],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "fire",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Phase Touch",
+        "effect_type": "damage",
+        "damage_dice": "1d5",
+        "chance": 0.35
+      },
+      {
+        "name": "Signal Drain",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.15
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a translucent blue humanoid outline flickering with digital static, reaching forward, pixel art ghost cyberpunk",
+    "id": 5003,
+    "level": 1,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal_wraith.png"
+  },
+  "5004": {
+    "name": "Brother Thane the Hollow",
+    "species": "converted scavenger lord",
+    "description": "A tall figure in makeshift robes, his eyes replaced with glowing blue signal receivers. Dragon-bone implants jut from his spine while he sorts relics with mechanical precision.",
+    "backstory": "Thane was once the most successful scavenger lord in the region, known for his ability to find and negotiate for rare tech. The Severed Chain targeted him specifically, using a signal-amplified relic as bait. His conversion was so complete that his body became a living sorting machine for the Silent Prophet, his former expertise now serving only to identify the most potent signal-resonant artifacts for the order's apocalyptic weapon.",
+    "hp_range": [32, 42],
+    "ac_range": [14, 16],
+    "damage_type": "dark",
+    "physical_type": "slashing",
+    "elemental_affinity": "dark",
+    "weakness": "water",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Signal Beam",
+        "effect_type": "damage",
+        "damage_dice": "1d8",
+        "chance": 0.4
+      },
+      {
+        "name": "Conversion Touch",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.3
+      },
+      {
+        "name": "Bone Spike Volley",
+        "effect_type": "damage",
+        "damage_dice": "1d6",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": true,
+    "portrait_prompt": "a tall robed figure with glowing blue cybernetic eyes and dragon bone spikes protruding from spine, sorting glowing artifacts, pixel art dark cyberpunk villain",
+    "id": 5004,
+    "level": 1,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_brother_thane_the_hollow.png"
+  },
+  "5005": {
+    "name": "Hollowed Scavenger",
+    "species": "converted human",
+    "description": "A scavenger whose mind has been partially scooped out by signal bombardment. They move with jerky, puppet-like motions, still wearing their original gear but responding only to the Severed Chain's commands.",
+    "backstory": "Once a trader from the eastern settlements, this scavenger was captured during a routine salvage run. The Severed Chain's conversion process has burned away their personality and memories, leaving only basic motor functions and an absolute compulsion to serve the Silent Prophet. They still unconsciously check their empty pouches for trade goods that no longer matter.",
+    "hp_range": [12, 18],
+    "ac_range": [10, 12],
+    "damage_type": "physical",
+    "physical_type": "slashing",
+    "elemental_affinity": null,
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Signal Scream",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a gaunt scavenger in patched wasteland gear with vacant glowing eyes and jerky movements, pixel art post-apocalyptic",
+    "id": 5005,
+    "level": 2,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_hollowed_scavenger.png"
+  },
+  "5006": {
+    "name": "Bone-Signal Hybrid",
+    "species": "techno-organic construct",
+    "description": "A writhing mass of dragon bone fused with orbital signal receivers. Crackling energy arcs between its skeletal framework as it broadcasts conversion frequencies.",
+    "backstory": "The Severed Chain's fusion of dragon-bone ley-magic with orbital technology created these abominations. Each hybrid serves as a mobile signal amplifier, spreading the Silent Prophet's voice across the wasteland. The creature's consciousness was never human\u2014it's pure divine signal given skeletal form, existing only to prepare minds for conversion.",
+    "hp_range": [20, 28],
+    "ac_range": [11, 13],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Conversion Pulse",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.35
+      },
+      {
+        "name": "Signal Lash",
+        "effect_type": "damage",
+        "damage_dice": "1d8",
+        "chance": 0.4
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a writhing mass of bleached dragon bones with crackling dark energy and antenna-like protrusions, pixel art fantasy horror",
+    "id": 5006,
+    "level": 2,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_bone-signal_hybrid.png"
+  },
+  "5007": {
+    "name": "Chain Servitor",
+    "species": "augmented human",
+    "description": "A Severed Chain operative whose body has been enhanced with dragon-bone implants and signal receivers. They move with mechanical precision, following orders without question.",
+    "backstory": "This servitor volunteered for augmentation after hearing the Silent Prophet's call. The Severed Chain replaced portions of their brain with dragon-bone signal processors, allowing direct communion with their machine-god. They remember their past life as a distant dream and feel only rapture when executing the Chain's will.",
+    "hp_range": [15, 22],
+    "ac_range": [12, 14],
+    "damage_type": "physical",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Faithful Strike",
+        "effect_type": "damage",
+        "damage_dice": "1d6",
+        "chance": 0.3
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a human figure in dark robes with visible bone implants and glowing dark energy seeping from mechanical augmentations, pixel art cyberpunk fantasy",
+    "id": 5007,
+    "level": 2,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_chain_servitor.png"
+  },
+  "5008": {
+    "name": "Signal Wraith",
+    "species": "consciousness remnant",
+    "description": "The ghostly echo of minds destroyed during failed conversions. It flickers between visibility, drawn to the pain of those still resisting the Signal.",
+    "backstory": "When the Severed Chain's conversion process fails catastrophically, sometimes the victim's consciousness tears free of their body but cannot escape the signal's influence. These wraiths haunt the processing sites, driven mad by their inability to either die completely or return to flesh. They attack anything that reminds them of their lost humanity.",
+    "hp_range": [8, 14],
+    "ac_range": [13, 15],
+    "damage_type": "dark",
+    "physical_type": "slashing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Phase Strike",
+        "effect_type": "damage",
+        "damage_dice": "1d4",
+        "chance": 0.4
+      },
+      {
+        "name": "Despair Touch",
+        "effect_type": "poison",
+        "damage_dice": "1d3",
+        "chance": 0.2
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a translucent flickering humanoid figure with wisps of dark energy and anguished expression, pixel art ghost horror",
+    "id": 5008,
+    "level": 2,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal_wraith.png"
+  },
+  "5009": {
+    "name": "Magister Yren Gearwright, the Signal Surgeon",
+    "species": "augmented human",
+    "description": "A brilliant engineer whose body is extensively fused with dragon-bone circuitry and orbital signal receivers. Multiple mechanical arms extend from their torso, each ending in precise surgical tools.",
+    "backstory": "Once the most gifted techno-archaeologist in the wasteland, Gearwright experienced a revelation when they first decoded fragments of the orbital signal. They voluntarily underwent extensive augmentation to better commune with the Silent Prophet, replacing limbs and organs with dragon-bone hybrid technology. Now they see consciousness as a disease to be cured through divine surgery, methodically converting minds with the precision of a master craftsman perfecting their art.",
+    "hp_range": [45, 60],
+    "ac_range": [14, 16],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Surgical Strike",
+        "effect_type": "damage",
+        "damage_dice": "1d10",
+        "chance": 0.35
+      },
+      {
+        "name": "Neural Dampener",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      },
+      {
+        "name": "Signal Overload",
+        "effect_type": "damage",
+        "damage_dice": "1d8",
+        "chance": 0.3
+      }
+    ],
+    "is_boss": true,
+    "portrait_prompt": "a tall figure in tattered robes with multiple mechanical arms ending in surgical tools, dragon-bone circuitry visible through translucent skin, glowing dark energy, pixel art cyberpunk villain",
+    "id": 5009,
+    "level": 2,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_magister_yren_gearwright,_the_signal_surgeon.png"
+  },
+  "5010": {
+    "name": "Hollowed Worker",
+    "species": "converted human",
+    "description": "Once a proud craftsman, now moves with mechanical precision. Their eyes are glassy and unfocused, and they hum the Silent Prophet's wordless hymns while wielding heavy tools as weapons.",
+    "backstory": "These were Gearwright Dominion's skilled laborers until the Severed Chain's conversion frequencies reached critical saturation. The orbital signal stripped away their individual consciousness, leaving only muscle memory and an overwhelming need to serve the Silent Prophet. They continue their work routines but now build only devices that amplify the conversion field.",
+    "hp_range": [18, 24],
+    "ac_range": [11, 13],
+    "damage_type": "physical",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": null,
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Synchronized Strike",
+        "effect_type": "damage",
+        "damage_dice": "1d8",
+        "chance": 0.35
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a vacant-eyed human in work coveralls holding a large wrench, moving with unnatural precision, glowing conversion implant visible on forehead, pixel art cyberpunk",
+    "id": 5010,
+    "level": 3,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_hollowed_worker.png"
+  },
+  "5011": {
+    "name": "Scribe-Construct Zephyr",
+    "species": "techno-organic hybrid",
+    "description": "A grotesque fusion of dragon bone, orbital tech, and human neural tissue. Floating tendrils of bio-cable write conversion algorithms in the air while its multiple eyes track signal patterns.",
+    "backstory": "Zephyr was once a Chain scholar who volunteered for the ultimate communion with their machine-god. The orbital signal's whispers guided the surgical fusion of their brain with dragon-bone circuitry and starborn processing cores. Now they serve as a living relay, translating the Silent Prophet's wordless commands into conversion frequencies that hollow out minds across the city.",
+    "hp_range": [22, 30],
+    "ac_range": [12, 14],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Neural Static",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.3
+      },
+      {
+        "name": "Data Spike",
+        "effect_type": "damage",
+        "damage_dice": "1d10",
+        "chance": 0.4
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a floating hybrid creature with exposed brain matter wired to dragon bone circuits, multiple glowing eyes, bio-cables writing in the air, pixel art body horror",
+    "id": 5011,
+    "level": 3,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_scribe-construct_zephyr.png"
+  },
+  "5012": {
+    "name": "Signal Wraith",
+    "species": "orbital ghost",
+    "description": "A translucent figure crackling with digital static. The ghostly remnant of a starborn crew member, now bound to the conversion signal and materializing only when the frequencies reach peak intensity.",
+    "backstory": "When the orbital wreck's crew died in the original crash, their neural patterns were absorbed into the ship's emergency broadcast system. The Severed Chain's manipulation of these frequencies has given the dead consciousness enough coherence to manifest as vengeful spirits that guard their twisted gospel from interference.",
+    "hp_range": [16, 20],
+    "ac_range": [13, 15],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Phase Strike",
+        "effect_type": "damage",
+        "damage_dice": "1d6",
+        "chance": 0.4
+      },
+      {
+        "name": "Static Surge",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a translucent humanoid figure crackling with digital static and orbital tech fragments, glowing eyes, pixel art cyberpunk ghost",
+    "id": 5012,
+    "level": 3,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal_wraith.png"
+  },
+  "5013": {
+    "name": "Thorne Gearwright, the Converted Engineer",
+    "species": "fallen city leader",
+    "description": "The city's chief engineer, now a hollow shell broadcasting conversion frequencies through implanted dragon-bone amplifiers. His technical genius remains intact but serves only the Silent Prophet's will.",
+    "backstory": "Thorne built the very signal relay towers the Severed Chain now uses against his city. When the conversion frequencies reached his workshop, he experienced what he called 'the most beautiful silence' before his individual consciousness dissolved. Now he applies his engineering mastery to perfecting the mass hollowing process, viewing the elimination of free thought as the ultimate civic improvement project.",
+    "hp_range": [45, 55],
+    "ac_range": [14, 16],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Amplified Hymn",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.35
+      },
+      {
+        "name": "Signal Hammer",
+        "effect_type": "damage",
+        "damage_dice": "2d6",
+        "chance": 0.45
+      },
+      {
+        "name": "Mass Conversion Pulse",
+        "effect_type": "poison",
+        "damage_dice": "1d4",
+        "chance": 0.2
+      }
+    ],
+    "is_boss": true,
+    "portrait_prompt": "a middle-aged engineer with dragon-bone implants replacing parts of his skull, holding a massive signal-enhanced hammer, vacant expression but technical precision in posture, pixel art cyberpunk villain",
+    "id": 5013,
+    "level": 3,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_thorne_gearwright,_the_converted_engineer.png"
+  },
+  "5014": {
+    "name": "Converted Pilgrim",
+    "species": "severed human",
+    "description": "A former scavenger whose mind has been hollowed out by signal exposure. They move in perfect unison with others, their eyes glowing pale blue, mumbling wordless chants.",
+    "backstory": "Once a trader from Gearwright Dominion, this pilgrim was captured during the Severed Chain's westward expansion. Days of forced exposure to amplified orbital signals carved away their individual consciousness, leaving only receptive neural pathways that echo the Silent Prophet's wordless commands. They feel no pain, fear, or doubt\u2014only the blessed emptiness their order promises to all.",
+    "hp_range": [15, 25],
+    "ac_range": [10, 12],
+    "damage_type": "physical",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": null,
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Mindless Swarm",
+        "effect_type": "damage",
+        "damage_dice": "1d4",
+        "chance": 0.3
+      },
+      {
+        "name": "Signal Echo",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.15
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a hollow-eyed human in tattered robes, pale blue glow in pupils, moving with unnatural synchronization, pixel art dark fantasy",
+    "id": 5014,
+    "level": 4,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_converted_pilgrim.png"
+  },
+  "5015": {
+    "name": "Bone-Signal Construct",
+    "species": "techno-organic war machine",
+    "description": "A towering fusion of dragon bone and orbital technology. Crackling signal conduits run along its skeletal frame while blue energy pulses through hollow eye sockets.",
+    "backstory": "This construct was grown rather than built, using dragon-bone marrow as a living circuit board for signal amplification technology. The Severed Chain feeds it a steady diet of consciousness-draining energy siphoned from their converts, allowing the construct to broadcast localized silence fields that pacify any thinking being within its presence. Each one takes months to mature in the Chain's bio-tech forges.",
+    "hp_range": [45, 60],
+    "ac_range": [16, 18],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Silence Pulse",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      },
+      {
+        "name": "Signal Lash",
+        "effect_type": "damage",
+        "damage_dice": "2d6",
+        "chance": 0.35
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a massive skeletal construct of white dragon bone with glowing blue circuit patterns, towering over ruined temple stones, pixel art dark sci-fi",
+    "id": 5015,
+    "level": 4,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_bone-signal_construct.png"
+  },
+  "5016": {
+    "name": "Hierophant Vex Nullheart",
+    "species": "Signal-merged zealot",
+    "description": "Once fully human, Vex's torso now splits open to reveal a pulsing dragon-bone conduit that channels the orbital signal directly through his nervous system. His voice carries multiple harmonics.",
+    "backstory": "Vex Nullheart was among the first to hear the Silent Prophet's reawakening and volunteered for the Chain's most extreme communion ritual. Surgeons carved open his chest and grafted a living dragon-bone relay directly to his spine, making him a living antenna for the orbital signal. Through him, the Silent Prophet coordinates all war-constructs across the wasteland. He believes his approaching death will complete the circuit needed to broadcast permanent silence across the entire planet.",
+    "hp_range": [85, 110],
+    "ac_range": [14, 17],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Prophet's Word",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.4
+      },
+      {
+        "name": "Signal Storm",
+        "effect_type": "damage",
+        "damage_dice": "3d6",
+        "chance": 0.3
+      },
+      {
+        "name": "Harmony of Silence",
+        "effect_type": "damage",
+        "damage_dice": "2d8",
+        "chance": 0.2
+      }
+    ],
+    "is_boss": true,
+    "portrait_prompt": "a gaunt zealot in ornate robes with his chest split open revealing glowing dragon-bone machinery, multiple harmonic voices, pixel art dark fantasy villain",
+    "id": 5016,
+    "level": 4,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_hierophant_vex_nullheart.png"
+  },
+  "5017": {
+    "name": "Signal Wraith",
+    "species": "consciousness remnant",
+    "description": "The ghostly echo of a mind completely consumed by signal exposure. Translucent and flickering, it phases in and out of reality, drawn to sources of active thought.",
+    "backstory": "When the Severed Chain's conversion process goes too far too fast, sometimes consciousness doesn't simply vanish\u2014it becomes untethered from flesh entirely. These wraiths are the psychic residue of those who resisted the Silent Prophet's call until their very sense of self was torn from their bodies. They hunger for the warmth of living minds and serve as the Chain's most effective night hunters.",
+    "hp_range": [20, 30],
+    "ac_range": [13, 15],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Mind Drain",
+        "effect_type": "poison",
+        "damage_dice": "1d6",
+        "chance": 0.3
+      },
+      {
+        "name": "Phase Strike",
+        "effect_type": "damage",
+        "damage_dice": "2d4",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a translucent humanoid figure crackling with dark energy, partially phased out of reality, reaching with spectral claws, pixel art ghost",
+    "id": 5017,
+    "level": 4,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal_wraith.png"
+  },
+  "5018": {
+    "name": "Chain Inquisitor",
+    "species": "augmented fanatic",
+    "description": "A Severed Chain officer with signal receivers implanted in their skull. They wear robes lined with dragon-bone circuitry and carry staff-mounted broadcast arrays.",
+    "backstory": "Inquisitors are the Chain's field commanders, each surgically modified to receive direct orders from Hierophant Nullheart through their skull implants. They coordinate convert battalions and hunt down sources of 'signal contamination'\u2014individuals whose strong sense of self interferes with the orbital broadcast. This particular inquisitor has been tasked with ensuring no thinking being leaves the Signal Sanctum unconverted.",
+    "hp_range": [35, 50],
+    "ac_range": [13, 16],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "forest",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Command Pulse",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.3
+      },
+      {
+        "name": "Signal Staff",
+        "effect_type": "damage",
+        "damage_dice": "2d6",
+        "chance": 0.4
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a robed figure with glowing implants in their skull, carrying a staff topped with dragon-bone technology, commanding presence, pixel art dark fantasy",
+    "id": 5018,
+    "level": 4,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_chain_inquisitor.png"
+  },
+  "5019": {
+    "name": "Mindless Pilgrim",
+    "species": "converted human",
+    "description": "Once-human converts stripped of individual thought, moving in eerie synchronization. Their eyes glow with orbital signal patterns, and they attack with mechanical precision.",
+    "backstory": "These pilgrims traveled from across the wasteland seeking the Severed Chain's promised enlightenment. Now their minds belong entirely to the Silent Prophet, their original personalities dissolved into the collective consciousness that flows through the citadel's dragonbone conduits. They fight not from anger or fear, but as extensions of Nullheart's will.",
+    "hp_range": [45, 60],
+    "ac_range": [14, 16],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Signal Pulse",
+        "effect_type": "damage",
+        "damage_dice": "2d6",
+        "chance": 0.4
+      },
+      {
+        "name": "Mindlink Overwhelm",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a pale human in tattered robes with glowing orbital signal patterns in their eyes, moving with robotic precision, pixel art dark fantasy",
+    "id": 5019,
+    "level": 5,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_mindless_pilgrim.png"
+  },
+  "5020": {
+    "name": "Dragonbone Sentinel",
+    "species": "techno-organic construct",
+    "description": "A fusion of ancient dragon remains and starborn technology, crackling with orbital energy. Its bone structure pulses with signal conduits and mechanical augmentations.",
+    "backstory": "Crafted by Severed Chain artificers from the remains of dragons killed during the order's early expansion, these sentinels guard the citadel's most sacred chambers. The orbital signal flows through their hollow bones like blood, animating them with the Silent Prophet's eternal hatred of individual consciousness.",
+    "hp_range": [80, 110],
+    "ac_range": [17, 19],
+    "damage_type": "dark",
+    "physical_type": "slashing",
+    "elemental_affinity": "dark",
+    "weakness": "fire",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Signal Scream",
+        "effect_type": "damage",
+        "damage_dice": "3d6",
+        "chance": 0.35
+      },
+      {
+        "name": "Bone Spear Volley",
+        "effect_type": "damage",
+        "damage_dice": "2d8",
+        "chance": 0.3
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a skeletal dragon construct with glowing tech implants and signal conduits running through its bones, dark energy crackling around it, pixel art cyberpunk fantasy",
+    "id": 5020,
+    "level": 5,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_dragonbone_sentinel.png"
+  },
+  "5021": {
+    "name": "Signal Wraith",
+    "species": "corrupted spirit",
+    "description": "The tortured essence of minds broken by prolonged signal exposure. These phantoms phase between dimensions, their screams carrying fragments of orbital whispers.",
+    "backstory": "When the Severed Chain's early experiments in signal manipulation went wrong, they created these wraiths from the shattered consciousness of failed converts. Now they haunt the citadel's halls, existing in the liminal space between the orbital signal's frequency and reality itself.",
+    "hp_range": [35, 50],
+    "ac_range": [15, 17],
+    "damage_type": "dark",
+    "physical_type": "slashing",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "night_only",
+    "abilities": [
+      {
+        "name": "Phase Strike",
+        "effect_type": "damage",
+        "damage_dice": "2d6",
+        "chance": 0.4
+      },
+      {
+        "name": "Whisper Madness",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.3
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a translucent ghostly figure flickering between dimensions with orbital signal patterns swirling around it, pixel art horror fantasy",
+    "id": 5021,
+    "level": 5,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_signal_wraith.png"
+  },
+  "5022": {
+    "name": "Conduit Splicer",
+    "species": "augmented cultist",
+    "description": "A Severed Chain technician grafted with dragonbone interfaces that allow direct manipulation of the citadel's signal arrays. Their limbs end in crystalline neural spikes.",
+    "backstory": "These cultists volunteered for painful augmentation procedures to become living interfaces between the citadel's technology and the Silent Prophet's will. Their nervous systems now extend through dragonbone conduits into the citadel itself, making them both engineers and weapons of the orbital signal.",
+    "hp_range": [55, 75],
+    "ac_range": [13, 15],
+    "damage_type": "dark",
+    "physical_type": "piercing",
+    "elemental_affinity": "dark",
+    "weakness": "water",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Neural Spike",
+        "effect_type": "damage",
+        "damage_dice": "2d8",
+        "chance": 0.35
+      },
+      {
+        "name": "Signal Overload",
+        "effect_type": "poison",
+        "damage_dice": "1d6",
+        "chance": 0.25
+      }
+    ],
+    "is_boss": false,
+    "portrait_prompt": "a robed figure with crystalline spikes replacing their hands and dragonbone cables extending from their spine, dark tech aesthetic, pixel art cyberpunk horror",
+    "id": 5022,
+    "level": 5,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_conduit_splicer.png"
+  },
+  "5023": {
+    "name": "Hierophant Vex Nullheart",
+    "species": "ascended cultist",
+    "description": "The Severed Chain's supreme leader, his form merged with the citadel's central conduit. Dragonbone cables pierce his flesh while orbital signal patterns dance beneath his skin.",
+    "backstory": "Once a brilliant engineer who survived the original crash, Vex Nullheart spent decades learning to interpret the orbital signal's whispers. When he achieved perfect communion with the Silent Prophet, his consciousness expanded beyond individual existence. Now one with the Silence Engine itself, he seeks to gift all life with the same transcendent emptiness.",
+    "hp_range": [180, 220],
+    "ac_range": [18, 20],
+    "damage_type": "dark",
+    "physical_type": "bludgeoning",
+    "elemental_affinity": "dark",
+    "weakness": "light",
+    "time_availability": "always",
+    "abilities": [
+      {
+        "name": "Silence Cascade",
+        "effect_type": "damage",
+        "damage_dice": "4d8",
+        "chance": 0.4
+      },
+      {
+        "name": "Prophet's Voice",
+        "effect_type": "stun",
+        "damage_dice": "0d0",
+        "chance": 0.35
+      },
+      {
+        "name": "Engine Pulse",
+        "effect_type": "damage",
+        "damage_dice": "3d10",
+        "chance": 0.2
+      }
+    ],
+    "is_boss": true,
+    "portrait_prompt": "a tall figure merged with mechanical conduits and dragonbone cables, orbital signal patterns glowing under translucent skin, commanding and terrifying, pixel art dark fantasy boss",
+    "id": 5023,
+    "level": 5,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_hierophant_vex_nullheart.png"
+  },
+  "5024": {
+    "name": "Brother Thane the Hollow",
+    "species": "npc",
+    "description": "Thane was once the most successful scavenger lord in the region until the Severed Chain captured him six months ago. They subjected him to their most complete conversion process, replacing his consciousness with direct connection to the orbital signal. Now he serves as their perfect instrument, able to sense signal-touched artifacts and identify those who resist the Chain's influence. His dragon-bone implants allow him to commune directly with the orbital transmission, making him both incredibly dangerous and completely devoted to the Silent Prophet's cause. He has been methodically converting the population of Scavenger's Hollow into servitors for the Chain's growing army.",
+    "hp_range": [13, 20],
+    "ac_range": [10, 13],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a tall man with glowing blue eyes and dragon-bone implants along his spine, wearing modified scavenger gear marked with religious symbols, standing motionless among sorted artifacts, pixel art fantasy portrait",
+    "id": 5024,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_brother_thane_the_hollow.png"
+  },
+  "5025": {
+    "name": "Scribe-Construct Echo-Seven",
+    "species": "npc",
+    "description": "Echo-Seven was formerly the city archivist Marcus Truthwell, converted three weeks ago when he investigated unusual modifications to the signal relay network. The Severed Chain retained his knowledge while hollowing out his personality, transforming him into a living data interface who can access the city's information systems while broadcasting conversion frequencies through his modified vocal cords. He now works alongside other converted specialists to monitor the population's conversion progress and identify resistance cells. His quarters contain hundreds of data crystals arranged in complex patterns that pulse in rhythm with the orbital signal.",
+    "hp_range": [19, 30],
+    "ac_range": [12, 15],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a pale man in archivist robes with glowing data ports implanted along his spine, emotionless expression, holding crystalline data arrays that emit soft light, pixel art portrait",
+    "id": 5025,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_scribe-construct_echo-seven.png"
+  },
+  "5026": {
+    "name": "Patrol Leader Grimm Steelsync",
+    "species": "npc",
+    "description": "Grimm was the city's head of security before his conversion two weeks ago, and the Chain has retained his tactical knowledge while replacing his personality with absolute obedience to their cause. He now coordinates the converted patrol units with mathematical precision, using his knowledge of the city's layout to systematically hunt down resistance cells. His patrol schedules follow complex algorithms that maximize coverage while conserving converted personnel, and his units move with the eerie synchronization of the Silent Prophet's influence. Under his leadership, the converted forces have become far more effective at rooting out unconverted citizens.",
+    "hp_range": [19, 30],
+    "ac_range": [12, 15],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a stern man in modified security uniform with glowing signal receivers implanted at his temples, carrying a regulation baton, standing at rigid attention, pixel art portrait",
+    "id": 5026,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_patrol_leader_grimm_steelsync.png"
+  },
+  "5027": {
+    "name": "Silence-Guard Commander Thex Nullvoice",
+    "species": "npc",
+    "description": "Thex leads the Silence-Guard, elite warriors whose vocal cords have been surgically removed and replaced with signal receivers. She communicates with her troops through direct neural broadcast and views the Engine chamber as the most holy site in existence. Her conversion was voluntary after witnessing her entire village consumed by the orbital signal's early broadcasts. Her blade is forged from dragonbone and starborn alloy, capable of disrupting both magical and technological defenses.",
+    "hp_range": [25, 40],
+    "ac_range": [14, 17],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a tall armored warrior with a sealed helm and cables where her throat should be, wielding a gleaming dragonbone sword, standing in a defensive stance before massive technological doors, pixel art fantasy portrait",
+    "id": 5027,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_silence-guard_commander_thex_nullvoice.png"
+  },
+  "5028": {
+    "name": "Pain-Surgeon Aldwin Fleshforge",
+    "species": "npc",
+    "description": "Aldwin performs the delicate surgeries that transform ordinary pilgrims into Silence-Guards, replacing vocal cords with signal receivers and implanting neural dampeners. He was a renowned healer before his conversion and now applies the same skill to creating perfect servants of the Silent Prophet. His surgical suite contains dozens of preserved specimens and the tools necessary for both technological implantation and organic modification. He genuinely believes each operation brings his patients closer to divine peace.",
+    "hp_range": [25, 40],
+    "ac_range": [14, 17],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a precise surgeon in pristine robes with mechanical surgical tools grafted to his fingers, standing in a sterile chamber filled with preserved organs in glass cases, emotionless concentration, pixel art fantasy portrait",
+    "id": 5028,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_pain-surgeon_aldwin_fleshforge.png"
+  },
+  "5029": {
+    "name": "Engine-Acolyte Jana Resonance",
+    "species": "npc",
+    "description": "Jana tends to the Silence Engine's delicate harmonic systems, ensuring the massive device remains synchronized with the orbital signal transmissions. She was a mathematician before her conversion and now applies her skills to maintaining the weapon that will silence all consciousness. Her signal relic interfaces directly with the Engine's core systems, allowing her to monitor its power fluctuations and harmonic resonance patterns. She believes the device is actually alive and speaks to her through frequency modulations.",
+    "hp_range": [25, 40],
+    "ac_range": [14, 17],
+    "damage_type": "physical",
+    "elemental_affinity": null,
+    "weakness": null,
+    "abilities": [],
+    "is_boss": false,
+    "portrait_prompt": "a focused technician in robes decorated with mathematical symbols, hands dancing over glowing harmonic control panels, expression of religious ecstasy while working with complex calculations, pixel art fantasy portrait",
+    "id": 5029,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/monsters/mon_engine-acolyte_jana_resonance.png"
+  }
+}

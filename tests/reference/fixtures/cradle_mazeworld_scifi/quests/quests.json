@@ -1,0 +1,810 @@
+[
+  {
+    "id": 4000,
+    "type": "escort",
+    "title": "Jorik's Request",
+    "description": "Jorik Steelknuckle needs your help.",
+    "giver_npc_id": 1001,
+    "room_id": "room_0",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1001.png",
+    "target_zone": [29, 7],
+    "escort_npc_id": 1001,
+    "destination_room": 0
+  },
+  {
+    "id": 4001,
+    "type": "solve",
+    "title": "Kess's Request",
+    "description": "Kess Ironwhisper needs your help.",
+    "giver_npc_id": 1002,
+    "room_id": "room_0",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3068.png",
+    "target_event_id": 3068
+  },
+  {
+    "id": 4002,
+    "type": "combat",
+    "title": "Brother's Request",
+    "description": "Brother Thane the Hollow needs your help.",
+    "giver_npc_id": 1003,
+    "room_id": "room_0",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1003.png",
+    "target_npc_id": 1003
+  },
+  {
+    "id": 4003,
+    "type": "fetch",
+    "title": "Tam's Request",
+    "description": "Tam Rustfinger needs your help.",
+    "giver_npc_id": 1004,
+    "room_id": "room_0",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1004.png",
+    "target_tile": [13, 12],
+    "item_category": "tool",
+    "target_items": [
+      {
+        "item_id": 2017,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4004,
+    "type": "escort",
+    "title": "Captain's Request",
+    "description": "Captain Lysander Voidhawk needs your help.",
+    "giver_npc_id": 1006,
+    "room_id": "room_0",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1006.png",
+    "target_zone": [29, 7],
+    "escort_npc_id": 1006,
+    "destination_room": 0
+  },
+  {
+    "id": 4005,
+    "type": "escort",
+    "title": "Sister's Request",
+    "description": "Sister Vera Brightforge needs your help.",
+    "giver_npc_id": 1007,
+    "room_id": "room_0",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 35,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 2
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1007.png",
+    "target_zone": [29, 7],
+    "escort_npc_id": 1007,
+    "destination_room": 1
+  },
+  {
+    "id": 4006,
+    "type": "solve",
+    "title": "Dr.'s Request",
+    "description": "Dr. Senna Mindbreak needs your help.",
+    "giver_npc_id": 1019,
+    "room_id": "room_1",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 45,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 4
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3097.png",
+    "target_event_id": 3097
+  },
+  {
+    "id": 4007,
+    "type": "fetch",
+    "title": "Thorne's Request",
+    "description": "Thorne Cagebreaker needs your help.",
+    "giver_npc_id": 1020,
+    "room_id": "room_1",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 45,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 4
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1020.png",
+    "target_tile": [7, 19],
+    "item_category": "food",
+    "target_items": [
+      {
+        "item_id": 2030,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4008,
+    "type": "solve",
+    "title": "Echo's Request",
+    "description": "Echo needs your help.",
+    "giver_npc_id": 1021,
+    "room_id": "room_1",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 45,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 4
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3129.png",
+    "target_event_id": 3129
+  },
+  {
+    "id": 4009,
+    "type": "solve",
+    "title": "Static-Mouth's Request",
+    "description": "Static-Mouth Jorik needs your help.",
+    "giver_npc_id": 1027,
+    "room_id": "room_1",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 45,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 4
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3161.png",
+    "target_event_id": 3161
+  },
+  {
+    "id": 4010,
+    "type": "escort",
+    "title": "Captain's Request",
+    "description": "Captain Mesa Ironlung needs your help.",
+    "giver_npc_id": 1029,
+    "room_id": "room_1",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 45,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 4
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1029.png",
+    "target_zone": [2, 5],
+    "escort_npc_id": 1029,
+    "destination_room": 1
+  },
+  {
+    "id": 4011,
+    "type": "fetch",
+    "title": "Copper-Eye's Request",
+    "description": "Copper-Eye Vale needs your help.",
+    "giver_npc_id": 1033,
+    "room_id": "room_2",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1033.png",
+    "target_tile": [17, 19],
+    "item_category": "food",
+    "target_items": [
+      {
+        "item_id": 2049,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4012,
+    "type": "solve",
+    "title": "Engineer's Request",
+    "description": "Engineer Henrik Brasscoil needs your help.",
+    "giver_npc_id": 1034,
+    "room_id": "room_2",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3264.png",
+    "target_event_id": 3264
+  },
+  {
+    "id": 4013,
+    "type": "combat",
+    "title": "Scribe-Construct's Request",
+    "description": "Scribe-Construct Echo-Seven needs your help.",
+    "giver_npc_id": 1035,
+    "room_id": "room_2",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1035.png",
+    "target_npc_id": 1035
+  },
+  {
+    "id": 4014,
+    "type": "fetch",
+    "title": "Apprentice's Request",
+    "description": "Apprentice Finn Gearspark needs your help.",
+    "giver_npc_id": 1037,
+    "room_id": "room_2",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1037.png",
+    "target_tile": [20, 26],
+    "item_category": "weapon",
+    "target_items": [
+      {
+        "item_id": 2041,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4015,
+    "type": "fetch",
+    "title": "Dockworker's Request",
+    "description": "Dockworker Soren Crankarm needs your help.",
+    "giver_npc_id": 1038,
+    "room_id": "room_2",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1038.png",
+    "target_tile": [26, 19],
+    "item_category": "tool",
+    "target_items": [
+      {
+        "item_id": 2052,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4016,
+    "type": "solve",
+    "title": "Technician's Request",
+    "description": "Technician Brynn Wireweaver needs your help.",
+    "giver_npc_id": 1041,
+    "room_id": "room_2",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3249.png",
+    "target_event_id": 3249
+  },
+  {
+    "id": 4017,
+    "type": "fetch",
+    "title": "Runner's Request",
+    "description": "Runner Kai Swiftgear needs your help.",
+    "giver_npc_id": 1043,
+    "room_id": "room_2",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1043.png",
+    "target_tile": [39, 5],
+    "item_category": "drink",
+    "target_items": [
+      {
+        "item_id": 2053,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4018,
+    "type": "solve",
+    "title": "Tinker's Request",
+    "description": "Tinker Ossian Sparkwrench needs your help.",
+    "giver_npc_id": 1044,
+    "room_id": "room_2",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3273.png",
+    "target_event_id": 3273
+  },
+  {
+    "id": 4019,
+    "type": "combat",
+    "title": "Patrol's Request",
+    "description": "Patrol Leader Grimm Steelsync needs your help.",
+    "giver_npc_id": 1045,
+    "room_id": "room_2",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 55,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 6
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1045.png",
+    "target_npc_id": 1045
+  },
+  {
+    "id": 4020,
+    "type": "solve",
+    "title": "Kess's Request",
+    "description": "Kess Ironwhisper needs your help.",
+    "giver_npc_id": 1047,
+    "room_id": "room_3",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3308.png",
+    "target_event_id": 3308
+  },
+  {
+    "id": 4021,
+    "type": "solve",
+    "title": "Tech-Adept's Request",
+    "description": "Tech-Adept Mordain Signalwright needs your help.",
+    "giver_npc_id": 1050,
+    "room_id": "room_3",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3345.png",
+    "target_event_id": 3345
+  },
+  {
+    "id": 4022,
+    "type": "fetch",
+    "title": "Supply-Sister's Request",
+    "description": "Supply-Sister Wren Bonecarrier needs your help.",
+    "giver_npc_id": 1052,
+    "room_id": "room_3",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1052.png",
+    "target_tile": [25, 25],
+    "item_category": "weapon",
+    "target_items": [
+      {
+        "item_id": 2070,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4023,
+    "type": "solve",
+    "title": "Tunnel-Runner's Request",
+    "description": "Tunnel-Runner Bex Lastfree needs your help.",
+    "giver_npc_id": 1054,
+    "room_id": "room_3",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3301.png",
+    "target_event_id": 3301
+  },
+  {
+    "id": 4024,
+    "type": "fetch",
+    "title": "Signal-Touched's Request",
+    "description": "Signal-Touched Oracle Vess Trueear needs your help.",
+    "giver_npc_id": 1058,
+    "room_id": "room_3",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1058.png",
+    "target_tile": [36, 9],
+    "item_category": "tool",
+    "target_items": [
+      {
+        "item_id": 2067,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4025,
+    "type": "fetch",
+    "title": "Power-Technician's Request",
+    "description": "Power-Technician Gorth Coilburner needs your help.",
+    "giver_npc_id": 1061,
+    "room_id": "room_3",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 65,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 8
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1061.png",
+    "target_tile": [30, 29],
+    "item_category": "tool",
+    "target_items": [
+      {
+        "item_id": 2059,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4026,
+    "type": "solve",
+    "title": "Tech-Savant's Request",
+    "description": "Tech-Savant Riven Codebreaker needs your help.",
+    "giver_npc_id": 1063,
+    "room_id": "room_4",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "I knew you could handle it. Take this for your trouble.",
+    "failure_dialogue": "It's still unresolved. Come back when you're ready.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/events/evt_3435.png",
+    "target_event_id": 3435
+  },
+  {
+    "id": 4027,
+    "type": "combat",
+    "title": "Silence-Guard's Request",
+    "description": "Silence-Guard Commander Thex Nullvoice needs your help.",
+    "giver_npc_id": 1067,
+    "room_id": "room_4",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1067.png",
+    "target_npc_id": 1067
+  },
+  {
+    "id": 4028,
+    "type": "escort",
+    "title": "Exodus-Sister's Request",
+    "description": "Exodus-Sister Nora Freepath needs your help.",
+    "giver_npc_id": 1069,
+    "room_id": "room_4",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1069.png",
+    "target_zone": [10, 1],
+    "escort_npc_id": 1069,
+    "destination_room": 0
+  },
+  {
+    "id": 4029,
+    "type": "fetch",
+    "title": "Runner-Scout's Request",
+    "description": "Runner-Scout Bek Swiftsilence needs your help.",
+    "giver_npc_id": 1072,
+    "room_id": "room_4",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "You found it! This means more to me than you know. Please, take this.",
+    "failure_dialogue": "Without it, I can't help you. Maybe another time.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1072.png",
+    "target_tile": [12, 21],
+    "item_category": "food",
+    "target_items": [
+      {
+        "item_id": 2093,
+        "count": 1
+      }
+    ]
+  },
+  {
+    "id": 4030,
+    "type": "escort",
+    "title": "Transport-Pilot's Request",
+    "description": "Transport-Pilot Vera Ironwing needs your help.",
+    "giver_npc_id": 1073,
+    "room_id": "room_4",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "We made it. I'm safe now, thanks to you. Take this for your bravery.",
+    "failure_dialogue": "I... I can't go on. Leave me here.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1073.png",
+    "target_zone": [10, 1],
+    "escort_npc_id": 1073,
+    "destination_room": 0
+  },
+  {
+    "id": 4031,
+    "type": "combat",
+    "title": "Pain-Surgeon's Request",
+    "description": "Pain-Surgeon Aldwin Fleshforge needs your help.",
+    "giver_npc_id": 1074,
+    "room_id": "room_4",
+    "is_story_quest": false,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1074.png",
+    "target_npc_id": 1074
+  },
+  {
+    "id": 4032,
+    "type": "combat",
+    "title": "Engine-Acolyte's Request",
+    "description": "Engine-Acolyte Jana Resonance needs your help.",
+    "giver_npc_id": 1077,
+    "room_id": "room_4",
+    "is_story_quest": true,
+    "reward": {
+      "xp": 75,
+      "item_id": null
+    },
+    "failure_penalty": {
+      "hp_damage": 10
+    },
+    "success_dialogue": "You bested them. A deal is a deal \u2014 take your prize.",
+    "failure_dialogue": "They were too strong. I'm sorry, I have nothing left to give.",
+    "prerequisite_quest_id": null,
+    "portrait_prompt": null,
+    "profile_image": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/npcs/npc_1077.png",
+    "target_npc_id": 1077
+  }
+]

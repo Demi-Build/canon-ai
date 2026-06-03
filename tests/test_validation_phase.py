@@ -11,7 +11,6 @@ from canon.pipeline.runner import PipelineContext, run_pipeline
 from canon.validation.checker import BaseChecker, CheckResult
 from canon.validation.validator import BaseValidator, ValidationReport, ValidationResult
 
-
 # --- Test bible that mimics canon's future Bible shape ---
 
 

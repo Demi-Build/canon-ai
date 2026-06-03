@@ -1,0 +1,468 @@
+[
+  {
+    "name": "Flameguard Breaker",
+    "archetype": "warrior",
+    "flavor_text": "A veteran warrior who specializes in demolishing ancient barriers and structures. Their mastery of flame-enhanced weaponry makes them invaluable for clearing blocked passages in the ruins.",
+    "environment": "ruins",
+    "stats": {
+      "STR": 18,
+      "DEX": 14,
+      "CON": 17,
+      "INT": 10,
+      "WIS": 10,
+      "CHA": 16,
+      "LUCK": 10
+    },
+    "starting_weapon": "Ember-Wreathed Maul",
+    "abilities": [
+      {
+        "name": "Inferno Smash",
+        "description": "Channel fire through your weapon to shatter walls, doors, and obstacles with devastating force.",
+        "stat": "STR",
+        "stamina_cost": 8
+      },
+      {
+        "name": "Scorching Presence",
+        "description": "Your fiery aura and battle-scarred appearance strikes fear into the hearts of enemies.",
+        "stat": "CHA",
+        "stamina_cost": 3
+      },
+      {
+        "name": "Flame Strike",
+        "description": "Deliver a crushing blow wreathed in flames that burns through armor and flesh alike.",
+        "stat": "STR",
+        "stamina_cost": 5
+      },
+      {
+        "name": "Battle Cry",
+        "description": "Rally your allies with a thunderous war shout that inspires courage and determination.",
+        "stat": "CHA",
+        "stamina_cost": 5
+      }
+    ],
+    "spells": [],
+    "portrait_path": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/classes/class_0.png",
+    "portrait_prompt": "A muscular warrior in scorched plate armor wielding a massive flaming maul, standing amidst crumbling stone ruins with embers floating around them",
+    "ability_pool": [
+      {
+        "name": "Ruin Climber",
+        "description": "Scale crumbling walls and treacherous surfaces with practiced ease, finding handholds where others see none.",
+        "stat": "STR",
+        "stamina_cost": 4
+      },
+      {
+        "name": "Trap Sense",
+        "description": "Your experience in dangerous ruins allows you to detect hidden traps and unstable structures.",
+        "stat": "WIS",
+        "stamina_cost": 3
+      },
+      {
+        "name": "Iron Grip",
+        "description": "Lock enemies in a crushing hold enhanced by your raw strength and combat training.",
+        "stat": "STR",
+        "stamina_cost": 6
+      },
+      {
+        "name": "Primal Roar",
+        "description": "Unleash a deafening battle cry that can shatter glass and intimidate even the bravest foes.",
+        "stat": "CHA",
+        "stamina_cost": 7
+      }
+    ],
+    "spell_pool": []
+  },
+  {
+    "name": "Lightbearer Scholar",
+    "archetype": "mage",
+    "flavor_text": "An academic who studies the ancient civilizations through magical illumination. They can pierce the darkness of forgotten halls and reveal the secrets hidden within crumbling texts.",
+    "environment": "ruins",
+    "stats": {
+      "STR": 11,
+      "DEX": 16,
+      "CON": 12,
+      "INT": 18,
+      "WIS": 16,
+      "CHA": 11,
+      "LUCK": 11
+    },
+    "starting_weapon": "Crystal-Tipped Staff",
+    "abilities": [],
+    "spells": [
+      {
+        "name": "Piercing Ray",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 4,
+        "targets": "single",
+        "description": "Fire a focused beam of pure light that burns through a single target."
+      },
+      {
+        "name": "Illumination Bolt",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 4,
+        "targets": "single",
+        "description": "Launch a brilliant projectile of condensed light energy at one enemy."
+      },
+      {
+        "name": "Radiant Burst",
+        "spell_type": "damage_multi",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 1,
+        "die_sides": 4,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 6,
+        "targets": "multi",
+        "description": "Unleash an explosion of blinding light that damages multiple nearby foes."
+      },
+      {
+        "name": "Scholar's Focus",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Enhance your mental acuity and magical power through concentrated study."
+      }
+    ],
+    "portrait_path": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/classes/class_1.png",
+    "portrait_prompt": "A robed scholar holding a glowing crystal staff, surrounded by floating ancient texts and warm golden light in a darkened ruined library",
+    "ability_pool": [],
+    "spell_pool": [
+      {
+        "name": "Blazing Lance",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 1,
+        "die_sides": 8,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 4,
+        "targets": "single",
+        "description": "Conjure a spear of intense light that pierces through a single target with devastating force."
+      },
+      {
+        "name": "Solar Storm",
+        "spell_type": "damage_multi",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 1,
+        "die_sides": 8,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 8,
+        "targets": "multi",
+        "description": "Create a massive explosion of light energy that engulfs multiple enemies in searing radiance."
+      },
+      {
+        "name": "Arcane Insight",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Temporarily boost your magical abilities through deep understanding of ancient mysteries."
+      },
+      {
+        "name": "Luminal Shield",
+        "spell_type": "buff_sustain",
+        "element": "light",
+        "stat": "INT",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Surround yourself with a protective barrier of sustained light energy."
+      }
+    ]
+  },
+  {
+    "name": "Sanctum Keeper",
+    "archetype": "healer",
+    "flavor_text": "A devoted guardian of sacred ruins who channels ancient blessings to heal wounds and protect allies. They serve as both spiritual guide and battlefield medic in treacherous expeditions.",
+    "environment": "ruins",
+    "stats": {
+      "STR": 12,
+      "DEX": 11,
+      "CON": 16,
+      "INT": 11,
+      "WIS": 18,
+      "CHA": 16,
+      "LUCK": 11
+    },
+    "starting_weapon": "Blessed Mace",
+    "abilities": [],
+    "spells": [
+      {
+        "name": "Sacred Restoration",
+        "spell_type": "heal",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 5,
+        "targets": "self",
+        "description": "Channel divine energy to heal your wounds with warm, golden light."
+      },
+      {
+        "name": "Blessing of Vigor",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Enhance your physical or mental capabilities through ancient benedictions."
+      },
+      {
+        "name": "Consecrated Strike",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 1,
+        "die_sides": 6,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 4,
+        "targets": "single",
+        "description": "Imbue your weapon with holy light to smite a single enemy."
+      },
+      {
+        "name": "Sanctuary Aura",
+        "spell_type": "buff_sustain",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Surround yourself with a persistent field of protective divine energy."
+      }
+    ],
+    "portrait_path": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/classes/class_2.png",
+    "portrait_prompt": "A serene figure in flowing white robes holding a glowing mace, standing in a beam of sunlight filtering through broken stone arches, with gentle wisps of golden energy swirling around them",
+    "ability_pool": [],
+    "spell_pool": [
+      {
+        "name": "Greater Healing",
+        "spell_type": "heal",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 1,
+        "die_sides": 8,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 6,
+        "targets": "self",
+        "description": "Call upon powerful divine forces to restore significant health and vitality."
+      },
+      {
+        "name": "Divine Wrath",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 1,
+        "die_sides": 10,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 5,
+        "targets": "single",
+        "description": "Unleash a devastating bolt of holy energy against a single target."
+      },
+      {
+        "name": "Sacred Empowerment",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Temporarily enhance your abilities through connection with divine power."
+      },
+      {
+        "name": "Purifying Nova",
+        "spell_type": "damage_multi",
+        "element": "light",
+        "stat": "WIS",
+        "num_dice": 1,
+        "die_sides": 12,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 12,
+        "targets": "multi",
+        "description": "Release a massive wave of cleansing light that damages all enemies in the area."
+      }
+    ]
+  },
+  {
+    "name": "Ruin Jester",
+    "archetype": "jester",
+    "flavor_text": "A chaotic trickster who finds humor in the most dangerous situations. Their unpredictable nature and unusual luck often turn the tide when exploring treacherous ruins.",
+    "environment": "ruins",
+    "stats": {
+      "STR": 13,
+      "DEX": 14,
+      "CON": 13,
+      "INT": 12,
+      "WIS": 13,
+      "CHA": 15,
+      "LUCK": 15
+    },
+    "starting_weapon": "Trick Dagger",
+    "abilities": [
+      {
+        "name": "Inferno Smash",
+        "description": "Channel fire through your weapon to shatter walls, doors, and obstacles with devastating force.",
+        "stat": "STR",
+        "stamina_cost": 8
+      }
+    ],
+    "spells": [
+      {
+        "name": "Radiant Burst",
+        "spell_type": "damage_multi",
+        "element": "light",
+        "stat": "LUCK",
+        "num_dice": 1,
+        "die_sides": 4,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 6,
+        "targets": "multi",
+        "description": "Unleash an explosion of blinding light that damages multiple nearby foes."
+      },
+      {
+        "name": "Blessing of Vigor",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "LUCK",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Enhance your physical or mental capabilities through ancient benedictions."
+      }
+    ],
+    "portrait_path": "/Users/wolfgangblack/Documents/projects/MazeWorld/data/portraits/classes/class_3.png",
+    "portrait_prompt": "A grinning figure in colorful, patched clothing with bells and ribbons, juggling glowing flames while balancing on crumbling stone rubble, with mischievous eyes gleaming in the shadows",
+    "ability_pool": [],
+    "spell_pool": [
+      {
+        "name": "Chaos Spark",
+        "spell_type": "damage_single",
+        "element": "light",
+        "stat": "LUCK",
+        "num_dice": 1,
+        "die_sides": 8,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 4,
+        "targets": "single",
+        "description": "Hurl a wild, unpredictable burst of fiery energy at a single target."
+      },
+      {
+        "name": "Mayhem Inferno",
+        "spell_type": "damage_multi",
+        "element": "light",
+        "stat": "LUCK",
+        "num_dice": 1,
+        "die_sides": 12,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 12,
+        "targets": "multi",
+        "description": "Create a spectacular explosion of chaotic flames that engulfs multiple enemies."
+      },
+      {
+        "name": "Lucky Break",
+        "spell_type": "buff_stat",
+        "element": "light",
+        "stat": "LUCK",
+        "num_dice": 0,
+        "die_sides": 0,
+        "heal_amount": 0,
+        "buff_stat": null,
+        "buff_value": 2,
+        "buff_duration": 3,
+        "stamina_cost": 2,
+        "targets": "self",
+        "description": "Tap into your chaotic nature to temporarily enhance one of your abilities."
+      }
+    ]
+  }
+]
