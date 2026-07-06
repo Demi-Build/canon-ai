@@ -69,9 +69,15 @@ class LayoutStampPhase:
         stage = ctx.bible.stages[stage_id]
         seed = str(getattr(ctx.config, "seed", ""))
 
-        for level_id in stage.level_ids:
+        for index, level_id in enumerate(stage.level_ids):
             brief = ctx.artifacts.get("level_briefs", {}).get(level_id, "")
-            knobs = roll_skeleton(spec, derive_rng(seed, self.name, level_id))
+            # Difficulty escalates by level POSITION, not by roll — the
+            # schema keys it off this context value (depends_on_context).
+            # Clamped to the schema's 1..3 table for longer level lists.
+            roll_context = {"level_number": min(index + 1, 3)}
+            knobs = roll_skeleton(
+                spec, derive_rng(seed, self.name, level_id), context=roll_context
+            )
 
             def generate(
                 feedback: list[str] | None = None,

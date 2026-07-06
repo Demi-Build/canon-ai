@@ -55,15 +55,25 @@ class PlatformerPrompts:
 
     def enemy_generation(
         self, skeleton: dict, theme: str, roster_brief: str, index: int,
+        used_names: list[str] | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
         fb = f"\nPrior attempt rejected: {'; '.join(feedback)}\n" if feedback else ""
+        # Each enemy call is independent — the model can't know what it
+        # already named unless we tell it (learned from wraith_moth_x).
+        used = (
+            f"Names already taken (do NOT reuse or lightly vary): "
+            f"{', '.join(used_names)}\n"
+            if used_names
+            else ""
+        )
         return LLMRequest(
             system=_SYSTEM,
             user_message=(
                 "### TASK: enemy\n"
                 f"### INDEX: {index}\n"
                 f"Stage theme: {theme}\nRoster brief: {roster_brief}\n"
+                f"{used}"
                 f"Mechanics (already rolled, do NOT change them): "
                 f"{json.dumps(skeleton)}\n{fb}\n"
                 "Name and flavor this enemy to fit the theme and its rolled "

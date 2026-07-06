@@ -58,10 +58,13 @@ def llm_json(
     build_request,
     required_keys: tuple[str, ...],
     fallback: dict,
+    validate_obj=None,
 ) -> dict:
     """Generate → parse → validate a JSON object with the standard retry loop.
 
     ``build_request(feedback)`` returns the LLMRequest for an attempt.
+    ``validate_obj(obj) -> list[str]`` optionally adds semantic checks;
+    returned problem strings become retry feedback.
     """
 
     def generate(feedback: list[str] | None = None, max_tokens: int | None = None) -> str:
@@ -77,6 +80,10 @@ def llm_json(
         missing = [k for k in required_keys if k not in obj]
         if missing:
             return False, [f"JSON object is missing required key(s): {missing!r}."]
+        if validate_obj is not None:
+            problems = validate_obj(obj)
+            if problems:
+                return False, problems
         return True, []
 
     result = retry_with_feedback(
@@ -222,6 +229,7 @@ class EnemyGeneratorPhase:
         roster_brief = ctx.artifacts.get("roster_brief", "")
         seed = str(getattr(ctx.config, "seed", ""))
         seen_ids: set[str] = set()
+        used_names: list[str] = []
 
         for i in range(self.count):
             skeleton = roll_skeleton(spec, derive_rng(seed, self.name, i))
@@ -229,14 +237,29 @@ class EnemyGeneratorPhase:
                 ctx,
                 f"{self.name}:{i}",
                 lambda fb, _skel=skeleton, _i=i: ctx.prompts.enemy_generation(
-                    _skel, theme, roster_brief, _i, feedback=fb
+                    _skel, theme, roster_brief, _i,
+                    used_names=list(used_names), feedback=fb,
                 ),
                 required_keys=("name",),
                 fallback={"name": f"Enemy {i}", "flavor": ""},
+                validate_obj=lambda obj: (
+                    [
+                        f"Name {obj.get('name')!r} is already taken; invent a "
+                        "clearly different one."
+                    ]
+                    if str(obj.get("name", "")).strip().lower()
+                    in {n.lower() for n in used_names}
+                    else []
+                ),
             )
+            used_names.append(str(data["name"]))
             enemy_id = slugify(str(data["name"]))
+            # Numeric backstop — only reachable if the LLM ignored both the
+            # used-names prompt and the retry feedback (or the fallback fired).
+            base, counter = enemy_id, 2
             while enemy_id in seen_ids:
-                enemy_id += "_x"
+                enemy_id = f"{base}_{counter}"
+                counter += 1
             seen_ids.add(enemy_id)
 
             enemy = EnemyDefinition(

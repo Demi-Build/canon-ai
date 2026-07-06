@@ -142,6 +142,29 @@ class TestDatabasesDriveReview:
             spec = load_skeleton_spec(SCHEMAS_DIR / name)
             assert spec.fields  # non-empty, validated at load time
 
+    def test_difficulty_escalates_by_level_position(self) -> None:
+        """Difficulty keys off the level_number CONTEXT, not a roll —
+        level 3 must be harder than level 1 for every seed."""
+        from canon.pipeline.rng import derive_rng
+        from canon.skeleton.core import roll_skeleton
+
+        spec = load_skeleton_spec(SCHEMAS_DIR / "level_layout.json")
+        for seed in ("a", "b", "emberfall_001"):
+            knobs = [
+                roll_skeleton(
+                    spec,
+                    derive_rng(seed, "plat:layout", f"l{n}"),
+                    context={"level_number": n},
+                )
+                for n in (1, 2, 3)
+            ]
+            assert [k["difficulty"] for k in knobs] == [1, 2, 3]
+            assert (
+                knobs[0]["hazard_count"]
+                < knobs[1]["hazard_count"]
+                < knobs[2]["hazard_count"]
+            )
+
 
 # ---------------------------------------------------------------------------
 # End-to-end (fake backend)
@@ -257,6 +280,31 @@ class TestEndToEnd:
         # The fallback levels are flat floors — spawn still standable.
         for level in ctx.bible.levels.values():
             assert level.spawn == (2, 13)
+
+    def test_duplicate_enemy_names_prompted_and_deduped(
+        self, tmp_path: Path
+    ) -> None:
+        """A model that reuses names gets told what's taken (used-names in
+        the prompt + retry feedback); ids stay unique via numeric backstop."""
+        good = make_fake_responder()
+        enemy_calls = []
+
+        def same_name_enemies(request):
+            if "### TASK: enemy" in request.user_message:
+                enemy_calls.append(request.user_message)
+                return json.dumps({"name": "Wraith Moth", "flavor": "again"})
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=same_name_enemies)
+
+        # Later enemy prompts must name what's already taken.
+        later_calls = [m for m in enemy_calls if "### INDEX: 1" in m]
+        assert later_calls and all("already taken" in m.lower() or "Wraith Moth" in m for m in later_calls)
+        # Retry feedback fired for the stubborn duplicate.
+        assert any("already taken" in m for m in enemy_calls)
+        # IDs are still unique (fallback names or numeric suffix backstop).
+        ids = list(ctx.bible.enemy_definitions)
+        assert len(ids) == len(set(ids)) == 3
 
     def test_provenance_stamped(self, tmp_path: Path) -> None:
         ctx = _run_slice(tmp_path / "run")

@@ -309,3 +309,71 @@ class TestCallGenerateKwargFiltering:
             token_escalation=None,
         )
         assert "max_tokens" not in received
+
+
+# ---------------------------------------------------------------------------
+# Non-retryable errors (auth/permission)
+# ---------------------------------------------------------------------------
+
+
+class _AuthError(Exception):
+    status_code = 401
+
+
+class _PermissionDeniedError(Exception):
+    pass
+
+
+class TestNonRetryableErrors:
+    def test_auth_error_aborts_immediately(self) -> None:
+        """A 401 never succeeds on retry — it must raise on the first
+        attempt instead of burning the retry budget into a fallback."""
+        calls = []
+
+        def generate(feedback=None):
+            calls.append(1)
+            raise _AuthError("invalid x-api-key")
+
+        import pytest
+
+        with pytest.raises(_AuthError):
+            retry_with_feedback(
+                generate_fn=generate,
+                validate_fn=lambda c: (True, []),
+                fallback="fallback",
+                max_retries=3,
+                label="auth-test",
+            )
+        assert len(calls) == 1
+
+    def test_permission_denied_by_class_name(self) -> None:
+        import pytest
+
+        def generate(feedback=None):
+            raise _PermissionDeniedError("nope")
+
+        with pytest.raises(_PermissionDeniedError):
+            retry_with_feedback(
+                generate_fn=generate,
+                validate_fn=lambda c: (True, []),
+                fallback="fallback",
+                label="perm-test",
+            )
+
+    def test_transient_errors_still_retry_to_fallback(self) -> None:
+        """Ordinary exceptions keep the existing retry-then-fallback path."""
+        calls = []
+
+        def generate(feedback=None):
+            calls.append(1)
+            raise RuntimeError("flaky network")
+
+        result = retry_with_feedback(
+            generate_fn=generate,
+            validate_fn=lambda c: (True, []),
+            fallback="fallback",
+            max_retries=3,
+            label="transient-test",
+        )
+        assert result == "fallback"
+        assert len(calls) == 3
