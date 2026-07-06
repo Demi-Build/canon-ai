@@ -40,11 +40,17 @@ images = ["fal-client>=0.5", "Pillow"]
 images-local = ["diffusers>=0.30", "torch>=2.0", "Pillow"]
 audio = ["google-genai>=0.5", "elevenlabs>=1.0"]
 cli = ["typer[all]>=0.12"]
+# Platformer generation path: dense masks (.npz) + tilesheet/render PNGs.
+platformer = ["numpy>=1.26", "Pillow>=10.0"]
+# Throwaway pygame review harness only — generation never depends on it.
+play = ["pygame>=2.5"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pre-commit>=3.0",
     "ruff>=0.5",
+    "numpy>=1.26",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]

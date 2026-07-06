@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "entity_type": "level_layout",
+  "fields": {
+    "difficulty": { "range": [1, 3] },
+    "platform_count": {
+      "lookup": [[1, 2], [2, 3], [3, 4]],
+      "depends_on": "difficulty"
+    },
+    "hazard_count": {
+      "lookup": [[1, 1], [2, 2], [3, 3]],
+      "depends_on": "difficulty"
+    },
+    "gap_count": {
+      "lookup": [[1, 0], [2, 1], [3, 2]],
+      "depends_on": "difficulty"
+    }
+  }
+}
