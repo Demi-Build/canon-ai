@@ -27,6 +27,15 @@ from pydantic import BaseModel, Field
 # `canon.layout` depends only on pydantic — no circular import with canon.bible.
 # Import at runtime so the discriminated union resolves correctly and Pydantic
 # serializes the full subclass schema (not just the base Layout fields).
+from canon.bible.artifacts import PhaseStatus  # noqa: E402
+from canon.bible.platformer import (  # noqa: E402
+    BossDefinition,
+    EnemyDefinition,
+    Level,
+    Stage,
+    Tileset,
+    World,
+)
 from canon.layout import MazeLayout  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -94,6 +103,10 @@ class BibleMetadata(BaseModel):
     phases_run: list[str] = Field(default_factory=list)
     total_cost: float = 0.0
     total_llm_calls: int = 0
+    # Coarse per-phase status (PRD §6.1), alongside the fine per-artifact
+    # ArtifactMeta.status. Populated by the Phase 2 orchestrator; empty for
+    # MazeWorld runs.
+    phase_status: dict[str, PhaseStatus] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +390,19 @@ class Bible(BaseModel):
     # canon.dialogue is not importable. Resolved lazily via model_rebuild().
     dialogues: dict[str, DialogueTree] = Field(default_factory=dict)
     metadata: BibleMetadata = Field(default_factory=BibleMetadata)
+
+    # ------------------------------------------------------------------ #
+    # Platformer entities (PRD §6.1) — additive; empty for MazeWorld.
+    # Keyed by their own IDs (stage_id, enemy_id, …); artifact IDs live on
+    # each entity's ArtifactMeta.artifact_id. A game populates the fields
+    # its pack uses and leaves the rest empty (maps vs stages coexist).
+    # ------------------------------------------------------------------ #
+    world: World | None = None
+    stages: dict[str, Stage] = Field(default_factory=dict)
+    levels: dict[str, Level] = Field(default_factory=dict)
+    enemy_definitions: dict[str, EnemyDefinition] = Field(default_factory=dict)
+    boss_definitions: dict[str, BossDefinition] = Field(default_factory=dict)
+    tilesets: dict[str, Tileset] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # Factories

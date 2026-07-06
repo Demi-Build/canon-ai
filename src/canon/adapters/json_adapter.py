@@ -13,6 +13,8 @@ and the adapter holds no mutable shared state beyond the immutable
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -51,54 +53,58 @@ class JsonOutputAdapter:
 
     # ------------------------------------------------------------------
     # JSON writers (delegating to canon.persistence)
+    #
+    # All write_* methods return the content hash ("sha256:<hex>") of the
+    # exact bytes written — see the OutputAdapter protocol contract.
     # ------------------------------------------------------------------
 
-    def write_json_array(self, path: str | Path, entities: list) -> None:
-        write_array_db(self.resolve_path(path), entities)
+    def write_json_array(self, path: str | Path, entities: list) -> str:
+        return write_array_db(self.resolve_path(path), entities)
 
     def write_json_keyed(
         self,
         path: str | Path,
         entities: list | dict,
         key_field: str = "id",
-    ) -> None:
-        write_keyed_db(self.resolve_path(path), entities, key_field=key_field)
+    ) -> str:
+        return write_keyed_db(self.resolve_path(path), entities, key_field=key_field)
 
-    def write_json_singleton(self, path: str | Path, obj: Any) -> None:
-        write_singleton(self.resolve_path(path), obj)
+    def write_json_singleton(self, path: str | Path, obj: Any) -> str:
+        return write_singleton(self.resolve_path(path), obj)
 
-    def write_per_map(self, template: str, map_id: str, obj: Any) -> None:
+    def write_per_map(self, template: str, map_id: str, obj: Any) -> str:
         # The {map_id} placeholder survives the join; write_per_map_file
         # formats it exactly as the phases did pre-adapter.
-        write_per_map_file(str(self.resolve_path(template)), map_id, obj)
+        return write_per_map_file(str(self.resolve_path(template)), map_id, obj)
 
     # ------------------------------------------------------------------
     # Binary writers (atomic, matching the persistence temp+rename pattern)
     # ------------------------------------------------------------------
 
-    def write_binary(self, path: str | Path, data: bytes) -> None:
-        target = self.resolve_path(path)
-        self._atomic_write_bytes(target, lambda fh: fh.write(data))
+    def write_binary(self, path: str | Path, data: bytes) -> str:
+        self._atomic_write_bytes(self.resolve_path(path), data)
+        return "sha256:" + hashlib.sha256(data).hexdigest()
 
-    def write_numpy(self, path: str | Path, **arrays: Any) -> None:
+    def write_numpy(self, path: str | Path, **arrays: Any) -> str:
         # Lazy import: numpy is not a core canon dependency; only adapters
         # that actually write .npz payloads need it installed.
         import numpy
 
-        target = self.resolve_path(path)
-        self._atomic_write_bytes(
-            target, lambda fh: numpy.savez_compressed(fh, **arrays)
-        )
+        # Serialize to memory first so the returned hash covers the exact
+        # written bytes (grids compress well; .npz payloads are small).
+        buffer = io.BytesIO()
+        numpy.savez_compressed(buffer, **arrays)
+        return self.write_binary(path, buffer.getvalue())
 
     @staticmethod
-    def _atomic_write_bytes(target: Path, write_fn: Any) -> None:
+    def _atomic_write_bytes(target: Path, data: bytes) -> None:
         """Write binary content atomically: temp file in the target dir,
         then ``os.replace``. No partial file is left on crash."""
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:
-                write_fn(fh)
+                fh.write(data)
             os.replace(tmp_path, target)
         except Exception:
             try:

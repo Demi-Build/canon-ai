@@ -101,6 +101,42 @@ class TestJsonWrites:
         )
 
 
+class TestContentHashReturns:
+    """Every write_* returns "sha256:<hex>" of the exact written bytes
+    (OutputAdapter contract, PRD §8.2)."""
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        import hashlib
+
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_each_writer_returns_hash_of_written_file(self, tmp_path: Path) -> None:
+        adapter = JsonOutputAdapter(tmp_path)
+        cases = [
+            (adapter.write_json_array("a.json", [{"id": 1}]), "a.json"),
+            (adapter.write_json_keyed("k.json", [{"id": 2}]), "k.json"),
+            (adapter.write_json_singleton("s.json", {"x": 1}), "s.json"),
+            (adapter.write_per_map("r/{map_id}/m.json", "r0", {"y": 2}), "r/r0/m.json"),
+            (adapter.write_binary("b.bin", b"\x00\x01"), "b.bin"),
+        ]
+        for returned, rel in cases:
+            assert returned == self._file_hash(tmp_path / rel), rel
+
+    def test_numpy_hash_matches_file(self, tmp_path: Path) -> None:
+        numpy = pytest.importorskip("numpy")
+        adapter = JsonOutputAdapter(tmp_path)
+        returned = adapter.write_numpy("m.npz", grid=numpy.array([[1, 0]]))
+        assert returned == self._file_hash(tmp_path / "m.npz")
+
+    def test_identical_content_identical_hash(self, tmp_path: Path) -> None:
+        adapter = JsonOutputAdapter(tmp_path)
+        h1 = adapter.write_json_singleton("one.json", {"a": 1})
+        h2 = adapter.write_json_singleton("two.json", {"a": 1})
+        h3 = adapter.write_json_singleton("three.json", {"a": 2})
+        assert h1 == h2 != h3
+
+
 class TestBinaryWrites:
     def test_write_binary(self, tmp_path: Path) -> None:
         adapter = JsonOutputAdapter(tmp_path)
