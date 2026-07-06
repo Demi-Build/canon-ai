@@ -8,6 +8,7 @@ run: tree shape, byte-determinism, and the §6.3 hash-recompute contract.
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from pathlib import Path
 
@@ -147,12 +148,14 @@ class TestDatabasesDriveReview:
 # ---------------------------------------------------------------------------
 
 
-def _run_slice(output_dir: Path, seed: str = "emberfall_001") -> PipelineContext:
+def _run_slice(
+    output_dir: Path, seed: str = "emberfall_001", responder=None
+) -> PipelineContext:
     ctx = PipelineContext(
         bible=Bible.empty(seed=seed),
         config=CanonConfig(seed=seed, output_dir=output_dir),
         rng=random.Random(seed),
-        llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+        llm=LLMClient(FakeLLMBackend(responder or make_fake_responder())),
         prompts=PlatformerPrompts(),
     )
     run_pipeline(compose_pipeline(), ctx)
@@ -212,6 +215,48 @@ class TestEndToEnd:
                 cells = standable_cells(data["collision"])
             for placement in level.entities:
                 assert tuple(placement.pos) in cells
+
+    def test_spawn_exit_first_class_fields(self, tmp_path: Path) -> None:
+        """spawn/exit are Level fields (not trigger records) and land on
+        standable cells; triggers stay empty in the slice."""
+        ctx = _run_slice(tmp_path / "run")
+        for level in ctx.bible.levels.values():
+            assert level.spawn is not None and level.exit is not None
+            with np.load(tmp_path / "run" / level.collision) as data:
+                cells = standable_cells(data["collision"])
+            assert tuple(level.spawn) in cells
+            assert tuple(level.exit) in cells
+            assert level.triggers == []
+        # And they round-trip through level.json for the harness.
+        level_doc = json.loads(
+            (tmp_path / "run/level/ashen_depths/l1/level.json").read_text()
+        )
+        assert level_doc["spawn"] is not None and level_doc["exit"] is not None
+
+    def test_clean_run_has_no_warnings(self, tmp_path: Path) -> None:
+        ctx = _run_slice(tmp_path / "run")
+        assert ctx.artifacts.get("slice_warnings", []) == []
+        manifest = json.loads((tmp_path / "run/manifest.json").read_text())
+        assert manifest["warnings"] == []
+
+    def test_fallback_is_loudly_surfaced(self, tmp_path: Path) -> None:
+        """A run that only 'succeeds' via fallback content must say so in
+        artifacts AND manifest.json — never silently."""
+        good = make_fake_responder()
+
+        def broken_layouts(request):
+            if "### TASK: layout" in request.user_message:
+                return "not a dsl at all"
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=broken_layouts)
+        warnings = ctx.artifacts["slice_warnings"]
+        assert any("FALLBACK layout" in w for w in warnings)
+        manifest = json.loads((tmp_path / "run/manifest.json").read_text())
+        assert manifest["warnings"] == warnings
+        # The fallback levels are flat floors — spawn still standable.
+        for level in ctx.bible.levels.values():
+            assert level.spawn == (2, 13)
 
     def test_provenance_stamped(self, tmp_path: Path) -> None:
         ctx = _run_slice(tmp_path / "run")

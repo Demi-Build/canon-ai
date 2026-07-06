@@ -32,6 +32,9 @@ class SliceManifestPhase:
             "levels": list(ctx.bible.stages[stage_id].level_ids),
             "enemies": sorted(ctx.bible.enemy_definitions),
             "movement": DEFAULT_MOVEMENT.model_dump(),
+            # Fallbacks and dropped content are failures wearing a suit —
+            # they must survive the run and reach the reviewer.
+            "warnings": list(ctx.artifacts.get("slice_warnings", [])),
         }
         ctx.adapter.write_json_singleton("manifest.json", manifest)
         if not isinstance(getattr(ctx.bible, "metadata", None), BibleMetadata):

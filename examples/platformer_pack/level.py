@@ -9,10 +9,11 @@ collision.npz lands on Level.collision_hash).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from canon.bible.artifacts import make_artifact_id
-from canon.bible.platformer import Level, Placement, SparseMaskEntry
+from canon.bible.platformer import Level, Placement
 from canon.llm.parsing import extract_json_object
 from canon.pipeline.retry import retry_with_feedback
 from canon.pipeline.rng import derive_rng
@@ -31,11 +32,22 @@ from examples.platformer_pack.validate import (
     standable_cells,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _fallback_dsl(width: int) -> str:
     """A guaranteed-valid layout so a fully misbehaving LLM still yields a
     walkable (if boring) level instead of a dead pipeline."""
     return f"floor(0,{width - 1})\nspawn(2)\nexit({width - 3})"
+
+
+def warn(ctx: Any, message: str) -> None:
+    """Record a generation warning where reviewers will actually see it:
+    the log now, and ctx.artifacts["slice_warnings"] → manifest.json +
+    end-of-run summary. Fallbacks must never be silent — a run that
+    "succeeds" on fallback content is a failed generation wearing a suit."""
+    logger.warning(message)
+    ctx.artifacts.setdefault("slice_warnings", []).append(message)
 
 
 class LayoutStampPhase:
@@ -86,13 +98,20 @@ class LayoutStampPhase:
                 )
                 return (not problems), problems
 
+            fallback_dsl = _fallback_dsl(self.width)
             dsl_text = retry_with_feedback(
                 generate_fn=generate,
                 validate_fn=validate,
-                fallback=_fallback_dsl(self.width),
+                fallback=fallback_dsl,
                 max_retries=getattr(ctx.config, "max_retries", 3),
                 label=f"{self.name}:{level_id}",
             )
+            if dsl_text == fallback_dsl:
+                warn(
+                    ctx,
+                    f"layout {level_id}: LLM output never validated; level is "
+                    "the flat FALLBACK layout, not generated content.",
+                )
             result: StampResult = stamp(dsl_text, self.width, self.height)
 
             level_dir = f"level/{stage_id}/{level_id}"
@@ -104,15 +123,11 @@ class LayoutStampPhase:
                 stage_id=stage_id,
                 grid_width=self.width,
                 grid_height=self.height,
+                spawn=result.spawn,
+                exit=result.exit,
                 collision=f"{level_dir}/collision.npz",
                 collision_hash=collision_hash,
                 hazards=result.hazards,
-                # spawn/exit ride in triggers: they are point markers, and
-                # Level has no dedicated fields for them (noted for Phase 3).
-                triggers=[
-                    SparseMaskEntry(x=result.spawn[0], y=result.spawn[1], type="spawn"),
-                    SparseMaskEntry(x=result.exit[0], y=result.exit[1], type="exit"),
-                ],
                 parents=[
                     make_artifact_id("level", stage_id, level_id, "layout"),
                     stage.tileset_ref,
@@ -148,9 +163,7 @@ class PlacementPhase:
         for level_id in stage.level_ids:
             level = ctx.bible.levels[level_id]
             grid = self._load_grid(ctx, level, np)
-            spawn = next(
-                (t.x, t.y) for t in level.triggers if t.type == "spawn"
-            )
+            spawn = level.spawn or (0, 0)
             summary = self._standable_summary(grid)
             brief = ctx.artifacts.get("level_briefs", {}).get(level_id, "")
             accepted_holder: dict[str, list[dict]] = {"placements": []}
@@ -170,6 +183,8 @@ class PlacementPhase:
                     request.max_tokens = max_tokens
                 return ctx.llm.generate(request, phase=f"{self.name}:{_lid}")
 
+            last_problems: list[str] = []
+
             def validate(content: str) -> tuple[bool, list[str]]:
                 obj = extract_json_object(content)
                 if obj is None or not isinstance(obj.get("placements"), list):
@@ -178,6 +193,7 @@ class PlacementPhase:
                     grid, obj["placements"], spawn, valid_ids
                 )
                 accepted_holder["placements"] = accepted
+                last_problems[:] = problems
                 # Kick back while anything is invalid; the final fallback
                 # accepts whatever subset survived validation.
                 return (not problems and bool(accepted)), problems or [
@@ -192,6 +208,14 @@ class PlacementPhase:
                 label=f"{self.name}:{level_id}",
             )
             accepted = accepted_holder["placements"][: self.max_enemies]
+            if last_problems:
+                warn(
+                    ctx,
+                    f"placement {level_id}: kept {len(accepted)} valid "
+                    f"placement(s), dropped invalid ones: {'; '.join(last_problems)}",
+                )
+            if not accepted:
+                warn(ctx, f"placement {level_id}: level has NO enemies.")
 
             level.entities = [
                 Placement(ref=make_artifact_id("enemy", p["enemy_id"]), pos=(p["x"], p["y"]))

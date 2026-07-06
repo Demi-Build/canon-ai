@@ -61,11 +61,10 @@ def render_level(
             width=2,
         )
 
-    for trigger in level.triggers:
-        if trigger.type == "spawn":
-            _marker(trigger.x, trigger.y, "#ffffff")
-        elif trigger.type == "exit":
-            _marker(trigger.x, trigger.y, "#40ff70")
+    if level.spawn is not None:
+        _marker(level.spawn[0], level.spawn[1], "#ffffff")
+    if level.exit is not None:
+        _marker(level.exit[0], level.exit[1], "#40ff70")
 
     for placement in level.entities:
         enemy_id = placement.ref.split(":", 1)[1]

@@ -141,6 +141,12 @@ class Level(ArtifactMeta):
     grid_height: int = 0
     pixels_per_cell: int | None = None  # None → ProjectConfig global (§4.2)
 
+    # First-class point markers (standing-cell grid coords). These are level
+    # structure, not gameplay triggers — every consumer (validators, render,
+    # harness, Godot) needs them, so they don't ride in ``triggers``.
+    spawn: tuple[int, int] | None = None
+    exit: tuple[int, int] | None = None
+
     # Dense masks — .npz by relative path, hash on the entity (§6.2, §6.3)
     collision: str = ""
     collision_hash: str = ""

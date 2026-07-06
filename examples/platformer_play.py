@@ -77,8 +77,8 @@ def main() -> None:
     SOLID = {1, 2, 3}  # FLOOR, PLATFORM, WALL (PLATFORM treated solid-simple)
     SPIKE = 10
 
-    spawn = next(t for t in level["triggers"] if t["type"] == "spawn")
-    exit_ = next(t for t in level["triggers"] if t["type"] == "exit")
+    spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
+    exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
 
     def hex_rgb(h: str) -> tuple:
         h = h.lstrip("#")

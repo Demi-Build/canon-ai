@@ -160,6 +160,13 @@ def main() -> None:
     )
     run_pipeline(phases, ctx)
 
+    warnings = ctx.artifacts.get("slice_warnings", [])
+    if warnings:
+        print(f"\n!! {len(warnings)} generation warning(s) — content fell "
+              "back or was dropped (also in manifest.json):")
+        for message in warnings:
+            print(f"   - {message}")
+
     print(f"\nSlice generated at {output_dir}/")
     print(f"  Review PNGs:  {output_dir}/review/")
     print(
