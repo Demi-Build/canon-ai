@@ -50,6 +50,33 @@ def reachable_cells(
     return seen
 
 
+def _tile_name(value: int) -> str:
+    try:
+        return TileType(int(value)).name
+    except ValueError:
+        return str(value)
+
+
+def _diagnose_unstandable(grid, cell: tuple[int, int], label: str) -> str:
+    """Say WHY a cell isn't standable — 'not standable' alone sends the
+    Layout Agent in circles (observed: a platform stamped over spawn drew
+    three identical retries)."""
+    x, y = cell
+    height = grid.shape[0]
+    occupant = int(grid[y, x])
+    if occupant != TileType.EMPTY:
+        return (
+            f"{label} at {cell} is covered by a {_tile_name(occupant)} tile — "
+            f"nothing may occupy the {label} cell; move that "
+            f"{_tile_name(occupant).lower()} or move the {label}."
+        )
+    below = int(grid[y + 1, x]) if y + 1 < height else int(TileType.EMPTY)
+    return (
+        f"{label} at {cell} has no solid ground beneath it (the cell below "
+        f"is {_tile_name(below)}) — keep floor under the {label} column."
+    )
+
+
 def check_level(
     grid,
     spawn: tuple[int, int],
@@ -61,9 +88,9 @@ def check_level(
     problems: list[str] = []
     stand = standable_cells(grid)
     if spawn not in stand:
-        problems.append(f"spawn at {spawn} is not standable.")
+        problems.append(_diagnose_unstandable(grid, spawn, "spawn"))
     if exit_ not in stand:
-        problems.append(f"exit at {exit_} is not standable.")
+        problems.append(_diagnose_unstandable(grid, exit_, "exit"))
     if not problems and exit_ not in reachable_cells(grid, spawn, movement):
         problems.append(
             f"exit at {exit_} is not reachable from spawn {spawn} with "

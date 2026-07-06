@@ -104,6 +104,35 @@ class TestValidators:
         problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
         assert problems and "not reachable" in problems[0]
 
+    def test_unstandable_spawn_feedback_names_the_occupant(self) -> None:
+        """Feedback must say WHY: a platform stamped over spawn previously
+        produced three identical blind retries against the real backend."""
+        result = stamp("floor(0,47)\nplatform(0,13,6)\nspawn(2)\nexit(45)", W, H)
+        problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
+        assert problems and "PLATFORM" in problems[0] and "spawn" in problems[0]
+
+    def test_unstandable_spawn_feedback_names_missing_ground(self) -> None:
+        # gap() after spawn removes the floor beneath it.
+        result = stamp("floor(0,47)\nspawn(2)\nexit(45)\ngap(1,3)", W, H)
+        problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
+        assert problems and "no solid ground beneath" in problems[0]
+
+    def test_placement_prompt_includes_spawn(self, tmp_path: Path) -> None:
+        """The 'stay away from spawn' rule is only followable if the prompt
+        says where spawn is."""
+        good = make_fake_responder()
+        placement_prompts = []
+
+        def spy(request):
+            if "### TASK: placement" in request.user_message:
+                placement_prompts.append(request.user_message)
+            return good(request)
+
+        _run_slice(tmp_path / "run", responder=spy)
+        assert placement_prompts
+        assert all("Player spawn: [2, 13]" in m or "Player spawn: [3, 13]" in m
+                   for m in placement_prompts)
+
     def test_placement_rules(self) -> None:
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
         spawn = result.spawn

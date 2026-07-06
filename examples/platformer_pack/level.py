@@ -180,10 +180,11 @@ class PlacementPhase:
                 _lid: str = level_id,
                 _brief: str = brief,
                 _summary: str = summary,
+                _spawn: tuple[int, int] = spawn,
             ) -> str:
                 request = ctx.prompts.placement_generation(
                     _lid, _brief, roster, _summary, self.max_enemies,
-                    feedback=feedback,
+                    spawn=_spawn, feedback=feedback,
                 )
                 if max_tokens is not None:
                     request.max_tokens = max_tokens

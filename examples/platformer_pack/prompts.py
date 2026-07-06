@@ -118,7 +118,9 @@ class PlatformerPrompts:
                 f"Rules: start from floor(0,{width - 1}) then carve; exactly "
                 "one spawn() near the left and one exit() near the right; "
                 "spikes need floor under them; platform rows are ABOVE the "
-                "ground (smaller y = higher)."
+                "ground (smaller y = higher); keep the spawn and exit columns "
+                "clear — no platform, wall, spike, or gap may cover them or "
+                "remove the floor beneath them."
             ),
             max_tokens=512,
         )
@@ -130,6 +132,7 @@ class PlatformerPrompts:
         roster: list[dict],
         standable_summary: str,
         max_enemies: int,
+        spawn: tuple[int, int] | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
         fb = (
@@ -145,10 +148,12 @@ class PlatformerPrompts:
                 f"Brief: {brief}\n"
                 f"Enemy roster (id, archetype, behavior): {json.dumps(roster)}\n"
                 f"Standable cells (x, y are grid coords, y from top): "
-                f"{standable_summary}\n{fb}\n"
+                f"{standable_summary}\n"
+                f"Player spawn: {list(spawn) if spawn else 'unknown'}\n{fb}\n"
                 f"Place 1..{max_enemies} enemies to fit the brief. Spread "
                 "them out; put slower enemies on patrol routes and ranged/"
-                "sentry types guarding key jumps. Return a JSON object:\n"
+                "sentry types guarding key jumps. Keep every enemy at least "
+                "4 columns away from the player spawn. Return a JSON object:\n"
                 '{"placements": [{"enemy_id": str, "x": int, "y": int}, ...]}'
             ),
             max_tokens=512,
