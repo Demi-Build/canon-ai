@@ -6,6 +6,7 @@ slice manifest. No orchestrator, no `requires` — deliberately Phase-2-free.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from canon.bible.models import BibleMetadata
@@ -14,6 +15,8 @@ from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSp
 from examples.platformer_pack.phases import EnemyGeneratorPhase, StagePhase, WorldPhase
 from examples.platformer_pack.render import RenderPhase
 from examples.platformer_pack.tileset import PlaceholderTilesetPhase
+
+logger = logging.getLogger(__name__)
 
 
 class SliceManifestPhase:
@@ -37,6 +40,18 @@ class SliceManifestPhase:
             "warnings": list(ctx.artifacts.get("slice_warnings", [])),
         }
         ctx.adapter.write_json_singleton("manifest.json", manifest)
+
+        # Generation report — the positive summary, MazeWorld-style.
+        stage = ctx.bible.stages[stage_id]
+        logger.info(
+            "Slice complete: world %r / stage %r (%s) — %d levels, "
+            "%d enemy definitions, %d placements, %d warning(s).",
+            manifest["world"], stage_id, stage.theme,
+            len(ctx.bible.levels), len(ctx.bible.enemy_definitions),
+            sum(len(lv.entities) for lv in ctx.bible.levels.values()),
+            len(manifest["warnings"]),
+        )
+
         if not isinstance(getattr(ctx.bible, "metadata", None), BibleMetadata):
             ctx.bible.metadata = BibleMetadata()
         ctx.bible.metadata.phases_run.append(self.name)

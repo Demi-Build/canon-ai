@@ -11,6 +11,7 @@ producing the sheet changes — nothing downstream does.
 from __future__ import annotations
 
 import io
+import logging
 from typing import Any
 
 from canon.bible.artifacts import make_artifact_id
@@ -18,6 +19,8 @@ from canon.bible.platformer import Tileset, TileSlot, TileType
 from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance
 
 TILE_PX = 16
+
+logger = logging.getLogger(__name__)
 
 #: Placeholder tile colors — muted terrain vs. hazard red; enemy hues are
 #: assigned separately (saturated, spaced) so nothing collides visually.
@@ -70,4 +73,8 @@ class PlaceholderTilesetPhase:
         )
         stamp_provenance(ctx, tileset, manifest_hash)
         ctx.bible.tilesets[stage_id] = tileset
+        logger.info(
+            "PlaceholderTilesetPhase wrote %s (%d slots).",
+            sheet_rel, len(slots),
+        )
         _stamp_metadata(ctx, self.name)

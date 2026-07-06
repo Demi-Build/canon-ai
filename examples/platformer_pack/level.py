@@ -19,7 +19,7 @@ from canon.pipeline.retry import retry_with_feedback
 from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
-from examples.platformer_pack.dsl import DslError, StampResult, stamp
+from examples.platformer_pack.dsl import DslError, StampResult, parse_dsl, stamp
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import (
     SCHEMAS_DIR,
@@ -146,6 +146,17 @@ class LayoutStampPhase:
             ctx.bible.levels[level_id] = level
             ctx.artifacts.setdefault("dsl_texts", {})[level_id] = dsl_text
 
+            op_counts: dict[str, int] = {}
+            for op, _args in parse_dsl(dsl_text):
+                op_counts[op] = op_counts.get(op, 0) + 1
+            logger.info(
+                "Layout %s (difficulty %s): %s; spawn %s -> exit %s, "
+                "%d hazard cells",
+                level_id, knobs.get("difficulty"),
+                ", ".join(f"{n}x {op}" for op, n in sorted(op_counts.items())),
+                result.spawn, result.exit, len(result.hazards),
+            )
+
         _stamp_metadata(ctx, self.name)
 
 
@@ -251,6 +262,12 @@ class PlacementPhase:
                 f"{level_dir}/level.json", level.model_dump(mode="json")
             )
             stamp_provenance(ctx, level, content_hash)
+            logger.info(
+                "Placement %s: %d enemies — %s",
+                level_id, len(accepted),
+                ", ".join(f"{p['enemy_id']}@({p['x']},{p['y']})" for p in accepted)
+                or "none",
+            )
 
         _stamp_metadata(ctx, self.name)
 

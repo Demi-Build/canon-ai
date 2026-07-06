@@ -137,6 +137,14 @@ def build_backend(kind: str, model: str | None):
 
 
 def main() -> None:
+    # INFO-level logging so successful generations are visible, not just
+    # failures (mirrors run_mazeworld_full.py); quiet the HTTP chatter.
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["fake", "anthropic"], default="fake")
     parser.add_argument("--model", default=None)

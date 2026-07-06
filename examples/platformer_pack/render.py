@@ -9,12 +9,15 @@ EnemyDefinition's placeholder color, placements from Level.entities.
 from __future__ import annotations
 
 import io
+import logging
 from typing import Any
 
 from canon.bible.platformer import EnemyDefinition, Level, Tileset, TileType
 from examples.platformer_pack.phases import _stamp_metadata
 
 SCALE = 16  # px per cell
+
+logger = logging.getLogger(__name__)
 
 
 def _tile_palette(tileset: Tileset, sheet) -> dict[int, tuple]:
@@ -128,4 +131,8 @@ class RenderPhase:
             ctx.adapter.write_binary(f"review/{stage_id}/{level_id}.png", png)
 
         ctx.adapter.write_binary("review/legend.png", render_legend(enemies))
+        logger.info(
+            "RenderPhase wrote %d level renders + legend to review/.",
+            len(ctx.bible.levels),
+        )
         _stamp_metadata(ctx, self.name)

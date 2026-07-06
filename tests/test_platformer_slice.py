@@ -401,6 +401,24 @@ class TestEndToEnd:
         ids = list(ctx.bible.enemy_definitions)
         assert len(ids) == len(set(ids)) == 3
 
+    def test_positive_generation_logging(self, tmp_path: Path, caplog) -> None:
+        """Successful generations are logged at INFO (MazeWorld parity) —
+        reviewers need evidence of what worked, not just what fell back."""
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            _run_slice(tmp_path / "run")
+        text = caplog.text
+        assert "WorldPhase produced world" in text
+        assert "StagePhase planned stage" in text
+        assert "EnemyGeneratorPhase produced 3 definitions" in text
+        assert "Layout l1 (difficulty 1)" in text
+        assert "Layout l3 (difficulty 3)" in text
+        assert "Placement l1: " in text
+        assert "PlaceholderTilesetPhase wrote" in text
+        assert "RenderPhase wrote 3 level renders" in text
+        assert "Slice complete" in text and "0 warning(s)" in text
+
     def test_provenance_stamped(self, tmp_path: Path) -> None:
         ctx = _run_slice(tmp_path / "run")
         for entity in (

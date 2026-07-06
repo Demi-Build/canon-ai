@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import colorsys
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from canon.skeleton.loader import load_skeleton_spec
 
 SCHEMAS_DIR = Path(__file__).parent / "schemas"
 PROMPT_VERSION = "slice-1"
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,10 @@ class WorldPhase:
         ctx.bible.world = world
         ctx.artifacts["stage_id"] = stage_id
         ctx.artifacts["stage_brief"] = str(data["stage_brief"])
+        logger.info(
+            "WorldPhase produced world %r (stage %r): %s",
+            world.title, stage_id, ctx.artifacts["stage_brief"],
+        )
         _stamp_metadata(ctx, self.name)
 
 
@@ -202,6 +209,12 @@ class StagePhase:
         ctx.bible.stages[stage_id] = stage
         ctx.artifacts["level_briefs"] = dict(zip(level_ids, briefs))
         ctx.artifacts["roster_brief"] = str(data["roster_brief"])
+        logger.info(
+            "StagePhase planned stage %r (theme %r): %d levels; roster: %s",
+            stage_id, stage.theme, len(level_ids), ctx.artifacts["roster_brief"],
+        )
+        for level_id, brief in ctx.artifacts["level_briefs"].items():
+            logger.info("  %s brief: %s", level_id, brief)
         _stamp_metadata(ctx, self.name)
 
 
@@ -286,5 +299,16 @@ class EnemyGeneratorPhase:
             stamp_provenance(ctx, enemy, content_hash)
             ctx.bible.enemy_definitions[enemy_id] = enemy
             stage.enemy_refs.append(enemy.artifact_id)
+            logger.info(
+                "Enemy %d/%d: %r (%s) — hp=%s dmg=%s spd=%s %s color=%s: %s",
+                i + 1, self.count, enemy.name, enemy.archetype,
+                enemy.stats["hp"], enemy.stats["damage"], enemy.stats["speed"],
+                " ".join(f"{k}={v}" for k, v in enemy.behavior.items()),
+                enemy.stats["placeholder_color"], enemy.stats["flavor"],
+            )
 
+        logger.info(
+            "EnemyGeneratorPhase produced %d definitions: %s",
+            len(seen_ids), ", ".join(sorted(seen_ids)),
+        )
         _stamp_metadata(ctx, self.name)
