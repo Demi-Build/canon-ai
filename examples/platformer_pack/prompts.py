@@ -91,13 +91,24 @@ class PlatformerPrompts:
         width: int,
         height: int,
         movement: PlayerMovementSpec,
+        previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
-        fb = (
-            "\nYour previous layout was rejected:\n- " + "\n- ".join(feedback) + "\n"
-            if feedback
-            else ""
-        )
+        # Repair, don't re-roll: on retry the model sees its own rejected
+        # output next to the diagnosis, so it can patch one design instead
+        # of rolling a fresh (differently broken) one each attempt.
+        fb = ""
+        if feedback:
+            prev = (
+                f"\nYour previous layout attempt:\n{previous}\n"
+                if previous
+                else "\n"
+            )
+            fb = (
+                f"{prev}It was rejected because:\n- "
+                + "\n- ".join(feedback)
+                + "\nReturn a corrected layout, changing as little as possible.\n"
+            )
         return LLMRequest(
             system=_SYSTEM,
             user_message=(
@@ -138,13 +149,21 @@ class PlatformerPrompts:
         standable_summary: str,
         max_enemies: int,
         spawn: tuple[int, int] | None = None,
+        previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
-        fb = (
-            "\nPrior placements rejected:\n- " + "\n- ".join(feedback) + "\n"
-            if feedback
-            else ""
-        )
+        fb = ""
+        if feedback:
+            prev = (
+                f"\nYour previous placements attempt:\n{previous}\n"
+                if previous
+                else "\n"
+            )
+            fb = (
+                f"{prev}It was rejected because:\n- "
+                + "\n- ".join(feedback)
+                + "\nReturn corrected placements, changing as little as possible.\n"
+            )
         return LLMRequest(
             system=_SYSTEM,
             user_message=(

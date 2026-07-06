@@ -78,6 +78,7 @@ class LayoutStampPhase:
             knobs = roll_skeleton(
                 spec, derive_rng(seed, self.name, level_id), context=roll_context
             )
+            last_attempt: dict[str, str | None] = {"content": None}
 
             def generate(
                 feedback: list[str] | None = None,
@@ -85,14 +86,17 @@ class LayoutStampPhase:
                 _lid: str = level_id,
                 _brief: str = brief,
                 _knobs: dict = knobs,
+                _last: dict = last_attempt,
             ) -> str:
                 request = ctx.prompts.layout_generation(
                     _lid, _brief, _knobs, self.width, self.height,
-                    self.movement, feedback=feedback,
+                    self.movement, previous=_last["content"], feedback=feedback,
                 )
                 if max_tokens is not None:
                     request.max_tokens = max_tokens
-                return ctx.llm.generate(request, phase=f"{self.name}:{_lid}")
+                content = ctx.llm.generate(request, phase=f"{self.name}:{_lid}")
+                _last["content"] = content
+                return content
 
             def validate(content: str) -> tuple[bool, list[str]]:
                 try:
@@ -173,6 +177,7 @@ class PlacementPhase:
             summary = self._standable_summary(grid)
             brief = ctx.artifacts.get("level_briefs", {}).get(level_id, "")
             accepted_holder: dict[str, list[dict]] = {"placements": []}
+            last_attempt: dict[str, str | None] = {"content": None}
 
             def generate(
                 feedback: list[str] | None = None,
@@ -181,14 +186,17 @@ class PlacementPhase:
                 _brief: str = brief,
                 _summary: str = summary,
                 _spawn: tuple[int, int] = spawn,
+                _last: dict = last_attempt,
             ) -> str:
                 request = ctx.prompts.placement_generation(
                     _lid, _brief, roster, _summary, self.max_enemies,
-                    spawn=_spawn, feedback=feedback,
+                    spawn=_spawn, previous=_last["content"], feedback=feedback,
                 )
                 if max_tokens is not None:
                     request.max_tokens = max_tokens
-                return ctx.llm.generate(request, phase=f"{self.name}:{_lid}")
+                content = ctx.llm.generate(request, phase=f"{self.name}:{_lid}")
+                _last["content"] = content
+                return content
 
             last_problems: list[str] = []
 

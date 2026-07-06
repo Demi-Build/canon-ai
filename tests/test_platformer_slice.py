@@ -131,6 +131,58 @@ class TestValidators:
         problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
         assert problems and "no solid ground beneath" in problems[0]
 
+    def test_layout_retry_prompt_carries_previous_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        """Repair, not re-roll: the retry prompt must contain the rejected
+        DSL next to the diagnosis, so the model patches one design."""
+        good = make_fake_responder()
+        layout_calls: list[str] = []
+        failed_once = {"done": False}
+        bad_dsl = "floor(0,10)\nfloor(20,47)\nspawn(2)\nexit(45)"  # unreachable
+
+        def responder(request):
+            msg = request.user_message
+            if "### TASK: layout" in msg:
+                layout_calls.append(msg)
+                if not failed_once["done"]:
+                    failed_once["done"] = True
+                    return bad_dsl
+            return good(request)
+
+        _run_slice(tmp_path / "run", responder=responder)
+
+        retries = [m for m in layout_calls if "previous layout attempt" in m]
+        assert retries, "no layout retry prompt captured"
+        assert bad_dsl in retries[0]
+        assert "rejected because" in retries[0]
+        assert "changing as little as possible" in retries[0]
+        # And the diagnosis rides along with the rejected output.
+        assert "cannot reach the next foothold" in retries[0]
+
+    def test_placement_retry_prompt_carries_previous_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        good = make_fake_responder()
+        placement_calls: list[str] = []
+        failed_once = {"done": False}
+        bad_json = '{"placements": [{"enemy_id": "cinder_beetle", "x": 3, "y": 13}]}'
+
+        def responder(request):
+            msg = request.user_message
+            if "### TASK: placement" in msg:
+                placement_calls.append(msg)
+                if not failed_once["done"]:
+                    failed_once["done"] = True
+                    return bad_json  # too close to spawn
+            return good(request)
+
+        _run_slice(tmp_path / "run", responder=responder)
+
+        retries = [m for m in placement_calls if "previous placements attempt" in m]
+        assert retries and bad_json in retries[0]
+        assert "too close to spawn" in retries[0]
+
     def test_placement_prompt_includes_spawn(self, tmp_path: Path) -> None:
         """The 'stay away from spawn' rule is only followable if the prompt
         says where spawn is."""
