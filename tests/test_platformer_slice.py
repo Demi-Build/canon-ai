@@ -104,6 +104,20 @@ class TestValidators:
         problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
         assert problems and "not reachable" in problems[0]
 
+    def test_reachability_feedback_locates_the_break(self) -> None:
+        """The message must name the frontier, the unreachable foothold, the
+        failing constraint, and where to put the fix — a location-free
+        'add platforms' sent the real model into fallback loops."""
+        result = stamp("floor(0,10)\nfloor(20,47)\nspawn(2)\nexit(45)", W, H)
+        problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
+        message = problems[0]
+        assert "as far as (10, 13)" in message  # frontier: edge of first floor
+        assert "(20, 13)" in message  # nearest unreachable foothold
+        assert "horizontal distance 10 exceeds max jump distance 4" in message
+        assert "between columns 10 and 20" in message
+        assert "wider than 3 columns" in message
+
+
     def test_unstandable_spawn_feedback_names_the_occupant(self) -> None:
         """Feedback must say WHY: a platform stamped over spawn previously
         produced three identical blind retries against the real backend."""

@@ -91,13 +91,55 @@ def check_level(
         problems.append(_diagnose_unstandable(grid, spawn, "spawn"))
     if exit_ not in stand:
         problems.append(_diagnose_unstandable(grid, exit_, "exit"))
-    if not problems and exit_ not in reachable_cells(grid, spawn, movement):
-        problems.append(
-            f"exit at {exit_} is not reachable from spawn {spawn} with "
-            f"jump_height={movement.jump_height}, jump_width={movement.jump_width}. "
-            "Add stepping platforms or shrink gaps."
-        )
+    if not problems:
+        reached = reachable_cells(grid, spawn, movement)
+        if exit_ not in reached:
+            problems.append(
+                _describe_reachability_break(spawn, exit_, movement, stand, reached)
+            )
     return problems
+
+
+def _describe_reachability_break(
+    spawn: tuple[int, int],
+    exit_: tuple[int, int],
+    movement: PlayerMovementSpec,
+    stand: set[tuple[int, int]],
+    reached: set[tuple[int, int]],
+) -> str:
+    """Locate the break, don't just report it — 'add stepping platforms'
+    without a location sent the real model through identical retries into
+    fallback. Name the frontier cell, the nearest unreachable foothold,
+    and the exact jump constraint that fails."""
+    frontier = max(reached, key=lambda c: (c[0], -c[1]))
+    unreached = stand - reached
+    if not unreached:  # pragma: no cover — exit is standable, so nonempty
+        return f"exit at {exit_} is not reachable from spawn {spawn}."
+    nearest = min(
+        unreached, key=lambda c: abs(c[0] - frontier[0]) + abs(c[1] - frontier[1])
+    )
+    dx = abs(nearest[0] - frontier[0])
+    rise = frontier[1] - nearest[1]
+    constraints = []
+    if dx > movement.jump_width:
+        constraints.append(
+            f"horizontal distance {dx} exceeds max jump distance "
+            f"{movement.jump_width}"
+        )
+    if rise > movement.jump_height:
+        constraints.append(
+            f"rise {rise} exceeds max jump height {movement.jump_height}"
+        )
+    detail = " and ".join(constraints) or "no standable path connects them"
+    return (
+        f"exit at {exit_} is not reachable from spawn {spawn}. The player "
+        f"gets as far as {frontier} but cannot reach the next foothold at "
+        f"{nearest}: {detail}. Add a stepping platform between columns "
+        f"{min(frontier[0], nearest[0])} and {max(frontier[0], nearest[0])} "
+        f"(within {movement.jump_height} rows above the lower surface). "
+        f"Remember: a flat gap wider than {movement.jump_width - 1} columns "
+        "is impossible to cross without a platform."
+    )
 
 
 def check_placements(
