@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -413,16 +412,11 @@ class DatabasePhase:
         return entity
 
     def _write(self, ctx: Any, entities: list[Any]) -> None:
-        """Persist the collected entities to disk."""
-        from canon.persistence import write_array_db, write_keyed_db
-
-        output_dir = getattr(ctx.config, "output_dir", ".")
-        full_path = Path(output_dir) / self.spec.output_path
-
+        """Persist the collected entities via the context's output adapter."""
         if self.spec.output_format == "keyed_object":
-            write_keyed_db(full_path, entities, key_field="id")
+            ctx.adapter.write_json_keyed(self.spec.output_path, entities, key_field="id")
         else:
-            write_array_db(full_path, entities)
+            ctx.adapter.write_json_array(self.spec.output_path, entities)
 
 
 # ---------------------------------------------------------------------------
