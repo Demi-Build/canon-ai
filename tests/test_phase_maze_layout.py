@@ -36,8 +36,9 @@ def make_ctx(
 
     Tests pass ``path_template`` directly to ``MazeLayoutPhase(path_template=...)``
     rather than via config, so the fixture doesn't depend on CanonConfig growing
-    an ``output_paths`` field.  ``output_dir`` is set on the config so
-    ``write_per_map_file`` resolves files under ``tmp_path``.
+    an ``output_paths`` field.  ``output_dir`` is set on the config so the
+    adapter resolves files under ``tmp_path``.  ``seed`` feeds config.seed —
+    maze grids derive from (config.seed, phase, map_id), not from ctx.rng.
     """
     bible = Bible.empty(seed="t")
     for i in range(num_maps):
@@ -48,7 +49,7 @@ def make_ctx(
             environment=["forest", "ruins"][i % 2],
             story_beat="",
         )
-    config = CanonConfig(seed="t", output_dir=tmp_path)
+    config = CanonConfig(seed=str(seed), output_dir=tmp_path)
     return PipelineContext(
         bible=bible,
         config=config,

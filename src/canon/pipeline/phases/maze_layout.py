@@ -7,14 +7,12 @@ ship sibling phases like PlatformerLayoutPhase.
 from __future__ import annotations
 
 import logging
-import random
-from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
 from canon.layout import MazeLayout
 from canon.layout.maze import generate_maze
-from canon.persistence import write_per_map_file
+from canon.pipeline.rng import derive_rng
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +53,14 @@ class MazeLayoutPhase:
             return
 
         path_template = self.path_template or self._default_path_template(ctx)
-        output_dir = getattr(ctx.config, "output_dir", ".")
 
+        config_seed = getattr(ctx.config, "seed", "")
         for map_id, map_obj in ctx.bible.maps.items():
-            # Each map gets a sub-rng derived from ctx.rng + map_id so that
-            # per-map generation is reproducible even if maps are reordered.
-            seed = self._derive_map_seed(ctx.rng, map_id)
-            map_rng = random.Random(seed)
+            # Each map's rng is a pure function of (config seed, phase,
+            # map_id): reproducible across processes (no hash() salt) and
+            # independent of map iteration order — Phase 2 can regenerate a
+            # single map's layout in isolation and get the same maze.
+            map_rng = derive_rng(config_seed, self.name, map_id)
 
             layout: MazeLayout = generate_maze(
                 width=self.width,
@@ -75,20 +74,14 @@ class MazeLayoutPhase:
 
             map_obj.layout = layout
 
-            # Write per-map file: combine output_dir + relative path template
-            full_template = str(Path(output_dir) / path_template)
-            write_per_map_file(full_template, map_id, layout)
+            # Write per-map file: the adapter resolves the relative template
+            # against output_dir before formatting {map_id}.
+            ctx.adapter.write_per_map(path_template, map_id, layout)
 
         self._stamp_metadata(ctx)
         logger.info(
             "MazeLayoutPhase generated %d maze layouts.", len(ctx.bible.maps)
         )
-
-    @staticmethod
-    def _derive_map_seed(rng: random.Random, map_id: str) -> int:
-        """Mix the parent rng's state with map_id so different maps differ
-        but the whole world remains reproducible from one seed."""
-        return rng.getrandbits(64) ^ hash(map_id)
 
     @staticmethod
     def _default_path_template(ctx: Any) -> str:

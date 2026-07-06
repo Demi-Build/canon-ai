@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
-from canon.persistence import write_per_map_file, write_singleton
+from canon.pipeline.rng import derive_seed
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,6 @@ class MazeworldPlacementPhase:
 
         output_dir = getattr(ctx.config, "output_dir", ".")
         path_template = self.path_template or self._default_path_template(ctx)
-        full_template = str(Path(output_dir) / path_template)
 
         # Load generated events + boss monster ids so we can designate a gate
         # (boss combat tile guarding the door) per room. These files are written
@@ -99,14 +98,14 @@ class MazeworldPlacementPhase:
             )
             if gate is not None:
                 gate_flags[gate["event_id"]] = gate
-            write_per_map_file(full_template, map_id, layout)
+            ctx.adapter.write_per_map(path_template, map_id, layout)
             placed += 1
 
         # Persist the gate flags onto the events file (is_gate / is_climax_boss /
         # ensure the boss is among the gate event's monsters) — the runtime reads
         # these event attributes to gate the door and stage the boss fight.
         if gate_flags:
-            self._flag_gate_events(output_dir, gate_flags)
+            self._flag_gate_events(ctx, output_dir, gate_flags)
 
         self._stamp_metadata(ctx)
         logger.info(
@@ -316,9 +315,17 @@ class MazeworldPlacementPhase:
                 layout.door_position = (nx, ny)
                 return
 
-    def _flag_gate_events(self, output_dir: Any, gate_flags: dict[int, dict]) -> None:
+    def _flag_gate_events(
+        self, ctx: Any, output_dir: Any, gate_flags: dict[int, dict]
+    ) -> None:
         """Rewrite events.json: set is_gate (and is_climax_boss on the final
-        room's gate) and ensure the boss is among the gate event's monster_ids."""
+        room's gate) and ensure the boss is among the gate event's monster_ids.
+
+        Read-modify-write: the read is a direct filesystem load (events.json
+        was written by an earlier DatabasePhase); only the write routes
+        through ctx.adapter. Keeping events in the Bible instead of
+        round-tripping through disk is Phase 1 Bible-completeness work.
+        """
         path = Path(output_dir) / "events" / "events.json"
         if not path.exists():
             return
@@ -340,7 +347,7 @@ class MazeworldPlacementPhase:
                 mids = e.get("monster_ids") or []
                 if boss_id not in mids:
                     e["monster_ids"] = [boss_id, *mids]
-        write_singleton(path, events)
+        ctx.adapter.write_json_singleton("events/events.json", events)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -348,9 +355,13 @@ class MazeworldPlacementPhase:
 
     @staticmethod
     def _map_seed(ctx: Any, map_id: str) -> int:
-        """Deterministic per-map seed so placement is reproducible."""
+        """Deterministic per-map seed so placement is reproducible.
+
+        Uses a stable hash — the builtin ``hash()`` is salted per process
+        (PYTHONHASHSEED), which made placement differ run to run.
+        """
         base = str(getattr(ctx.config, "seed", "0"))
-        return hash((base, map_id, "placement")) & 0xFFFFFFFF
+        return derive_seed(base, "placement", map_id)
 
     @staticmethod
     def _default_path_template(ctx: Any) -> str:
