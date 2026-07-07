@@ -39,6 +39,8 @@ from examples.run_platformer_slice import (  # noqa: E402
 )
 
 W, H = 48, 16
+#: Schema-rolled dims per level (level_layout.json lookups).
+LEVEL_DIMS = {"l1": (48, 16), "l2": (56, 16), "l3": (64, 18)}
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +74,9 @@ class TestDsl:
             ("floor(0,47)\nexit(45)", "missing spawn"),
             ("floor(0,47)\nspawn(2)\nspawn(3)\nexit(4)", "more than once"),
             ("floor(0,5)\nspike(10,11)\nspawn(2)\nexit(4)", "no ground"),
+            ("floor(0,5)\nwater(10,12,12)\nspawn(2)\nexit(4)", "no solid basin"),
+            ("floor(0,47)\ngap(20,24)\nwater(20,24,12)\nspawn(2)\nexit(45)", "no solid basin"),
+            ("floor(0,47)\nledge(5,9,15)\nspawn(2)\nexit(45)", "outside 1"),
             ("gibberish", "not a valid op"),
         ],
     )
@@ -84,8 +89,10 @@ class TestDsl:
         assert [op for op, _ in ops] == ["floor", "spawn", "exit"]
 
     def test_all_canned_layouts_valid(self) -> None:
+        # Canned layouts are authored against the schema's per-level dims.
         for level_id, dsl_text in _FAKE_LAYOUTS.items():
-            result = stamp(dsl_text, W, H)
+            width, height = LEVEL_DIMS[level_id]
+            result = stamp(dsl_text, width, height)
             problems = check_level(
                 result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
             )
@@ -196,26 +203,35 @@ class TestValidators:
 
         _run_slice(tmp_path / "run", responder=spy)
         assert placement_prompts
-        assert all("Player spawn: [2, 13]" in m or "Player spawn: [3, 13]" in m
-                   for m in placement_prompts)
+        assert all("Player spawn: [" in m for m in placement_prompts)
 
     def test_placement_rules(self) -> None:
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
         spawn = result.spawn
+        archetypes = {"beetle": "patroller", "fish": "swimmer"}
         accepted, problems = check_placements(
             result.grid,
             [
                 {"enemy_id": "beetle", "x": 14, "y": 13},  # ok
                 {"enemy_id": "beetle", "x": 3, "y": 13},  # too close to spawn
-                {"enemy_id": "beetle", "x": 30, "y": 13},  # spike cell
+                {"enemy_id": "beetle", "x": 40, "y": 13},  # spike cell
                 {"enemy_id": "ghost", "x": 14, "y": 13},  # unknown id
                 {"enemy_id": "beetle", "x": 10, "y": 5},  # mid-air
+                {"enemy_id": "beetle", "x": 33, "y": 12},  # land enemy in water
+                {"enemy_id": "fish", "x": 33, "y": 12},  # swimmer in water: ok
+                {"enemy_id": "fish", "x": 14, "y": 13},  # swimmer on land
+                {"enemy_id": "fish", "x": 32, "y": 13, "elite": True},  # elite ok
             ],
             spawn,
-            {"beetle"},
+            archetypes,
         )
-        assert [p["x"] for p in accepted] == [14]
-        assert len(problems) == 4
+        assert [(p["enemy_id"], p["x"]) for p in accepted] == [
+            ("beetle", 14), ("fish", 33), ("fish", 32),
+        ]
+        assert accepted[2]["elite"] is True
+        assert len(problems) == 6
+        assert any("swimmers must be placed inside water" in p for p in problems)
+        assert any("only swimmers go in water" in p for p in problems)
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +352,20 @@ class TestEndToEnd:
             assert enemy.stats["placeholder_color"].startswith("#")
 
     def test_placements_stand_on_generated_grid(self, tmp_path: Path) -> None:
+        from examples.platformer_pack.validate import water_cells
+
         ctx = _run_slice(tmp_path / "run")
         for level in ctx.bible.levels.values():
             with np.load(tmp_path / "run" / level.collision) as data:
-                cells = standable_cells(data["collision"])
+                grid = data["collision"]
+            stand, water = standable_cells(grid), water_cells(grid)
             for placement in level.entities:
-                assert tuple(placement.pos) in cells
+                enemy_id = placement.ref.split(":", 1)[1]
+                archetype = ctx.bible.enemy_definitions[enemy_id].archetype
+                expected = water if archetype == "swimmer" else stand
+                assert tuple(placement.pos) in expected, (
+                    f"{enemy_id} ({archetype}) at {placement.pos}"
+                )
 
     def test_spawn_exit_first_class_fields(self, tmp_path: Path) -> None:
         """spawn/exit are Level fields (not trigger records) and land on
@@ -381,9 +405,9 @@ class TestEndToEnd:
         assert any("FALLBACK layout" in w for w in warnings)
         manifest = json.loads((tmp_path / "run/manifest.json").read_text())
         assert manifest["warnings"] == warnings
-        # The fallback levels are flat floors — spawn still standable.
+        # Fallback levels are flat floors at each level's schema-rolled dims.
         for level in ctx.bible.levels.values():
-            assert level.spawn == (2, 13)
+            assert level.spawn == (2, level.grid_height - 3)
 
     def test_duplicate_enemy_names_prompted_and_deduped(
         self, tmp_path: Path
@@ -408,7 +432,105 @@ class TestEndToEnd:
         assert any("already taken" in m for m in enemy_calls)
         # IDs are still unique (fallback names or numeric suffix backstop).
         ids = list(ctx.bible.enemy_definitions)
-        assert len(ids) == len(set(ids)) == 3
+        assert len(ids) == len(set(ids)) == 4
+
+    def test_layer_files_and_hash_contract(self, tmp_path: Path) -> None:
+        """3a core: the full §6.4 layer set per level, every hash on the
+        Bible matching a recompute from disk."""
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+        layer_files = (
+            "collision.npz", "terrain.npz", "background.npz",
+            "hazards.json", "triggers.json", "entities.json",
+            "foreground.json", "level.json",
+        )
+        for level in ctx.bible.levels.values():
+            level_dir = run / "level" / level.stage_id / level.level_id
+            for name in layer_files:
+                assert (level_dir / name).exists(), f"{level.level_id}/{name}"
+            for rel, stored in (
+                (level.collision, level.collision_hash),
+                (level.terrain, level.terrain_hash),
+                (level.background, level.background_hash),
+                (f"level/{level.stage_id}/{level.level_id}/hazards.json",
+                 level.hazards_hash),
+                (f"level/{level.stage_id}/{level.level_id}/triggers.json",
+                 level.triggers_hash),
+                (f"level/{level.stage_id}/{level.level_id}/entities.json",
+                 level.entities_hash),
+                (f"level/{level.stage_id}/{level.level_id}/foreground.json",
+                 level.foreground_hash),
+            ):
+                disk = (run / rel).read_bytes()
+                assert stored == "sha256:" + hashlib.sha256(disk).hexdigest(), rel
+
+    def test_step_parents_follow_the_chain(self, tmp_path: Path) -> None:
+        """§6.1 within-level edges, recorded for the Phase 2 orchestrator."""
+        ctx = _run_slice(tmp_path / "run")
+        for level in ctx.bible.levels.values():
+            sp = level.step_parents
+            prefix = f"level:{level.stage_id}/{level.level_id}"
+            assert sp["collision"] == [f"{prefix}/layout"]
+            assert f"{prefix}/collision" in sp["terrain"]
+            assert any(p.startswith("tileset:") for p in sp["terrain"])
+            assert f"{prefix}/collision" in sp["hazards"]
+            assert f"{prefix}/collision" in sp["entities"]
+            assert f"{prefix}/hazards" in sp["entities"]
+            assert f"{prefix}/collision" in sp["foreground"]
+
+    def test_3a_features_land_in_layers(self, tmp_path: Path) -> None:
+        """Water pool, ledge tier, swimmer-in-water, elite override, decor,
+        and variable dims — each visible in the right artifact."""
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+        levels = ctx.bible.levels
+
+        # Variable dims from the schema.
+        assert [(lv.grid_width, lv.grid_height) for lv in levels.values()] == [
+            (48, 16), (56, 16), (64, 18),
+        ]
+        # Water present in every canned level's collision layer.
+        for level in levels.values():
+            with np.load(run / level.collision) as data:
+                assert (data["collision"] == int(TileType.WATER)).any(), (
+                    f"{level.level_id} has no water"
+                )
+        # The swimmer sits in water (also covered by placement test); the
+        # roster rolled one at this seed.
+        archetypes = {e.archetype for e in ctx.bible.enemy_definitions.values()}
+        assert "swimmer" in archetypes
+        # Exactly one elite per canned level, riding on overrides.
+        for level in levels.values():
+            elites = [p for p in level.entities if p.overrides.get("elite")]
+            assert len(elites) == 1
+            assert elites[0].overrides["hp_mult"] == 2
+        # Foreground decor landed inline + in its layer file.
+        for level in levels.values():
+            assert level.foreground
+            file_decor = json.loads(
+                (run / f"level/{level.stage_id}/{level.level_id}/foreground.json")
+                .read_text()
+            )
+            assert len(file_decor) == len(level.foreground)
+        # Tileset slots carry collision semantics, including water.
+        tileset = ctx.bible.tilesets["ashen_depths"]
+        semantics = {s.collision for s in tileset.slots}
+        assert semantics == {"none", "solid", "one_way", "hazard", "water"}
+
+    def test_water_reachability_model(self) -> None:
+        """A pool wider than jump_width is crossable by swimming; the same
+        span as a dry gap is not."""
+        from examples.platformer_pack.validate import reachable_cells
+
+        pool = stamp(
+            "floor(0,47)\nwater(20,30,12)\nspawn(2)\nexit(45)", W, H
+        )
+        assert not check_level(pool.grid, pool.spawn, pool.exit, DEFAULT_MOVEMENT)
+        reached = reachable_cells(pool.grid, pool.spawn, DEFAULT_MOVEMENT)
+        assert (25, 13) in reached  # swimming through the pool
+
+        dry = stamp("floor(0,19)\nfloor(31,47)\nspawn(2)\nexit(45)", W, H)
+        assert check_level(dry.grid, dry.spawn, dry.exit, DEFAULT_MOVEMENT)
 
     def test_godot_engine_output(self, tmp_path: Path) -> None:
         """--engine godot: playable project files + grid.json siblings,
@@ -454,10 +576,13 @@ class TestEndToEnd:
         text = caplog.text
         assert "WorldPhase produced world" in text
         assert "StagePhase planned stage" in text
-        assert "EnemyGeneratorPhase produced 3 definitions" in text
-        assert "Layout l1 (difficulty 1)" in text
-        assert "Layout l3 (difficulty 3)" in text
+        assert "EnemyGeneratorPhase produced 4 definitions" in text
+        assert "Layout l1 (difficulty 1, 48x16)" in text
+        assert "Layout l3 (difficulty 3, 64x18)" in text
         assert "Placement l1: " in text
+        assert "TileAssignmentPhase mapped 3 levels" in text
+        assert "BackgroundPhase wrote 3" in text
+        assert "Decor l1: " in text
         assert "PlaceholderTilesetPhase wrote" in text
         assert "RenderPhase wrote 3 level renders" in text
         assert "Slice complete" in text and "0 warning(s)" in text

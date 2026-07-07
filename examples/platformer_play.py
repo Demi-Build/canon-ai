@@ -74,10 +74,20 @@ def main() -> None:
     movement = manifest["movement"]
     tile_colors = _tile_colors(data_dir, tileset)
     height, width = grid.shape
-    BLOCKING = {1, 3}  # FLOOR, WALL block all sides; PLATFORM (2) is one-way
-    PLATFORM = 2
-    SPIKE = 10
     BODY_L, BODY_R = 0.15, 0.85  # player body span — sample BOTH corners
+
+    # Physics semantics from the tileset manifest (Appendix E.3) — no
+    # hardcoded tile IDs; real art later ships its own semantics here.
+    def _types_with(collision: str) -> set:
+        return {
+            int(s["tile_type"]) for s in tileset["slots"]
+            if s.get("collision") == collision
+        }
+
+    BLOCKING = _types_with("solid")
+    ONE_WAY = _types_with("one_way")
+    HAZARD = _types_with("hazard")
+    WATER = _types_with("water")
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
@@ -93,13 +103,15 @@ def main() -> None:
             self.y = float(placement["y"])
             self.home = float(placement["x"])
             self.direction = 1.0
+            self.elite = bool(placement.get("elite", False))
             self.color = hex_rgb(self.spec["stats"].get("placeholder_color", "#ff00ff"))
 
         def update(self, dt: float, player_x: float) -> None:
             behavior = self.spec["behavior"]
             speed = float(self.spec["stats"].get("speed", 0))
             archetype = self.spec.get("archetype", "sentry")
-            if archetype == "patroller" and speed > 0:
+            # swimmers patrol their pool exactly like patrollers patrol land
+            if archetype in ("patroller", "swimmer") and speed > 0:
                 self.x += self.direction * speed * dt
                 if abs(self.x - self.home) >= behavior.get("patrol_range", 4):
                     self.direction *= -1.0
@@ -137,9 +149,12 @@ def main() -> None:
             tile = tile_at(cx, y)
             if tile in BLOCKING:
                 return True
-            if tile == PLATFORM and prev_bottom <= float(int(y)):
+            if tile in ONE_WAY and prev_bottom <= float(int(y)):
                 return True
         return False
+
+    def in_water(x: float, y: float) -> bool:
+        return tile_at(x + BODY_L, y) in WATER or tile_at(x + BODY_R, y) in WATER
 
     def respawn() -> None:
         nonlocal px, py, vy
@@ -147,12 +162,16 @@ def main() -> None:
 
     run_speed = float(movement["run_speed"])
     gravity = float(movement["gravity"])
+    water_factor = float(movement.get("water_speed_factor", 0.55))
+    water_gravity = float(movement.get("water_gravity", 8.0))
+    swim_impulse = float(movement.get("swim_impulse", 5.0))
     # Initial jump velocity to rise exactly jump_height cells: v = sqrt(2gh)
     jump_v = (2.0 * gravity * float(movement["jump_height"])) ** 0.5
 
     running = True
     while running:
         dt = clock.tick(FPS) / 1000.0
+        swimming = in_water(px, py)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -162,18 +181,24 @@ def main() -> None:
                 elif event.key == pygame.K_r:
                     respawn()
                     won = False
-                elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w) and on_ground:
-                    vy = -jump_v
+                elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
+                    if swimming:
+                        vy = -swim_impulse  # swim stroke, works anywhere in water
+                    elif on_ground:
+                        vy = -jump_v
 
         keys = pygame.key.get_pressed()
         dx = (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
-        new_x = px + dx * run_speed * dt
+        speed = run_speed * (water_factor if swimming else 1.0)
+        new_x = px + dx * speed * dt
         if not blocked_at(new_x, py):
             px = max(0.0, min(new_x, width - 1.0))
 
-        vy += gravity * dt
+        vy += (water_gravity if swimming else gravity) * dt
+        if swimming:
+            vy = min(vy, 3.0)  # terminal sink speed in water
         prev_bottom = py + 0.99
         new_y = py + vy * dt
         if vy > 0 and landing_at(px, new_y + 0.99, prev_bottom):
@@ -186,7 +211,7 @@ def main() -> None:
 
         if py > height + 2:
             respawn()
-        if tile_at(px + BODY_L, py) == SPIKE or tile_at(px + BODY_R, py) == SPIKE:
+        if tile_at(px + BODY_L, py) in HAZARD or tile_at(px + BODY_R, py) in HAZARD:
             respawn()
         for enemy in live_enemies:
             enemy.update(dt, px)
@@ -214,10 +239,23 @@ def main() -> None:
                 screen, enemy.color,
                 (enemy.x * SCALE + 2, enemy.y * SCALE + 2, SCALE - 4, SCALE - 4),
             )
+            if enemy.elite:  # elite variation marker (§6.1 overrides)
+                pygame.draw.rect(
+                    screen, (255, 255, 255),
+                    (enemy.x * SCALE, enemy.y * SCALE, SCALE, SCALE), 2,
+                )
         pygame.draw.rect(
             screen, (240, 240, 240),
             (px * SCALE + 4, py * SCALE + 4, SCALE - 8, SCALE - 8),
         )
+        # Foreground decor — drawn AFTER the player: in front, per §6.2.
+        for decor in level.get("foreground", []):
+            cx = decor["x"] * SCALE + SCALE // 2
+            cy = decor["y"] * SCALE + SCALE // 2
+            pygame.draw.polygon(
+                screen, (185, 195, 205),
+                [(cx, cy - 10), (cx + 8, cy), (cx, cy + 10), (cx - 8, cy)],
+            )
         if won:
             screen.blit(
                 font.render("LEVEL COMPLETE — R to reset", True, (64, 255, 112)),

@@ -2,9 +2,11 @@
 stamped grid. Kick back to the agent on fail — callers turn the returned
 problem strings into retry feedback.
 
-Reachability here is the *lite* version: BFS over standable cells where an
-edge exists if the horizontal distance <= jump_width and the rise <=
-jump_height (drops are unlimited). Full A* + jump-arc physics is Phase 3.
+Reachability here is the *lite* version: BFS over traversable cells —
+standable cells connected by the jump rule (dx <= jump_width, rise <=
+jump_height, drops unlimited), plus water cells (Appendix E.1: vertical
+movement is free inside water; the jump rule applies when exiting it).
+Full A* + jump-arc physics is Phase 3b.
 """
 
 from __future__ import annotations
@@ -28,17 +30,32 @@ def standable_cells(grid) -> set[tuple[int, int]]:
     return out
 
 
+def water_cells(grid) -> set[tuple[int, int]]:
+    height, width = grid.shape
+    return {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if int(grid[y, x]) == TileType.WATER
+    }
+
+
 def reachable_cells(
     grid, start: tuple[int, int], movement: PlayerMovementSpec
 ) -> set[tuple[int, int]]:
-    """BFS over standable cells under the lite jump model."""
+    """BFS over traversable cells: stand->stand by the jump rule;
+    water->water 4-adjacent (swimming is free movement); stand->water by
+    entering/falling in (horizontal within jump_width, any drop); and
+    water->stand by the jump rule from the water cell (surface exit)."""
     stand = standable_cells(grid)
-    if start not in stand:
+    water = water_cells(grid)
+    if start not in stand and start not in water:
         return set()
     seen = {start}
     queue = deque([start])
     while queue:
         cx, cy = queue.popleft()
+        in_water = (cx, cy) in water
         for nx, ny in stand:
             if (nx, ny) in seen:
                 continue
@@ -47,6 +64,21 @@ def reachable_cells(
             if dx <= movement.jump_width and rise <= movement.jump_height:
                 seen.add((nx, ny))
                 queue.append((nx, ny))
+        for nx, ny in water:
+            if (nx, ny) in seen:
+                continue
+            if in_water:
+                if abs(nx - cx) + abs(ny - cy) == 1:  # swim: 4-adjacent
+                    seen.add((nx, ny))
+                    queue.append((nx, ny))
+            else:
+                # Enter water: walk/fall in — horizontal within jump reach,
+                # drops unlimited (ny >= cy) or a small hop up.
+                dx = abs(nx - cx)
+                rise = cy - ny
+                if dx <= movement.jump_width and rise <= movement.jump_height:
+                    seen.add((nx, ny))
+                    queue.append((nx, ny))
     return seen
 
 
@@ -146,29 +178,51 @@ def check_placements(
     grid,
     placements: list[dict],
     spawn: tuple[int, int],
-    valid_ids: set[str],
+    archetypes: dict[str, str],
 ) -> tuple[list[dict], list[str]]:
     """Split proposed placements into (accepted, problem strings).
 
-    Rules: known enemy id; standable cell; not a spike cell; not within 3
-    columns of spawn on the spawn row (no spawn-camping).
+    Rules: known enemy id; land enemies on standable cells, swimmers IN
+    water cells (Appendix E.1); not within 3 columns of spawn on the spawn
+    row (no spawn-camping). An optional boolean ``elite`` rides through
+    (per-placement variation, §6.1 overrides).
     """
     stand = standable_cells(grid)
+    water = water_cells(grid)
     accepted: list[dict] = []
     problems: list[str] = []
     for p in placements:
         eid, x, y = p.get("enemy_id"), p.get("x"), p.get("y")
-        if eid not in valid_ids:
-            problems.append(f"unknown enemy_id {eid!r}; roster: {sorted(valid_ids)!r}.")
-            continue
-        if not isinstance(x, int) or not isinstance(y, int) or (x, y) not in stand:
+        if eid not in archetypes:
             problems.append(
-                f"{eid} at ({x}, {y}) is not a standable cell — enemies need "
-                "solid ground below and a free cell to occupy."
+                f"unknown enemy_id {eid!r}; roster: {sorted(archetypes)!r}."
+            )
+            continue
+        if not isinstance(x, int) or not isinstance(y, int):
+            problems.append(f"{eid} placement needs integer x and y; got {p!r}.")
+            continue
+        is_swimmer = archetypes[eid] == "swimmer"
+        if is_swimmer and (x, y) not in water:
+            problems.append(
+                f"{eid} is a swimmer and ({x}, {y}) is not a water cell — "
+                "swimmers must be placed inside water."
+            )
+            continue
+        if not is_swimmer and (x, y) not in stand:
+            hint = (
+                " (that's a water cell — only swimmers go in water)"
+                if (x, y) in water
+                else ""
+            )
+            problems.append(
+                f"{eid} at ({x}, {y}) is not a standable cell{hint} — land "
+                "enemies need solid ground below and a free cell to occupy."
             )
             continue
         if y == spawn[1] and abs(x - spawn[0]) <= 3:
             problems.append(f"{eid} at ({x}, {y}) is too close to spawn {spawn}.")
             continue
-        accepted.append({"enemy_id": eid, "x": x, "y": y})
+        accepted.append(
+            {"enemy_id": eid, "x": x, "y": y, "elite": bool(p.get("elite", False))}
+        )
     return accepted, problems

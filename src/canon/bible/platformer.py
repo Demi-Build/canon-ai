@@ -38,13 +38,15 @@ from canon.bible.artifacts import ArtifactMeta
 class TileType(IntEnum):
     """Collision-grid cell values. The LevelSchema (§4.2) owns the
     authoritative, user-extensible set; these are the framework defaults.
-    Gaps in the numbering are deliberate (solids < 10, hazards >= 10)."""
+    Numbering bands are deliberate: solids < 10, hazards >= 10 < 20,
+    traversable volumes >= 20 (PRD Appendix E.1)."""
 
     EMPTY = 0
     FLOOR = 1
     PLATFORM = 2
     WALL = 3
     SPIKE = 10
+    WATER = 20
 
 
 # ---------------------------------------------------------------------------
@@ -95,11 +97,19 @@ class SparseMaskEntry(BaseModel):
 
 
 class TileSlot(BaseModel):
-    """One slot of a tilesheet: which region is which TileType."""
+    """One slot of a tilesheet: which region is which TileType.
+
+    ``collision`` (PRD Appendix E.3) carries the tile's physics semantics
+    so consumers derive behavior from the tileset manifest instead of
+    hardcoding tile IDs — the seam where per-tile collision shapes attach
+    when real art arrives. Empty string = derive from tile_type (back-compat
+    for pre-3a manifests).
+    """
 
     index: int
     tile_type: TileType
     px_region: tuple[int, int, int, int] | None = None  # x, y, w, h in pixels
+    collision: str = ""  # "solid" | "one_way" | "none" | "hazard" | "water"
 
 
 # ---------------------------------------------------------------------------
@@ -155,13 +165,23 @@ class Level(ArtifactMeta):
     background: str = ""
     background_hash: str = ""
 
-    # Sparse masks — inline records (§6.2)
+    # Sparse masks — inline records (§6.2), mirrored to per-layer JSON
+    # files whose content hashes live below (§6.3).
     hazards: list[SparseMaskEntry] = Field(default_factory=list)
     triggers: list[SparseMaskEntry] = Field(default_factory=list)
     foreground: list[SparseMaskEntry] = Field(default_factory=list)
+    hazards_hash: str = ""
+    triggers_hash: str = ""
+    foreground_hash: str = ""
+    entities_hash: str = ""
 
     # Placements — references, never copies (§6.1)
     entities: list[Placement] = Field(default_factory=list)
+
+    # Per-step parent edges (§6.1 within-level chain), recorded now so the
+    # Phase 2 orchestrator has real edges to walk. Keyed by step name
+    # ("collision", "terrain", …) → parent artifact IDs.
+    step_parents: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class EnemyDefinition(ArtifactMeta):

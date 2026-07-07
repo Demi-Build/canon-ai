@@ -106,12 +106,14 @@ def slugify(name: str) -> str:
 
 def placeholder_color(index: int) -> str:
     """Deterministic, well-spaced enemy colors: golden-angle hue steps
-    starting at green. The red band (±25° around 0) is reserved for spike
-    tiles — hues landing there get nudged out so enemies never read as
-    hazards."""
+    starting at green. The red band (±25° around 0, spike tiles) and the
+    blue band (200–250°, water tiles) are reserved — hues landing there
+    get nudged out so enemies never read as hazards or water."""
     hue = (140.0 + index * 137.508) % 360.0
     if hue < 25.0 or hue > 335.0:
         hue = (hue + 40.0) % 360.0
+    if 200.0 <= hue <= 250.0:
+        hue = (hue + 60.0) % 360.0
     r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.78, 0.95)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 

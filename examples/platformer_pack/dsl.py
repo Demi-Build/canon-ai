@@ -9,8 +9,11 @@ Grammar (one op per line or semicolon-separated; ints only)::
     gap(x1, x2)          removes ground (fall = respawn)
     pit(x1, x2)          gap with SPIKE at the bottom row (visible death pit)
     platform(x, y, len)  one-way PLATFORM at row y, cols x..x+len-1
+    ledge(x1, x2, y)     solid FLOOR segment at arbitrary row y (a tier)
     wall(x, y1, y2)      solid WALL column
     spike(x1, x2)        SPIKE on the standing row above ground
+    water(x1, x2, y)     fill WATER from surface row y down to the first
+                         solid below (needs a basin — errors over gaps)
     spawn(x)             player start, standing on ground at column x
     exit(x)              level exit, standing on ground at column x
 
@@ -37,8 +40,10 @@ _ARITY = {
     "gap": 2,
     "pit": 2,
     "platform": 3,
+    "ledge": 3,
     "wall": 3,
     "spike": 2,
+    "water": 3,
     "spawn": 1,
     "exit": 1,
 }
@@ -146,6 +151,43 @@ def stamp(text: str, width: int, height: int) -> StampResult:
             if length < 1:
                 raise DslError(f"platform: length must be >= 1, got {length}.")
             grid[y, x : x + length] = TileType.PLATFORM
+        elif name == "ledge":
+            x1, x2, y = args
+            _check_x(name, x1, x2)
+            if not 1 <= y <= height - 3:
+                raise DslError(
+                    f"ledge: row {y} outside 1..{height - 3} "
+                    "(leave headroom above, ground below)."
+                )
+            grid[y, x1 : x2 + 1] = TileType.FLOOR
+        elif name == "water":
+            x1, x2, y_surface = args
+            _check_x(name, x1, x2)
+            if not 1 <= y_surface <= height - 2:
+                raise DslError(
+                    f"water: surface row {y_surface} outside 1..{height - 2}."
+                )
+            solid = (int(TileType.FLOOR), int(TileType.WALL))
+            for x in range(x1, x2 + 1):
+                # Fill EMPTY cells from the surface down until solid ground.
+                # Water over a gap/pit would drain — demand a basin.
+                y = y_surface
+                filled = False
+                while y < height and int(grid[y, x]) == TileType.EMPTY:
+                    grid[y, x] = TileType.WATER
+                    filled = True
+                    y += 1
+                if y >= height or int(grid[y, x]) not in solid:
+                    raise DslError(
+                        f"water: column {x} has no solid basin beneath the "
+                        "surface — water needs floor under it; don't pour "
+                        "water over gaps or pits."
+                    )
+                if not filled:
+                    raise DslError(
+                        f"water: column {x} at surface row {y_surface} is "
+                        "already occupied — pick an open surface row."
+                    )
         elif name == "wall":
             x, y1, y2 = args
             _check_x(name, x)

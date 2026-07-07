@@ -10,7 +10,12 @@ import logging
 from typing import Any
 
 from canon.bible.models import BibleMetadata
-from examples.platformer_pack.level import LayoutStampPhase, PlacementPhase
+from examples.platformer_pack.layers import BackgroundPhase, TileAssignmentPhase
+from examples.platformer_pack.level import (
+    DecoratorPhase,
+    LayoutStampPhase,
+    PlacementPhase,
+)
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import EnemyGeneratorPhase, StagePhase, WorldPhase
 from examples.platformer_pack.render import RenderPhase
@@ -59,19 +64,24 @@ class SliceManifestPhase:
 
 def compose_pipeline(
     num_levels: int = 3,
-    num_enemies: int = 3,
+    num_enemies: int = 4,
     width: int = 48,
     height: int = 16,
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
     engine: str = "json",
 ) -> list:
+    # Order enforces invariant I5: collision before every other layer;
+    # hazards (stamped with collision) before entities; decoration last.
     phases = [
         WorldPhase(),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         EnemyGeneratorPhase(count=num_enemies),
         PlaceholderTilesetPhase(),
         LayoutStampPhase(width=width, height=height, movement=movement),
+        TileAssignmentPhase(),
+        BackgroundPhase(),
         PlacementPhase(),
+        DecoratorPhase(),
         RenderPhase(),
         SliceManifestPhase(),
     ]

@@ -17,5 +17,11 @@ class PlayerMovementSpec(BaseModel):
     jump_width: int = 4  # max horizontal clearance, in cells
     gravity: float = 40.0  # cells / second^2 (harness feel; validator ignores)
 
+    # Water modifiers (PRD Appendix E.1). One spec feeds BOTH the
+    # reachability validator and every play surface — they must agree.
+    water_speed_factor: float = 0.55  # horizontal speed multiplier in water
+    water_gravity: float = 8.0  # slow sink, cells / second^2
+    swim_impulse: float = 5.0  # upward velocity per swim stroke, cells / s
+
 
 DEFAULT_MOVEMENT = PlayerMovementSpec()

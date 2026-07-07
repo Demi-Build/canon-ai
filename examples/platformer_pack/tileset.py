@@ -22,14 +22,27 @@ TILE_PX = 16
 
 logger = logging.getLogger(__name__)
 
-#: Placeholder tile colors — muted terrain vs. hazard red; enemy hues are
-#: assigned separately (saturated, spaced) so nothing collides visually.
+#: Placeholder tile colors — muted terrain vs. hazard red vs. water blue;
+#: enemy hues are assigned separately (saturated, spaced hues, red and blue
+#: bands avoided) so nothing collides visually.
 TILE_COLORS: dict[TileType, tuple[int, int, int, int]] = {
     TileType.EMPTY: (24, 24, 32, 255),  # background
     TileType.FLOOR: (110, 110, 120, 255),
     TileType.PLATFORM: (150, 120, 70, 255),
     TileType.WALL: (70, 70, 80, 255),
     TileType.SPIKE: (200, 40, 40, 255),
+    TileType.WATER: (40, 90, 200, 255),
+}
+
+#: Physics semantics per tile (PRD Appendix E.3) — consumers read these
+#: from the tileset manifest instead of hardcoding tile IDs.
+TILE_COLLISION: dict[TileType, str] = {
+    TileType.EMPTY: "none",
+    TileType.FLOOR: "solid",
+    TileType.PLATFORM: "one_way",
+    TileType.WALL: "solid",
+    TileType.SPIKE: "hazard",
+    TileType.WATER: "water",
 }
 
 
@@ -52,6 +65,7 @@ class PlaceholderTilesetPhase:
                     index=i,
                     tile_type=tile_type,
                     px_region=(i * TILE_PX, 0, TILE_PX, TILE_PX),
+                    collision=TILE_COLLISION[tile_type],
                 )
             )
 

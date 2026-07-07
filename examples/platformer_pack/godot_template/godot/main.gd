@@ -1,23 +1,23 @@
-# Canon platformer slice — Godot consumer.
+# Canon platformer slice — Godot consumer (Phase 3a: layered).
 #
 # Everything on screen resolves from the generated databases, mirroring the
 # review renderer and the (throwaway) pygame harness:
-#   - movement physics   <- manifest.json  (PlayerMovementSpec)
-#   - tile appearance    <- tileset manifest slots + tilesheet.png regions
+#   - movement physics   <- manifest.json  (PlayerMovementSpec incl. water)
+#   - tile appearance    <- TERRAIN layer (slot indices) + tilesheet regions
+#   - tile physics       <- tileset slot `collision` semantics (E.3) —
+#                           no hardcoded tile IDs anywhere in this script
 #   - level geometry     <- level/<stage>/<id>/collision.grid.json
-#   - enemy color/stats  <- enemy/<id>.json  (placeholder_color, behavior)
-#   - placements/markers <- level.json + entities.json
-# No content is hardcoded here. When real art replaces the placeholder
-# tilesheet, this script does not change.
-#
-# Controls: arrows/A-D move, Space/W/Up jump, R restart level, Esc quit.
+#   - background         <- background layer bands
+#   - enemy color/stats  <- enemy/<id>.json; elite markers from placements
+#   - decor              <- foreground layer, drawn IN FRONT of the player
+# When real art replaces the placeholder tilesheet, this script does not
+# change. Controls: arrows/A-D move, Space/W/Up jump or swim, R restart,
+# Esc quit.
 extends Node2D
 
 const CELL := 32.0
-const TILE_EMPTY := 0
-const TILE_SPIKE := 10
-# Tile semantics: 1=FLOOR and 3=WALL block from all sides; 2=PLATFORM is
-# one-way (land from above only) — see _blocked_at/_landing_at.
+const BODY_L := 0.15
+const BODY_R := 0.85
 
 var manifest: Dictionary
 var movement: Dictionary
@@ -26,6 +26,7 @@ var level_ids: Array
 var level_index := 0
 
 var grid: Array = []
+var terrain: Array = []
 var grid_w := 0
 var grid_h := 0
 var spawn := Vector2.ZERO
@@ -33,13 +34,21 @@ var exit_cell := Vector2.ZERO
 var enemy_defs := {}
 var enemies: Array = []
 
+# Physics semantics from tileset slot metadata (sets of tile-type ints).
+var blocking := {}
+var one_way := {}
+var hazard := {}
+var water := {}
+var slot_atlas := {}
+var slot_types := {}
+
 var player_pos := Vector2.ZERO
 var player_vy := 0.0
 var on_ground := false
 var won := false
 
-var tile_atlas := {}
 var world_root: Node2D
+var decor_root: Node2D
 var player_rect: ColorRect
 var status: Label
 
@@ -64,8 +73,7 @@ func _load_json(path: String) -> Variant:
 
 
 func _load_tileset() -> void:
-	# Appearance resolves through the Tileset artifact: sample each slot's
-	# region out of the tilesheet (placeholder squares today, art later).
+	# Appearance AND physics resolve through the Tileset artifact.
 	var ts: Dictionary = _load_json("res://tileset/%s/manifest.json" % stage_id)
 	var image := Image.load_from_file(
 		ProjectSettings.globalize_path("res://" + str(ts["tilesheet_path"]))
@@ -76,7 +84,19 @@ func _load_tileset() -> void:
 		var atlas := AtlasTexture.new()
 		atlas.atlas = sheet
 		atlas.region = Rect2(region[0], region[1], region[2], region[3])
-		tile_atlas[int(slot["tile_type"])] = atlas
+		var index := int(slot["index"])
+		var tile_type := int(slot["tile_type"])
+		slot_atlas[index] = atlas
+		slot_types[index] = tile_type
+		match str(slot.get("collision", "")):
+			"solid":
+				blocking[tile_type] = true
+			"one_way":
+				one_way[tile_type] = true
+			"hazard":
+				hazard[tile_type] = true
+			"water":
+				water[tile_type] = true
 
 
 func _load_enemy_defs() -> void:
@@ -89,31 +109,53 @@ func _load_level(index: int) -> void:
 	var base := "res://level/%s/%s" % [stage_id, level_id]
 	var level: Dictionary = _load_json(base + "/level.json")
 	grid = _load_json(base + "/collision.grid.json")["collision"]
+	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
+	var background: Array = _load_json(base + "/background.grid.json")["background"]
 	grid_h = grid.size()
 	grid_w = grid[0].size() if grid_h > 0 else 0
 	spawn = Vector2(level["spawn"][0], level["spawn"][1])
 	exit_cell = Vector2(level["exit"][0], level["exit"][1])
+	get_window().size = Vector2i(int(grid_w * CELL), int(grid_h * CELL))
 
 	if world_root != null:
 		world_root.queue_free()
 	world_root = Node2D.new()
 	add_child(world_root)
+	_build_background(background)
 	_build_tiles()
 	_build_markers()
 	_spawn_enemies(_load_json(base + "/entities.json"))
 	_spawn_player()
+	_build_decor(level.get("foreground", []))
 	won = false
 	status.text = "%s — %s  (R restart, Esc quit)" % [manifest["world"], level_id]
+	move_child(status, get_child_count() - 1)
+
+
+func _build_background(background: Array) -> void:
+	# One rect per horizon band — placeholder art, but a real layer.
+	var band_start := 0
+	for y in range(1, background.size() + 1):
+		var ended := y == background.size()
+		if ended or int(background[y][0]) != int(background[band_start][0]):
+			var band := int(background[band_start][0])
+			var shade := 24 + 7 * (2 - band)
+			var rect := ColorRect.new()
+			rect.color = Color8(shade, shade, shade + 10)
+			rect.position = Vector2(0, band_start * CELL)
+			rect.size = Vector2(grid_w * CELL, (y - band_start) * CELL)
+			world_root.add_child(rect)
+			band_start = y
 
 
 func _build_tiles() -> void:
 	for y in range(grid_h):
 		for x in range(grid_w):
-			var tile := int(grid[y][x])
-			if tile == TILE_EMPTY:
+			var slot := int(terrain[y][x])
+			if slot_types.get(slot, 0) == 0:  # EMPTY slot: background shows
 				continue
 			var sprite := Sprite2D.new()
-			sprite.texture = tile_atlas.get(tile, tile_atlas[TILE_EMPTY])
+			sprite.texture = slot_atlas[slot]
 			sprite.centered = false
 			sprite.position = Vector2(x, y) * CELL
 			sprite.scale = Vector2(CELL, CELL) / sprite.texture.get_size()
@@ -132,17 +174,57 @@ func _spawn_enemies(placements: Array) -> void:
 	enemies.clear()
 	for p in placements:
 		var spec: Dictionary = enemy_defs[p["enemy_id"]]
-		var rect := ColorRect.new()
-		rect.color = Color(str(spec["stats"].get("placeholder_color", "#ff00ff")))
-		rect.size = Vector2(CELL - 4, CELL - 4)
-		world_root.add_child(rect)
-		enemies.append({
-			"spec": spec,
-			"pos": Vector2(p["x"], p["y"]),
-			"home_x": float(p["x"]),
-			"dir": 1.0,
-			"node": rect,
-		})
+		var elite: bool = bool(p.get("elite", false))
+		if elite:
+			# Elite variation marker (§6.1 overrides): white frame.
+			var frame := ColorRect.new()
+			frame.color = Color.WHITE
+			frame.size = Vector2(CELL, CELL)
+			world_root.add_child(frame)
+			var rect := _enemy_rect(spec)
+			world_root.add_child(rect)
+			enemies.append(_enemy_state(p, spec, rect, frame))
+		else:
+			var rect := _enemy_rect(spec)
+			world_root.add_child(rect)
+			enemies.append(_enemy_state(p, spec, rect, null))
+
+
+func _enemy_rect(spec: Dictionary) -> ColorRect:
+	var rect := ColorRect.new()
+	rect.color = Color(str(spec["stats"].get("placeholder_color", "#ff00ff")))
+	rect.size = Vector2(CELL - 4, CELL - 4)
+	return rect
+
+
+func _enemy_state(p: Dictionary, spec: Dictionary, rect: ColorRect, frame) -> Dictionary:
+	return {
+		"spec": spec,
+		"pos": Vector2(p["x"], p["y"]),
+		"home_x": float(p["x"]),
+		"dir": 1.0,
+		"node": rect,
+		"frame": frame,
+	}
+
+
+func _build_decor(foreground: Array) -> void:
+	# Foreground decor sits in a root added AFTER the player — the player
+	# passes BEHIND these pieces (§6.2 layer collapsing).
+	if decor_root != null:
+		decor_root.queue_free()
+	decor_root = Node2D.new()
+	add_child(decor_root)
+	for d in foreground:
+		var poly := Polygon2D.new()
+		var cx := float(d["x"]) * CELL + CELL / 2.0
+		var cy := float(d["y"]) * CELL + CELL / 2.0
+		poly.polygon = PackedVector2Array([
+			Vector2(cx, cy - 10), Vector2(cx + 8, cy),
+			Vector2(cx, cy + 10), Vector2(cx - 8, cy),
+		])
+		poly.color = Color8(185, 195, 205)
+		decor_root.add_child(poly)
 
 
 func _spawn_player() -> void:
@@ -160,39 +242,30 @@ func _respawn() -> void:
 	player_vy = 0.0
 
 
-# The player body spans [x + BODY_L, x + BODY_R] horizontally (in cells),
-# so collision samples BOTH corners — single-point sampling let players
-# clip through platform edges.
-const BODY_L := 0.15
-const BODY_R := 0.85
-
-
 func _tile(x: float, y: float) -> int:
 	var ix := int(x)
 	var iy := int(y)
 	if ix < 0 or ix >= grid_w or iy < 0 or iy >= grid_h:
-		return TILE_EMPTY
+		return 0
 	return int(grid[iy][ix])
 
 
 func _blocked_at(x: float, y: float) -> bool:
-	# Walls/floors block from every side; PLATFORM is one-way (handled
-	# only in the landing check) so you can jump up through it.
-	var left := _tile(x + BODY_L, y)
-	var right := _tile(x + BODY_R, y)
-	return left == 1 or left == 3 or right == 1 or right == 3
+	return blocking.has(_tile(x + BODY_L, y)) or blocking.has(_tile(x + BODY_R, y))
 
 
 func _landing_at(x: float, y: float, prev_bottom: float) -> bool:
-	# Falling: land on solids always; land on a PLATFORM only when the
-	# feet were above its top edge last frame (classic one-way platform).
 	for cx in [x + BODY_L, x + BODY_R]:
 		var tile := _tile(cx, y)
-		if tile == 1 or tile == 3:
+		if blocking.has(tile):
 			return true
-		if tile == 2 and prev_bottom <= float(int(y)):
+		if one_way.has(tile) and prev_bottom <= float(int(y)):
 			return true
 	return false
+
+
+func _in_water(x: float, y: float) -> bool:
+	return water.has(_tile(x + BODY_L, y)) or water.has(_tile(x + BODY_R, y))
 
 
 func _process(delta: float) -> void:
@@ -202,13 +275,18 @@ func _process(delta: float) -> void:
 		_load_level(level_index)
 		return
 
+	var swimming := _in_water(player_pos.x, player_pos.y)
+
 	# --- player: same integration as the pygame harness ---
 	var dx := 0.0
 	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
 		dx += 1.0
 	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		dx -= 1.0
-	var new_x: float = player_pos.x + dx * float(movement["run_speed"]) * delta
+	var speed := float(movement["run_speed"])
+	if swimming:
+		speed *= float(movement.get("water_speed_factor", 0.55))
+	var new_x: float = player_pos.x + dx * speed * delta
 	if not _blocked_at(new_x, player_pos.y):
 		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
 
@@ -218,9 +296,16 @@ func _process(delta: float) -> void:
 		or Input.is_key_pressed(KEY_UP)
 		or Input.is_key_pressed(KEY_W)
 	)
-	if jump_pressed and on_ground:
-		player_vy = -sqrt(2.0 * gravity * float(movement["jump_height"]))
-	player_vy += gravity * delta
+	if jump_pressed:
+		if swimming:
+			player_vy = -float(movement.get("swim_impulse", 5.0))
+		elif on_ground:
+			player_vy = -sqrt(2.0 * gravity * float(movement["jump_height"]))
+	if swimming:
+		player_vy += float(movement.get("water_gravity", 8.0)) * delta
+		player_vy = minf(player_vy, 3.0)  # terminal sink speed
+	else:
+		player_vy += gravity * delta
 	var prev_bottom: float = player_pos.y + 0.99
 	var new_y: float = player_pos.y + player_vy * delta
 	if player_vy > 0.0 and _landing_at(player_pos.x, new_y + 0.99, prev_bottom):
@@ -236,32 +321,31 @@ func _process(delta: float) -> void:
 
 	if player_pos.y > grid_h + 2.0:
 		_respawn()
-	# _tile is bounds-safe (returns EMPTY off-grid), so jumping above the
-	# screen can't wrap onto bottom-row pit spikes.
 	if (
-		_tile(player_pos.x + BODY_L, player_pos.y) == TILE_SPIKE
-		or _tile(player_pos.x + BODY_R, player_pos.y) == TILE_SPIKE
+		hazard.has(_tile(player_pos.x + BODY_L, player_pos.y))
+		or hazard.has(_tile(player_pos.x + BODY_R, player_pos.y))
 	):
 		_respawn()
 
 	# --- enemies: execute their database behavior params ---
 	for enemy in enemies:
 		var spec: Dictionary = enemy["spec"]
-		var speed := float(spec["stats"].get("speed", 0))
+		var espeed := float(spec["stats"].get("speed", 0))
 		var behavior: Dictionary = spec["behavior"]
 		var archetype := str(spec.get("archetype", "sentry"))
-		# Vector2 is a value type: read-modify-write, never mutate a
-		# component through the Dictionary element.
 		var pos: Vector2 = enemy["pos"]
-		if archetype == "patroller" and speed > 0.0:
-			pos.x += enemy["dir"] * speed * delta
+		# swimmers patrol their pool exactly like patrollers patrol land
+		if (archetype == "patroller" or archetype == "swimmer") and espeed > 0.0:
+			pos.x += enemy["dir"] * espeed * delta
 			if absf(pos.x - enemy["home_x"]) >= float(behavior.get("patrol_range", 4)):
 				enemy["dir"] = enemy["dir"] * -1.0
-		elif archetype == "chaser" and speed > 0.0:
+		elif archetype == "chaser" and espeed > 0.0:
 			if absf(player_pos.x - pos.x) <= float(behavior.get("aggro_range", 6)):
-				pos.x += signf(player_pos.x - pos.x) * speed * delta
+				pos.x += signf(player_pos.x - pos.x) * espeed * delta
 		enemy["pos"] = pos
 		enemy["node"].position = pos * CELL + Vector2(2, 2)
+		if enemy["frame"] != null:
+			enemy["frame"].position = pos * CELL
 		if pos.distance_to(player_pos) < 0.7:
 			_respawn()
 
