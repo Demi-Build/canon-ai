@@ -267,16 +267,25 @@ class TestDatabasesDriveReview:
 
 
 def _run_slice(
-    output_dir: Path, seed: str = "emberfall_001", responder=None
+    output_dir: Path,
+    seed: str = "emberfall_001",
+    responder=None,
+    engine: str = "json",
 ) -> PipelineContext:
+    adapter = None
+    if engine == "godot":
+        from canon.adapters import GodotOutputAdapter
+
+        adapter = GodotOutputAdapter(output_dir)
     ctx = PipelineContext(
         bible=Bible.empty(seed=seed),
         config=CanonConfig(seed=seed, output_dir=output_dir),
         rng=random.Random(seed),
         llm=LLMClient(FakeLLMBackend(responder or make_fake_responder())),
         prompts=PlatformerPrompts(),
+        adapter=adapter,
     )
-    run_pipeline(compose_pipeline(), ctx)
+    run_pipeline(compose_pipeline(engine=engine), ctx)
     return ctx
 
 
@@ -400,6 +409,40 @@ class TestEndToEnd:
         # IDs are still unique (fallback names or numeric suffix backstop).
         ids = list(ctx.bible.enemy_definitions)
         assert len(ids) == len(set(ids)) == 3
+
+    def test_godot_engine_output(self, tmp_path: Path) -> None:
+        """--engine godot: playable project files + grid.json siblings,
+        with the canonical tree unchanged (npz + hashes identical)."""
+        json_run, godot_run = tmp_path / "json", tmp_path / "godot"
+        ctx_json = _run_slice(json_run)
+        ctx_godot = _run_slice(godot_run, engine="godot")
+
+        # Project files present.
+        assert (godot_run / "project.godot").exists()
+        assert (godot_run / "godot/main.tscn").exists()
+        assert (godot_run / "godot/main.gd").exists()
+        assert not (json_run / "project.godot").exists()  # json engine: none
+
+        # Grid siblings match the canonical npz content.
+        for level in ctx_godot.bible.levels.values():
+            sibling = godot_run / level.collision.replace(".npz", ".grid.json")
+            with np.load(godot_run / level.collision) as data:
+                canonical = data["collision"].tolist()
+            assert json.loads(sibling.read_text())["collision"] == canonical
+
+        # Canonical artifacts byte-identical across engines; hashes agree.
+        for rel in ("world.json", "manifest.json"):
+            assert (json_run / rel).read_bytes() == (godot_run / rel).read_bytes()
+        for level_id, level in ctx_json.bible.levels.items():
+            assert level.collision_hash == ctx_godot.bible.levels[level_id].collision_hash
+
+    def test_godot_engine_deterministic(self, tmp_path: Path) -> None:
+        run_a, run_b = tmp_path / "a", tmp_path / "b"
+        _run_slice(run_a, engine="godot")
+        _run_slice(run_b, engine="godot")
+        files = sorted(p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file())
+        for rel in files:
+            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
 
     def test_positive_generation_logging(self, tmp_path: Path, caplog) -> None:
         """Successful generations are logged at INFO (MazeWorld parity) —

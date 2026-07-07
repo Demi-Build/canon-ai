@@ -63,8 +63,9 @@ def compose_pipeline(
     width: int = 48,
     height: int = 16,
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    engine: str = "json",
 ) -> list:
-    return [
+    phases = [
         WorldPhase(),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         EnemyGeneratorPhase(count=num_enemies),
@@ -74,3 +75,8 @@ def compose_pipeline(
         RenderPhase(),
         SliceManifestPhase(),
     ]
+    if engine == "godot":
+        from examples.platformer_pack.godot_export import GodotExportPhase
+
+        phases.append(GodotExportPhase())
+    return phases

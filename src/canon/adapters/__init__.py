@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from canon.adapters.godot_adapter import GodotOutputAdapter
 from canon.adapters.json_adapter import JsonOutputAdapter
 
 
@@ -45,4 +46,4 @@ class OutputAdapter(Protocol):
     def resolve_path(self, relative: str | Path) -> Path: ...
 
 
-__all__ = ["OutputAdapter", "JsonOutputAdapter"]
+__all__ = ["OutputAdapter", "JsonOutputAdapter", "GodotOutputAdapter"]

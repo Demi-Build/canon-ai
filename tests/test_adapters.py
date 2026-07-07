@@ -137,6 +137,35 @@ class TestContentHashReturns:
         assert h1 == h2 != h3
 
 
+class TestGodotAdapter:
+    def test_satisfies_protocol_and_inherits_json(self, tmp_path: Path) -> None:
+        from canon.adapters import GodotOutputAdapter
+
+        adapter = GodotOutputAdapter(tmp_path)
+        assert isinstance(adapter, OutputAdapter)
+        assert isinstance(adapter, JsonOutputAdapter)
+
+    def test_write_numpy_emits_grid_sibling_same_hash(self, tmp_path: Path) -> None:
+        numpy = pytest.importorskip("numpy")
+        import hashlib
+
+        from canon.adapters import GodotOutputAdapter
+
+        grid = numpy.array([[0, 1], [10, 2]], dtype=numpy.int8)
+        json_hash = JsonOutputAdapter(tmp_path / "a").write_numpy("m.npz", g=grid)
+        godot_hash = GodotOutputAdapter(tmp_path / "b").write_numpy("m.npz", g=grid)
+
+        # Canonical npz + hash identical under either adapter (§6.3 contract).
+        assert json_hash == godot_hash
+        npz_bytes = (tmp_path / "b/m.npz").read_bytes()
+        assert godot_hash == "sha256:" + hashlib.sha256(npz_bytes).hexdigest()
+
+        # The Godot adapter adds the engine-readable sibling; json doesn't.
+        sibling = tmp_path / "b/m.grid.json"
+        assert json.loads(sibling.read_text()) == {"g": [[0, 1], [10, 2]]}
+        assert not (tmp_path / "a/m.grid.json").exists()
+
+
 class TestBinaryWrites:
     def test_write_binary(self, tmp_path: Path) -> None:
         adapter = JsonOutputAdapter(tmp_path)

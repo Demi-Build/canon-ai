@@ -152,19 +152,33 @@ def main() -> None:
     parser.add_argument("--seed", default="emberfall_001")
     parser.add_argument("--num-levels", type=int, default=3)
     parser.add_argument("--num-enemies", type=int, default=3)
+    parser.add_argument(
+        "--engine", choices=["json", "godot"], default="json",
+        help="godot: use GodotOutputAdapter and emit a playable Godot "
+        "project into the output dir (open it in Godot 4.3+).",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     config = CanonConfig(seed=args.seed, output_dir=output_dir)
+
+    adapter = None
+    if args.engine == "godot":
+        from canon.adapters import GodotOutputAdapter
+
+        adapter = GodotOutputAdapter(output_dir)
+
     ctx = PipelineContext(
         bible=Bible.empty(seed=args.seed),
         config=config,
         rng=random.Random(args.seed),
         llm=LLMClient(build_backend(args.backend, args.model)),
         prompts=PlatformerPrompts(),
+        adapter=adapter,
     )
     phases = compose_pipeline(
-        num_levels=args.num_levels, num_enemies=args.num_enemies
+        num_levels=args.num_levels, num_enemies=args.num_enemies,
+        engine=args.engine,
     )
     run_pipeline(phases, ctx)
 
@@ -177,8 +191,13 @@ def main() -> None:
 
     print(f"\nSlice generated at {output_dir}/")
     print(f"  Review PNGs:  {output_dir}/review/")
+    if args.engine == "godot":
+        print(
+            f"  Godot:        open {output_dir}/project.godot in "
+            "Godot 4.3+ and press Play"
+        )
     print(
-        "  Play:         uv run --extra platformer --extra play "
+        "  Pygame:       uv run --extra platformer --extra play "
         f"python examples/platformer_play.py {output_dir} l1"
     )
 
