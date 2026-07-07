@@ -42,6 +42,15 @@ def _stamp_metadata(ctx: Any, name: str) -> None:
     ctx.bible.metadata.phases_run.append(name)
 
 
+def warn(ctx: Any, message: str) -> None:
+    """Record a generation warning where reviewers will actually see it:
+    the log now, and ctx.artifacts["slice_warnings"] → manifest.json +
+    end-of-run summary. Fallbacks must never be silent — a run that
+    "succeeds" on fallback content is a failed generation wearing a suit."""
+    logger.warning(message)
+    ctx.artifacts.setdefault("slice_warnings", []).append(message)
+
+
 def stamp_provenance(ctx: Any, entity: Any, content_hash: str, schema_version: str = "1") -> None:
     """Fold the adapter's content hash + generation inputs into the entity's
     provenance hash (PRD §6.3). Stamped on the Bible entity only — the

@@ -23,13 +23,18 @@ v1 enforced policies:
 
 - ``water_containment``: "contained" — pools must be walled in on both
   sides (or reach the level edge); layout validator + prompt enforce.
-  "free" — open-sided water allowed (waterfall-style levels).
+  "free" — open-sided pools allowed (waterfall-style levels). Since 3b
+  this governs every VOLUME tile (water, lava, mud); the key keeps its
+  historical name — renaming it would be a data migration.
 - ``enemy_water_policy``: "swimmers_only" — swimmers live in water, land
   enemies refuse to enter it (placement validation + runtime movement).
   "forbidden" — no enemies in water at all. "amphibious" — anyone
   anywhere.
 - ``platform_drop_through``: whether Down+jump drops the player through
   one-way platforms.
+- ``variant_caps`` (3b): per-level at-most-N caps per enemy-variant name
+  (variants.json vocabulary). Enforced at placement validation and offered
+  in the placement prompt. A variant name absent from this map is uncapped.
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ class GameRules(BaseModel):
         "swimmers_only"
     )
     platform_drop_through: bool = True
+    variant_caps: dict[str, int] = {"elite": 1, "champion": 1}
 
 
 def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:

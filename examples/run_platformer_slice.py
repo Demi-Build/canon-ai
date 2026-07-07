@@ -9,6 +9,12 @@
         python examples/run_platformer_slice.py --backend anthropic \
         --output-dir /tmp/plat_slice_real
 
+    # a DIFFERENT game from the same template — data only, no code
+    uv run --extra platformer python examples/run_platformer_slice.py \
+        --backend fake --output-dir /tmp/lava_slice \
+        --rules examples/lava_world/game_rules.json \
+        --tiles examples/lava_world/tile_types.json
+
 Then review PNGs under <output-dir>/review/ and play a level:
 
     uv run --extra platformer --extra play \
@@ -36,35 +42,44 @@ from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa
 # ---------------------------------------------------------------------------
 # Canned fake responses — deterministic, matched to prompt markers.
 # Layouts are hand-verified against the movement spec (jump 3 up / 4 across;
-# water is swimmable) and against the schema dims: l1 48x16, l2 56x16,
-# l3 64x18. Each exercises the 3a feature set: water pool, ledge tier,
-# variable dims.
+# volumes are swimmable) and against the schema dims: l1 48x16, l2 56x16,
+# l3 64x18. Each exercises the 3a+3b feature set: volume pool, ledge tier,
+# checkpoint, variable dims. The {vol}/{haz} slots take the game's tile
+# names (parsed from the prompt's registry-driven vocabulary), so the SAME
+# responder plays any game the template can express — that's the point.
 # ---------------------------------------------------------------------------
 
-_FAKE_LAYOUTS = {
+_FAKE_LAYOUT_TEMPLATES = {
     # Pools are CONTAINED (GameRules.water_containment): flanking walls
     # form the basin lip — jump over, swim across, climb out.
     "l1": (
-        "floor(0,47)\nplatform(10,11,4)\nledge(16,21,9)\n"
-        "wall(29,12,13)\nwall(37,12,13)\nwater(30,36,12)\n"
-        "spike(40,41)\nspawn(2)\nexit(45)"
+        "floor(0,47)\npool({vol},5,7)\nplatform(10,11,4)\nledge(16,21,9)\n"
+        "wall(29,12,13)\nwall(37,12,13)\nvolume({vol},30,36,12)\n"
+        "hazard_strip({haz},40,41)\ncheckpoint(25)\nspawn(2)\nexit(45)"
     ),
     "l2": (
         "floor(0,20)\nplatform(22,11,2)\nfloor(25,55)\n"
-        "wall(29,11,13)\nwall(39,11,13)\nwater(30,38,11)\n"
-        "spike(46,47)\nledge(48,51,11)\nspawn(2)\nexit(53)"
+        "wall(29,11,13)\nwall(39,11,13)\nvolume({vol},30,38,11)\n"
+        "hazard_strip({haz},46,47)\nledge(48,51,11)\ncheckpoint(43)\n"
+        "spawn(2)\nexit(53)"
     ),
     "l3": (
-        "floor(0,10)\npit(11,13)\nfloor(14,30)\nspike(20,22)\n"
-        "wall(23,14,15)\nwall(30,14,15)\nwater(24,29,14)\n"
+        "floor(0,10)\npit(11,13)\nfloor(14,30)\nhazard_strip({haz},20,22)\n"
+        "wall(23,14,15)\nwall(30,14,15)\nvolume({vol},24,29,14)\n"
         "floor(35,63)\nplatform(32,13,2)\nplatform(37,14,2)\n"
-        "ledge(40,46,12)\nspike(50,52)\n"
-        "wall(54,15,15)\nwall(61,15,15)\nwater(55,60,15)\n"
-        "spawn(3)\nexit(62)"
+        "ledge(40,46,12)\nhazard_strip({haz},50,52)\n"
+        "wall(54,15,15)\nwall(61,15,15)\nvolume({vol},55,60,15)\n"
+        "checkpoint(36)\nspawn(3)\nexit(62)"
     ),
 }
 
-#: Hand-verified spots per level: land (standable) and water cells.
+#: Rendered for the pack's default game — what tests stamp directly.
+_FAKE_LAYOUTS = {
+    level_id: template.format(vol="water", haz="spike")
+    for level_id, template in _FAKE_LAYOUT_TEMPLATES.items()
+}
+
+#: Hand-verified spots per level: land (standable) and volume cells.
 _FAKE_SPOTS = {
     "l1": {"land": [(14, 13), (18, 8), (43, 13)], "water": [(33, 12), (32, 13)]},
     "l2": {"land": [(10, 13), (27, 13), (49, 10)], "water": [(34, 12), (36, 11)]},
@@ -90,6 +105,22 @@ _FAKE_DECOR = {
 }
 
 _FAKE_ENEMY_NAMES = ["Cinder Beetle", "Ash Wraith", "Slag Sentry", "Vent Skimmer"]
+
+#: Canned style palette, keyed by color_role — ember-dusk hues that pass
+#: the contrast/warm-hazard validators for BOTH shipped registries. Roles
+#: the prompt asks for that aren't listed get a readable neutral.
+_FAKE_PALETTE = {
+    "background": "#2b2331",
+    "ground": "#6e5a4e",
+    "platform": "#b8804a",
+    "wall": "#5b4d5e",
+    "danger": "#e0453a",
+    "water": "#3a6ea5",
+    "lava": "#e8722c",
+    "basalt": "#5a4f5c",
+    "mud": "#6b5640",
+    "ice": "#bcd8e8",
+}
 
 
 def make_fake_responder():
@@ -138,32 +169,57 @@ def make_fake_responder():
             return json.dumps(
                 {"name": name, "flavor": f"A {name.lower()} of the ashen depths."}
             )
+        if task == "style":
+            roles_match = re.search(r"### ROLES: ([a-z_,]+)", msg)
+            roles = roles_match.group(1).split(",") if roles_match else []
+            return json.dumps(
+                {
+                    "palette": {
+                        role: _FAKE_PALETTE.get(role, "#8a8a8a")
+                        for role in roles
+                    }
+                }
+            )
         if task == "layout":
-            return _FAKE_LAYOUTS.get(level_id, _FAKE_LAYOUTS["l1"])
+            # The prompt advertises the game's registry vocabulary — pick
+            # the first volume/hazard name it offers, so the same canned
+            # layouts play emberfall (water/spike) or a lava world.
+            vol_match = re.search(r"Volume tiles for volume\(\): (\w+)", msg)
+            haz_match = re.search(r"Hazard tiles for hazard_strip\(\): (\w+)", msg)
+            template = _FAKE_LAYOUT_TEMPLATES.get(
+                level_id, _FAKE_LAYOUT_TEMPLATES["l1"]
+            )
+            return template.format(
+                vol=vol_match.group(1) if vol_match else "water",
+                haz=haz_match.group(1) if haz_match else "spike",
+            )
         if task == "placement":
             roster_match = re.search(
                 r"roster \(id, archetype, behavior\): (\[.*?\])\n", msg
             )
             roster = json.loads(roster_match.group(1)) if roster_match else []
+            # Variant vocabulary comes from the prompt (data-driven): mark
+            # the first placements with the offered names, elite/champion
+            # first for the default game's canonical look.
+            offer_match = re.search(r'"variant": one of \[(.*?)\]', msg)
+            offered = re.findall(r"'(\w+)'", offer_match.group(1)) if offer_match else []
+            order = [n for n in ("elite", "champion") if n in offered]
+            order += sorted(set(offered) - set(order))
             spots = _FAKE_SPOTS.get(level_id, _FAKE_SPOTS["l1"])
             land = list(spots["land"])
             water = list(spots["water"])
             placements = []
-            # Archetype-aware: swimmers into water spots, everyone else on
-            # land; first placement of each level marked elite.
+            # Archetype-aware: swimmers into volume spots, everyone else on
+            # land; earliest placements take the variant vocabulary.
             for entry in roster:
                 pool = water if entry["archetype"] == "swimmer" else land
                 if not pool:
                     continue
                 x, y = pool.pop(0)
-                placements.append(
-                    {
-                        "enemy_id": entry["id"],
-                        "x": x,
-                        "y": y,
-                        "elite": not placements,
-                    }
-                )
+                placement = {"enemy_id": entry["id"], "x": x, "y": y}
+                if len(placements) < len(order):
+                    placement["variant"] = order[len(placements)]
+                placements.append(placement)
             return json.dumps({"placements": placements})
         if task == "decor":
             return json.dumps({"decor": _FAKE_DECOR.get(level_id, [])})
@@ -208,6 +264,24 @@ def main() -> None:
         help="Path to a game_rules.json (defaults to the pack's). Copy the "
         "pack file and edit it to make a different game.",
     )
+    parser.add_argument(
+        "--tiles", default=None,
+        help="Path to a tile_types.json registry (defaults to the pack's). "
+        "New volumes/hazards are data entries here, not code.",
+    )
+    parser.add_argument(
+        "--variants", default=None,
+        help="Path to a variants.json enemy-variant vocabulary (defaults "
+        "to the pack's).",
+    )
+    parser.add_argument(
+        "--orchestrate", action="store_true",
+        help="Run through the Phase 2 DAG orchestrator instead of the "
+        "sequential pipeline: persists bible.json into the output tree "
+        "(node state lives there), skips DONE nodes on re-run, and "
+        "re-runs exactly the stale steps after you hand-edit a layer "
+        "file (per-step regen).",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -228,13 +302,46 @@ def main() -> None:
         adapter=adapter,
     )
     from examples.platformer_pack.rules import load_rules
+    from examples.platformer_pack.tiles import load_tiles
+    from examples.platformer_pack.variants import load_variants
 
     rules = load_rules(args.rules) if args.rules else load_rules()
-    phases = compose_pipeline(
-        num_levels=args.num_levels, num_enemies=args.num_enemies,
-        engine=args.engine, rules=rules,
-    )
-    run_pipeline(phases, ctx)
+    tiles = load_tiles(args.tiles) if args.tiles else load_tiles()
+    variants = load_variants(args.variants) if args.variants else load_variants()
+    if args.orchestrate:
+        from canon.pipeline.orchestrator import detect_edits
+        from examples.platformer_pack.dag import run_orchestrated
+
+        bible_path = output_dir / "bible.json"
+        if bible_path.exists():
+            # Resume/regen: reload state, flag hand-edited layers so the
+            # scheduler re-runs exactly their stale descendants.
+            ctx.bible = Bible.load(bible_path)
+            edits = detect_edits(ctx.bible, output_dir)
+            if edits.user_edited:
+                print(f"Edited (kept as-is): {edits.user_edited}")
+                print(f"Stale (regenerating): {edits.stale}")
+        report = run_orchestrated(
+            ctx, persist_path=bible_path,
+            num_levels=args.num_levels, num_enemies=args.num_enemies,
+            engine=args.engine, rules=rules, tiles=tiles, variants=variants,
+        )
+        print(
+            f"\nOrchestrated: {len(report.done)} node(s) ran, "
+            f"{len(report.skipped)} skipped"
+            + (f", ESCALATED: {report.escalated}" if report.escalated else "")
+        )
+        print(
+            "Per-step regen: hand-edit a layer file (e.g. "
+            f"{output_dir}/level/<stage>/l2/collision.npz), re-run this "
+            "same command — only that level's stale steps regenerate."
+        )
+    else:
+        phases = compose_pipeline(
+            num_levels=args.num_levels, num_enemies=args.num_enemies,
+            engine=args.engine, rules=rules, tiles=tiles, variants=variants,
+        )
+        run_pipeline(phases, ctx)
 
     warnings = ctx.artifacts.get("slice_warnings", [])
     if warnings:

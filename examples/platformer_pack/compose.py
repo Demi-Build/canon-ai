@@ -2,6 +2,10 @@
 
 World → Stage → Enemies → Tileset → Layout/Stamp → Placement → Render →
 slice manifest. No orchestrator, no `requires` — deliberately Phase-2-free.
+
+The 3b template knobs — GameRules, TileRegistry, VariantSet — enter here
+and thread into every phase that enforces them; the manifest ships all
+three so play surfaces resolve the same vocabulary the validators used.
 """
 
 from __future__ import annotations
@@ -20,7 +24,10 @@ from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSp
 from examples.platformer_pack.phases import EnemyGeneratorPhase, StagePhase, WorldPhase
 from examples.platformer_pack.render import RenderPhase
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.style import StyleGuidePhase
+from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.tileset import PlaceholderTilesetPhase
+from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +38,15 @@ class SliceManifestPhase:
 
     name = "plat:manifest"
 
-    def __init__(self, rules: GameRules = DEFAULT_RULES) -> None:
+    def __init__(
+        self,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        variants: VariantSet = DEFAULT_VARIANTS,
+    ) -> None:
         self.rules = rules
+        self.tiles = tiles
+        self.variants = variants
 
     def run(self, ctx: Any) -> None:
         stage_id = ctx.artifacts["stage_id"]
@@ -44,10 +58,20 @@ class SliceManifestPhase:
             "levels": list(ctx.bible.stages[stage_id].level_ids),
             "enemies": sorted(ctx.bible.enemy_definitions),
             "movement": DEFAULT_MOVEMENT.model_dump(),
-            # Per-game behavior policy (Appendix E.7) — one source read by
-            # validators at generation time and every play surface at runtime.
-            # model_dump includes unknown (inert) keys: open carriage.
+            # Per-game vocabulary (E.7 + 3b) — one source read by
+            # validators at generation time and every play surface at
+            # runtime. model_dump includes unknown (inert) keys: open
+            # carriage. Tile params also ride on tileset slots; the
+            # registry here is the reviewer-facing copy.
             "rules": self.rules.model_dump(),
+            "tiles": [t.model_dump(mode="json") for t in self.tiles.tiles],
+            # The palette the tilesheet was actually painted with (style
+            # agent output, or placeholder fallback) — from the Tileset
+            # artifact, the single source.
+            "palette": ctx.bible.tilesets[stage_id].palette,
+            "variants": [
+                v.model_dump(mode="json") for v in self.variants.variants
+            ],
             # Fallbacks and dropped content are failures wearing a suit —
             # they must survive the run and reach the reviewer.
             "warnings": list(ctx.artifacts.get("slice_warnings", [])),
@@ -77,6 +101,8 @@ def compose_pipeline(
     height: int = 16,
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
     rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+    variants: VariantSet = DEFAULT_VARIANTS,
     engine: str = "json",
 ) -> list:
     # Order enforces invariant I5: collision before every other layer;
@@ -85,16 +111,18 @@ def compose_pipeline(
         WorldPhase(),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         EnemyGeneratorPhase(count=num_enemies),
-        PlaceholderTilesetPhase(),
+        StyleGuidePhase(tiles=tiles),
+        PlaceholderTilesetPhase(tiles=tiles),
         LayoutStampPhase(
-            width=width, height=height, movement=movement, rules=rules
+            width=width, height=height, movement=movement, rules=rules,
+            tiles=tiles,
         ),
         TileAssignmentPhase(),
         BackgroundPhase(),
-        PlacementPhase(rules=rules),
+        PlacementPhase(rules=rules, tiles=tiles, variants=variants),
         DecoratorPhase(),
-        RenderPhase(),
-        SliceManifestPhase(rules=rules),
+        RenderPhase(variants=variants),
+        SliceManifestPhase(rules=rules, tiles=tiles, variants=variants),
     ]
     if engine == "godot":
         from examples.platformer_pack.godot_export import GodotExportPhase

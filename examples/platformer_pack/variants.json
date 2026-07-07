@@ -1,0 +1,17 @@
+{
+  "_doc": "Per-game enemy variant vocabulary (Phase 3b). A placement opts in via {\"variant\": \"<name>\"} in its overrides; the definition stays canonical. stat_mults multiply definition stats; behavior overrides behavior params; visual tells review surfaces how to mark it (outline / scale / outline_scale). Per-level caps live in game_rules.json variant_caps. Copy this file to make a different game and point the runner at it with --variants.",
+  "variants": [
+    {
+      "name": "elite",
+      "stat_mults": { "hp": 2 },
+      "visual": "outline"
+    },
+    {
+      "name": "champion",
+      "stat_mults": { "hp": 4, "damage": 2 },
+      "speed_mult": 0.8,
+      "size": 1.3,
+      "visual": "outline_scale"
+    }
+  ]
+}
