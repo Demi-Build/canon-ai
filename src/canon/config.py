@@ -83,6 +83,13 @@ class CanonConfig(BaseModel):
     max_retries: int = 3
     max_llm_workers: int = 8
     context_limit_chars: int = 20000
+    # Orchestrator (PRD §7): DAG node concurrency cap. Default 1 =
+    # sequential; raising it is opt-in (LLM rate limits are the user's
+    # risk — this is the only throttle in v1).
+    max_concurrency: int = 1
+    # Human gates (invariant I4): auto-approve for unattended runs; set
+    # False to make gate nodes pause the run cleanly for review.
+    gates_auto_approve: bool = True
     output_dir: Path = Path("./canon_output")
     output_paths: dict[str, str] = Field(default_factory=_default_output_paths)
     # v0.1 compat alias kept; llm_backend is the v0.2 canonical name

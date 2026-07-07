@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 # `canon.layout` depends only on pydantic — no circular import with canon.bible.
 # Import at runtime so the discriminated union resolves correctly and Pydantic
 # serializes the full subclass schema (not just the base Layout fields).
-from canon.bible.artifacts import PhaseStatus  # noqa: E402
+from canon.bible.artifacts import ArtifactStatus, PhaseStatus  # noqa: E402
 from canon.bible.platformer import (  # noqa: E402
     BossDefinition,
     EnemyDefinition,
@@ -107,6 +107,9 @@ class BibleMetadata(BaseModel):
     # ArtifactMeta.status. Populated by the Phase 2 orchestrator; empty for
     # MazeWorld runs.
     phase_status: dict[str, PhaseStatus] = Field(default_factory=dict)
+    # Fine per-node status (PRD §7.3) — the orchestrator's resume state.
+    # Keyed by node/artifact id; state-on-Bible, no separate state file.
+    node_status: dict[str, ArtifactStatus] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

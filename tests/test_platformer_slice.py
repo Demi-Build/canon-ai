@@ -626,6 +626,48 @@ class TestEndToEnd:
         )
         assert len(accepted) == 2 and not problems
 
+    def test_edit_detection_and_stale_cascade(self, tmp_path: Path) -> None:
+        """Phase 2 §6.3 on real 3a data: a hand-edited collision file marks
+        that step user_edited, its §6.1 descendants stale, ancestors and
+        sibling levels untouched."""
+        from canon.pipeline.orchestrator import detect_edits
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+
+        # Pristine tree: nothing flagged.
+        clean = detect_edits(ctx.bible, run)
+        assert not clean.user_edited and not clean.stale and not clean.missing
+
+        # Simulate a user editing l2's collision mask on disk.
+        target = run / "level/ashen_depths/l2/collision.npz"
+        target.write_bytes(target.read_bytes() + b"edited")
+        report = detect_edits(ctx.bible, run)
+
+        prefix = "level:ashen_depths/l2"
+        assert report.user_edited == [f"{prefix}/collision"]
+        # Descendants through step_parents edges — including transitive
+        # (entities <- hazards <- collision).
+        for step in ("terrain", "background", "hazards", "triggers",
+                     "entities", "foreground"):
+            assert f"{prefix}/{step}" in report.stale, step
+        # Ancestors and sibling levels untouched.
+        assert not any("l1" in aid or "l3" in aid for aid in report.stale)
+        assert not any(aid.startswith("tileset") for aid in report.user_edited)
+        # Statuses landed on the Bible: entity + node_status.
+        from canon.bible.artifacts import ArtifactStatus
+
+        assert ctx.bible.levels["l2"].status is ArtifactStatus.USER_EDITED
+        assert (
+            ctx.bible.metadata.node_status[f"{prefix}/collision"]
+            is ArtifactStatus.USER_EDITED
+        )
+        assert (
+            ctx.bible.metadata.node_status[f"{prefix}/terrain"]
+            is ArtifactStatus.STALE
+        )
+        assert ctx.bible.levels["l1"].status is not ArtifactStatus.STALE
+
     def test_godot_engine_output(self, tmp_path: Path) -> None:
         """--engine godot: playable project files + grid.json siblings,
         with the canonical tree unchanged (npz + hashes identical)."""
