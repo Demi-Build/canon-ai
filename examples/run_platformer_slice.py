@@ -169,6 +169,12 @@ def make_fake_responder():
             return json.dumps(
                 {"name": name, "flavor": f"A {name.lower()} of the ashen depths."}
             )
+        if task == "enemy_flavor":
+            name_match = re.search(r"### NAME: (.+)", msg)
+            name = name_match.group(1) if name_match else "it"
+            return json.dumps(
+                {"flavor": f"A {name.lower()} remade by the regen winds."}
+            )
         if task == "style":
             roles_match = re.search(r"### ROLES: ([a-z_,]+)", msg)
             roles = roles_match.group(1).split(",") if roles_match else []

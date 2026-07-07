@@ -391,6 +391,92 @@ def _dependency_edges(bible: Any) -> dict[str, set[str]]:
     return edges
 
 
+@dataclass
+class RegenPlan:
+    """What a regen request resolved to — marked ids re-run on the next
+    orchestration; user-edited descendants are protected (§6.3)."""
+
+    marked: list[str] = field(default_factory=list)
+    kept_user_edited: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "marked": self.marked,
+            "kept_user_edited": self.kept_user_edited,
+        }
+
+
+def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
+    """Resolve regen targets and mark them (plus their §6.1 descendants)
+    STALE, so the next orchestration re-runs exactly them — the substrate
+    behind `canon regen`.
+
+    Targets: a bare level id ("l2") expands to every step of that level;
+    anything else is an artifact/node id used as-is ("level:<s>/<lid>/
+    entities", "phase:plat:style"). Unknown targets raise, naming what IS
+    addressable. EXPLICIT targets always mark (asking to regen a
+    user-edited artifact discards the edit — deliberate); CASCADED
+    descendants keep user_edited status (edits are never destroyed as a
+    side effect)."""
+    if not isinstance(getattr(bible, "metadata", None), BibleMetadata):
+        bible.metadata = BibleMetadata()
+    metadata = bible.metadata
+    edges = _dependency_edges(bible)
+    known: set[str] = set(metadata.node_status)
+    for child, parents in edges.items():
+        known.add(child)
+        known.update(parents)
+
+    explicit: list[str] = []
+    for target in targets:
+        level = getattr(bible, "levels", {}).get(target)
+        if level is not None:
+            prefix = f"level:{level.stage_id}/{level.level_id}"
+            explicit.extend(
+                f"{prefix}/{step}" for step in sorted(level.step_parents)
+            )
+        elif target in known:
+            explicit.append(target)
+        else:
+            raise KeyError(
+                f"unknown regen target {target!r} — use a level id "
+                f"({sorted(getattr(bible, 'levels', {}))}) or an "
+                "artifact/node id from `canon status`."
+            )
+
+    children: dict[str, set[str]] = {}
+    for child, parents in edges.items():
+        for parent in parents:
+            children.setdefault(parent, set()).add(child)
+    plan = RegenPlan()
+    queue = deque(explicit)
+    seen: set[str] = set()
+    while queue:
+        current = queue.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+        is_explicit = current in explicit
+        if (
+            not is_explicit
+            and metadata.node_status.get(current) == ArtifactStatus.USER_EDITED
+        ):
+            # Never destroy a user edit as a side effect of a cascade.
+            plan.kept_user_edited.append(current)
+        else:
+            metadata.node_status[current] = ArtifactStatus.STALE
+            plan.marked.append(current)
+        queue.extend(children.get(current, ()))
+    plan.marked.sort()
+    plan.kept_user_edited.sort()
+    if plan.marked:
+        logger.info(
+            "Regen: %d node(s) marked stale (%d user-edited kept): %s",
+            len(plan.marked), len(plan.kept_user_edited), plan.marked,
+        )
+    return plan
+
+
 def detect_edits(bible: Any, output_dir: str | Path) -> EditReport:
     """Recompute content hashes from disk; hash mismatch marks the artifact
     ``user_edited`` (the edit is authoritative — it is NEVER re-run) and

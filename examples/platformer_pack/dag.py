@@ -328,15 +328,16 @@ class GodotExportDagPhase:
 
 def macro_phases(num_levels: int = 3, num_enemies: int = 4, *,
                  tiles: TileRegistry = DEFAULT_TILES) -> list:
-    """The bootstrap prefix: world/stage/enemies/style/tileset as legacy
-    nodes."""
+    """The bootstrap prefix: world/stage/style/enemies/tileset as legacy
+    nodes (style first — enemy hues avoid the palette's hazard/volume
+    hues)."""
     from examples.platformer_pack.style import StyleGuidePhase
 
     return [
         WorldPhase(),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
-        EnemyGeneratorPhase(count=num_enemies),
         StyleGuidePhase(tiles=tiles),
+        EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
         PlaceholderTilesetPhase(tiles=tiles),
     ]
 
@@ -429,3 +430,64 @@ def cli_ctx_factory(bible: Any):
 
 def cli_phases_factory(ctx: Any) -> list:
     return compose_dag_pipeline()
+
+
+# ---------------------------------------------------------------------------
+# Field-level regen — "parts of rows" (`canon regen <bible>
+# enemy:<id>#flavor --field-ops examples.platformer_pack.dag:regen_field`).
+# File-backed assets get node-level regen for free once their phases
+# stamp hashes; FIELDS inside an entity need surgical ops like these.
+# ---------------------------------------------------------------------------
+
+
+def regen_field(ctx: Any, target: str) -> dict:
+    """Re-roll one FIELD of one entity: ``<artifact_id>#<field>``.
+
+    Supported today: ``enemy:<id>#flavor`` (name + mechanics locked; the
+    entity file is rewritten and provenance re-stamped). Image/audio
+    fields (``enemy:<id>#portrait``, stage music) join this registry as
+    their generation phases land — same grammar, same routing.
+    """
+    from examples.platformer_pack.phases import llm_json, stamp_provenance
+
+    artifact_id, _, field = target.partition("#")
+    kind, _, ident = artifact_id.partition(":")
+
+    if kind == "enemy" and field == "flavor":
+        enemy = ctx.bible.enemy_definitions.get(ident)
+        if enemy is None:
+            raise KeyError(
+                f"unknown enemy {ident!r}; roster: "
+                f"{sorted(ctx.bible.enemy_definitions)}"
+            )
+        stage = next(iter(ctx.bible.stages.values()), None)
+        theme = stage.theme if stage else ""
+        old = str(enemy.stats.get("flavor", ""))
+        data = llm_json(
+            ctx,
+            f"plat:regen:{target}",
+            lambda fb: ctx.prompts.enemy_flavor(
+                enemy.name, enemy.archetype, theme, old, feedback=fb
+            ),
+            required_keys=("flavor",),
+            fallback={"flavor": old},  # keep the row intact on failure
+        )
+        enemy.stats["flavor"] = str(data["flavor"])
+        content_hash = ctx.adapter.write_json_singleton(
+            f"enemy/{ident}.json", enemy.model_dump(mode="json")
+        )
+        stamp_provenance(ctx, enemy, content_hash)
+        logger.info(
+            "Field regen %s: %r -> %r", target, old, enemy.stats["flavor"]
+        )
+        return {
+            "target": target,
+            "old": old,
+            "new": enemy.stats["flavor"],
+            "changed": enemy.stats["flavor"] != old,
+        }
+
+    raise KeyError(
+        f"no field op for {target!r} — supported: enemy:<id>#flavor "
+        "(asset fields arrive with their generation phases)."
+    )

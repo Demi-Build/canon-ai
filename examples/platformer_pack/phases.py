@@ -113,18 +113,52 @@ def slugify(name: str) -> str:
     return slug or "unnamed"
 
 
-def placeholder_color(index: int) -> str:
+#: Fallback reserved hue bands: red (spike tiles) and blue (water tiles)
+#: — used when no palette exists to derive the real reservations from.
+DEFAULT_RESERVED_HUES: tuple[tuple[float, float], ...] = (
+    (335.0, 25.0), (200.0, 250.0),
+)
+
+
+def _in_band(hue: float, band: tuple[float, float]) -> bool:
+    lo, hi = band
+    return (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
+
+
+def placeholder_color(
+    index: int,
+    reserved: tuple[tuple[float, float], ...] = DEFAULT_RESERVED_HUES,
+) -> str:
     """Deterministic, well-spaced enemy colors: golden-angle hue steps
-    starting at green. The red band (±25° around 0, spike tiles) and the
-    blue band (200–250°, water tiles) are reserved — hues landing there
-    get nudged out so enemies never read as hazards or water."""
+    starting at green. ``reserved`` hue bands (derived from the game's
+    ACTUAL hazard/volume palette hues since the style agent — red/blue
+    only as the palette-less fallback) get nudged out so enemies never
+    read as hazards or volumes."""
     hue = (140.0 + index * 137.508) % 360.0
-    if hue < 25.0 or hue > 335.0:
-        hue = (hue + 40.0) % 360.0
-    if 200.0 <= hue <= 250.0:
-        hue = (hue + 60.0) % 360.0
+    for _ in range(12):  # bounded: bands can't cover the whole wheel
+        if not any(_in_band(hue, band) for band in reserved):
+            break
+        hue = (hue + 47.0) % 360.0
     r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.78, 0.95)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
+def reserved_hue_bands(
+    palette: dict[str, str], tiles: Any, half_width: float = 28.0
+) -> tuple[tuple[float, float], ...]:
+    """The hue bands enemies must avoid, derived from the palette hues
+    actually used by this game's hazard and volume tiles (±half_width°).
+    Palette-driven: a lava game reserves orange, not the default blue."""
+    bands: list[tuple[float, float]] = []
+    for tile in tiles.named("hazard", "volume"):
+        hex_color = palette.get(tile.color_role)
+        if not hex_color:
+            continue
+        raw = hex_color.lstrip("#")
+        r, g, b = (int(raw[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+        hue = colorsys.rgb_to_hsv(r, g, b)[0] * 360.0
+        bands.append(((hue - half_width) % 360.0, (hue + half_width) % 360.0))
+    return tuple(bands) or DEFAULT_RESERVED_HUES
 
 
 # ---------------------------------------------------------------------------
@@ -237,13 +271,23 @@ class StagePhase:
 class EnemyGeneratorPhase:
     """Skeleton rolls mechanics from schemas/enemy.json; the LLM names and
     flavors. Placeholder color is assigned here, on the definition — every
-    review surface resolves it from the database."""
+    review surface resolves it from the database. Hue reservations come
+    from the game's palette (runs AFTER the style phase), so enemies
+    never share a hue with this game's hazards or volumes."""
 
     name = "plat:enemies"
 
-    def __init__(self, count: int = 3, schema_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        count: int = 3,
+        schema_path: Path | None = None,
+        tiles: Any = None,
+    ) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
         self.count = count
         self.schema_path = schema_path or (SCHEMAS_DIR / "enemy.json")
+        self.tiles = tiles or DEFAULT_TILES
 
     def run(self, ctx: Any) -> None:
         spec = load_skeleton_spec(self.schema_path)
@@ -252,6 +296,9 @@ class EnemyGeneratorPhase:
         theme = stage.theme
         roster_brief = ctx.artifacts.get("roster_brief", "")
         seed = str(getattr(ctx.config, "seed", ""))
+        reserved = reserved_hue_bands(
+            ctx.artifacts.get("palette", {}), self.tiles
+        )
         seen_ids: set[str] = set()
         used_names: list[str] = []
 
@@ -296,7 +343,7 @@ class EnemyGeneratorPhase:
                     "damage": skeleton["damage"],
                     "speed": skeleton["speed"],
                     "flavor": str(data.get("flavor", "")),
-                    "placeholder_color": placeholder_color(i),
+                    "placeholder_color": placeholder_color(i, reserved),
                 },
                 behavior={
                     "patrol_range": skeleton["patrol_range"],

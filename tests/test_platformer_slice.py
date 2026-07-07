@@ -415,6 +415,50 @@ class TestDatabasesDriveReview:
             # Reserved spike band: strongly-red hues are nudged away.
             assert not (r > 180 and g < 80 and b < 80), f"{color} reads as spike red"
 
+    def test_enemy_hue_reservations_come_from_palette(self) -> None:
+        """The reserved bands derive from the game's ACTUAL hazard/volume
+        palette hues — a lava game reserves orange, not hardcoded blue."""
+        import colorsys
+
+        from examples.platformer_pack.phases import (
+            placeholder_color,
+            reserved_hue_bands,
+        )
+        from examples.platformer_pack.tiles import load_tiles
+
+        lava_tiles = load_tiles(
+            Path(__file__).parent.parent / "examples/lava_world/tile_types.json"
+        )
+        palette = {"danger": "#e0453a", "lava": "#e8722c"}
+        bands = reserved_hue_bands(palette, lava_tiles)
+        assert len(bands) == 2  # spike + lava hues, no hardcoded blue band
+        for i in range(8):
+            color = placeholder_color(i, bands)
+            r, g, b = (int(color[j : j + 2], 16) / 255 for j in (1, 3, 5))
+            hue = colorsys.rgb_to_hsv(r, g, b)[0] * 360
+            for lo, hi in bands:
+                inside = (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
+                assert not inside, f"{color} sits in reserved band {lo}-{hi}"
+
+    def test_background_bands_derive_from_palette(self, tmp_path: Path) -> None:
+        """No hardcoded sky grays: horizon bands lighten the palette's
+        background color, sampled from the empty tileset slot."""
+        from PIL import Image
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+        level = ctx.bible.levels["l1"]
+        img = Image.open(
+            run / f"review/{level.stage_id}/l1.png"
+        ).convert("RGB")
+        # Top band pixel vs bottom-band empty pixel: same hue family
+        # (scaled background #2b2331), top strictly lighter.
+        top = img.getpixel((0, 4))
+        low = img.getpixel((0, (level.grid_height - 5) * 16))
+        assert sum(top) > sum(low)
+        base = (0x2B, 0x23, 0x31)  # canned style background
+        assert low == base  # bottom band = the palette background itself
+
     def test_schema_files_load_via_loader(self) -> None:
         for name in ("enemy.json", "level_layout.json"):
             spec = load_skeleton_spec(SCHEMAS_DIR / name)

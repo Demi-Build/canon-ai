@@ -107,11 +107,13 @@ def compose_pipeline(
 ) -> list:
     # Order enforces invariant I5: collision before every other layer;
     # hazards (stamped with collision) before entities; decoration last.
+    # Style precedes Enemies: enemy hue reservations derive from the
+    # palette's actual hazard/volume hues.
     phases = [
         WorldPhase(),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
-        EnemyGeneratorPhase(count=num_enemies),
         StyleGuidePhase(tiles=tiles),
+        EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
         PlaceholderTilesetPhase(tiles=tiles),
         LayoutStampPhase(
             width=width, height=height, movement=movement, rules=rules,

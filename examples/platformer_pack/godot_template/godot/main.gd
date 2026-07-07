@@ -50,6 +50,7 @@ var hazard := {}
 var volumes := {}
 var slot_atlas := {}
 var slot_category := {}
+var bg_color := Color8(24, 24, 32)  # empty-slot sample = style palette
 
 var player_pos := Vector2.ZERO
 var player_vy := 0.0
@@ -104,6 +105,8 @@ func _load_tileset() -> void:
 		var tile_type := int(slot["tile_type"])
 		slot_atlas[index] = atlas
 		slot_category[index] = str(slot.get("collision", ""))
+		if str(slot.get("collision", "")) == "empty":
+			bg_color = image.get_pixel(region[0] + 1, region[1] + 1)
 		match str(slot.get("collision", "")):
 			"solid":
 				blocking[tile_type] = true
@@ -150,15 +153,20 @@ func _load_level(index: int) -> void:
 
 
 func _build_background(background: Array) -> void:
-	# One rect per horizon band — placeholder art, but a real layer.
+	# One rect per horizon band — the game's background color (style
+	# palette via the empty tileset slot), lightened toward the top.
 	var band_start := 0
 	for y in range(1, background.size() + 1):
 		var ended := y == background.size()
 		if ended or int(background[y][0]) != int(background[band_start][0]):
 			var band := int(background[band_start][0])
-			var shade := 24 + 7 * (2 - band)
+			var scale := 1.0 + 0.16 * float(2 - band)
 			var rect := ColorRect.new()
-			rect.color = Color8(shade, shade, shade + 10)
+			rect.color = Color(
+				minf(bg_color.r * scale, 1.0),
+				minf(bg_color.g * scale, 1.0),
+				minf(bg_color.b * scale, 1.0),
+			)
 			rect.position = Vector2(0, band_start * CELL)
 			rect.size = Vector2(grid_w * CELL, (y - band_start) * CELL)
 			world_root.add_child(rect)

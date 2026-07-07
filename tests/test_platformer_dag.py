@@ -216,6 +216,187 @@ class TestPerStepRegen:
         )
 
 
+class TestRegenVerb:
+    """`canon regen` (PRD §7.5): mark targets + §6.1 descendants stale,
+    resume — only they re-run. Granularity: step, level, or phase node."""
+
+    def test_mark_stale_resolves_and_cascades(self, tmp_path: Path) -> None:
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        plan = mark_stale(ctx.bible, ["level:ashen_depths/l2/collision"])
+        # Descendants through step_parents — including the level manifest.
+        for step in ("terrain", "background", "hazards", "triggers",
+                     "entities", "foreground", "level"):
+            assert f"level:ashen_depths/l2/{step}" in plan.marked, step
+        assert not any("l1" in nid or "l3" in nid for nid in plan.marked)
+
+    def test_mark_stale_level_shorthand(self, tmp_path: Path) -> None:
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        plan = mark_stale(ctx.bible, ["l2"])
+        assert {nid for nid in plan.marked if nid.startswith("level:")} == {
+            f"level:ashen_depths/l2/{step}"
+            for step in ("collision", "hazards", "triggers", "terrain",
+                         "background", "entities", "foreground", "level")
+        }
+
+    def test_mark_stale_unknown_target_names_levels(
+        self, tmp_path: Path
+    ) -> None:
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        with pytest.raises(KeyError, match=r"unknown regen target.*'l1'"):
+            mark_stale(ctx.bible, ["l9"])
+
+    def test_cascade_never_destroys_user_edits(self, tmp_path: Path) -> None:
+        """Cascaded descendants keep user_edited; only an EXPLICIT target
+        overrides an edit (asking to regen it = discarding it)."""
+        from canon.bible.artifacts import ArtifactStatus
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        entities_id = "level:ashen_depths/l2/entities"
+        ctx.bible.metadata.node_status[entities_id] = ArtifactStatus.USER_EDITED
+
+        plan = mark_stale(ctx.bible, ["level:ashen_depths/l2/collision"])
+        assert entities_id in plan.kept_user_edited
+        assert (
+            ctx.bible.metadata.node_status[entities_id]
+            is ArtifactStatus.USER_EDITED
+        )
+        # Explicit target: the edit is deliberately discarded.
+        plan = mark_stale(ctx.bible, [entities_id])
+        assert entities_id in plan.marked
+
+    def test_regen_step_reruns_exactly_that_chain(self, tmp_path: Path) -> None:
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        bible = Bible.load(run / "bible.json")
+        mark_stale(bible, ["level:ashen_depths/l2/entities"])
+        bible.persist(run / "bible.json")
+
+        _ctx, _edits, report = _resume(run)
+        level_nodes = {n for n in report.done if n.startswith("level:")}
+        assert level_nodes == {
+            "level:ashen_depths/l2/entities",
+            "level:ashen_depths/l2/level",
+        }
+
+    def test_regen_cli_verb(self, tmp_path: Path) -> None:
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        result = subprocess.run(
+            CANON + [
+                "regen", str(run / "bible.json"), "l2",
+                "--pipeline", "examples.platformer_pack.dag:cli_ctx_factory",
+                "--phases", "examples.platformer_pack.dag:cli_phases_factory",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "CANON_PLAT_OUT": str(run), "CANON_PLAT_SEED": SEED},
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert (
+            "level:ashen_depths/l2/collision" in payload["regen"]["marked"]
+        )
+        done_levels = [
+            n for n in payload["report"]["done"] if n.startswith("level:")
+        ]
+        assert done_levels and all("/l2/" in n for n in done_levels)
+        assert "level:ashen_depths/l1/collision" in payload["report"]["skipped"]
+
+    def test_field_regen_rerolls_one_part_of_one_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Parts of rows: enemy:<id>#flavor re-rolls ONE field — name and
+        mechanics locked, entity file rewritten, provenance re-stamped,
+        nothing else in the Bible touched."""
+        import hashlib
+
+        from examples.platformer_pack.dag import regen_field
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        enemy = ctx.bible.enemy_definitions["cinder_beetle"]
+        old_flavor = enemy.stats["flavor"]
+        old_name = enemy.name
+        old_provenance = enemy.provenance_hash
+
+        result = regen_field(ctx, "enemy:cinder_beetle#flavor")
+        assert result["changed"] and result["old"] == old_flavor
+        assert enemy.stats["flavor"] != old_flavor
+        assert enemy.name == old_name  # locked
+        assert enemy.provenance_hash != old_provenance  # re-stamped
+        # The entity FILE carries the new flavor (hash contract holds).
+        doc = json.loads((run / "enemy/cinder_beetle.json").read_text())
+        assert doc["stats"]["flavor"] == enemy.stats["flavor"]
+        disk = (run / "enemy/cinder_beetle.json").read_bytes()
+        assert enemy.provenance_hash != "sha256:" + hashlib.sha256(disk).hexdigest()  # provenance != content
+        # Other enemies untouched.
+        assert ctx.bible.enemy_definitions["ash_wraith"].stats["flavor"]
+
+    def test_field_regen_unknown_field_names_supported(
+        self, tmp_path: Path
+    ) -> None:
+        from examples.platformer_pack.dag import regen_field
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        with pytest.raises(KeyError, match=r"enemy:<id>#flavor"):
+            regen_field(ctx, "enemy:cinder_beetle#portrait")
+        with pytest.raises(KeyError, match="roster"):
+            regen_field(ctx, "enemy:ghost#flavor")
+
+    def test_field_regen_cli(self, tmp_path: Path) -> None:
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        result = subprocess.run(
+            CANON + [
+                "regen", str(run / "bible.json"),
+                "enemy:cinder_beetle#flavor",
+                "--pipeline", "examples.platformer_pack.dag:cli_ctx_factory",
+                "--field-ops", "examples.platformer_pack.dag:regen_field",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "CANON_PLAT_OUT": str(run), "CANON_PLAT_SEED": SEED},
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["fields"][0]["changed"] is True
+        assert "regen winds" in payload["fields"][0]["new"]
+        # Persisted: both the Bible and the entity file.
+        bible = Bible.load(run / "bible.json")
+        assert "regen winds" in bible.enemy_definitions["cinder_beetle"].stats["flavor"]
+
+    def test_regen_mark_only(self, tmp_path: Path) -> None:
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        result = subprocess.run(
+            CANON + [
+                "regen", str(run / "bible.json"),
+                "level:ashen_depths/l3/foreground", "--mark-only",
+            ],
+            capture_output=True, text=True, env={**os.environ},
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["result"] == "marked"
+        bible = Bible.load(run / "bible.json")
+        assert (
+            str(bible.metadata.node_status["level:ashen_depths/l3/foreground"])
+            == "stale"
+        )
+
+
 class TestCliRegen:
     def test_canon_resume_drives_per_step_regen(self, tmp_path: Path) -> None:
         """The user story end-to-end through the CLI: generate (in-process),

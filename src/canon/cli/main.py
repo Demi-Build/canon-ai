@@ -334,6 +334,7 @@ def _orchestrated_run(
     phases_spec: str | None,
     max_concurrency: int | None,
     skip_edit_check: bool,
+    extra_payload: dict | None = None,
 ) -> None:
     """Shared body of `canon run` and `canon resume` — resume IS run:
     completed nodes are skipped from bible.metadata.node_status."""
@@ -389,6 +390,7 @@ def _orchestrated_run(
             "report": report.to_dict(),  # type: ignore[possibly-unbound]
             "edit_detection": edit_report,
             "bible": str(path),
+            **(extra_payload or {}),
         }
     )
     if not report.ok:  # type: ignore[possibly-unbound]
@@ -415,6 +417,104 @@ def run_pipeline_cmd(
 ) -> None:
     """Run a pipeline through the DAG orchestrator (resume-aware)."""
     _orchestrated_run(path, pipeline, phases, max_concurrency, skip_edit_check)
+
+
+@app.command("regen")
+def regen_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+    targets: list[str] = typer.Argument(
+        ...,
+        help="What to regenerate: a level id (l2 — every step of that "
+        "level), a step artifact id (level:<stage>/<lid>/entities), or a "
+        "phase node id (phase:plat:style). Descendants re-run via the "
+        "stale cascade; user-edited artifacts are never destroyed by the "
+        "cascade (only an explicit target overrides an edit).",
+    ),
+    pipeline: str | None = typer.Option(None, "--pipeline"),
+    phases: str | None = typer.Option(None, "--phases"),
+    max_concurrency: int | None = typer.Option(None, "--max-concurrency"),
+    mark_only: bool = typer.Option(
+        False, "--mark-only",
+        help="Mark targets stale and persist, but don't run — inspect "
+        "with `canon status`, then `canon resume`.",
+    ),
+    field_ops: str | None = typer.Option(
+        None, "--field-ops",
+        help="module:attr resolving to a callable(ctx, target) -> dict "
+        "for FIELD targets (parts of rows, '<artifact_id>#<field>' — "
+        "e.g. enemy:ashwalker#flavor).",
+    ),
+) -> None:
+    """Re-roll specific artifacts (mark stale + resume — only they
+    re-run, PRD §7.5) or FIELDS within one ('#' targets, via --field-ops)."""
+    try:
+        from canon.pipeline.orchestrator import mark_stale
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    node_targets = [t for t in targets if "#" not in t]
+    field_targets = [t for t in targets if "#" in t]
+
+    field_results: list[dict] = []
+    if field_targets:
+        if not pipeline:
+            _emit_error("Field targets need --pipeline (LLM + adapter).")
+        if not field_ops:
+            _emit_error(
+                "Field targets need --field-ops (module:attr -> "
+                "callable(ctx, target) -> dict).",
+                field_targets=field_targets,
+            )
+        try:
+            handler = _resolve_module_attr(field_ops)  # type: ignore[arg-type]
+            ctx = _resolve_module_attr(pipeline)(bible)  # type: ignore[arg-type,misc]
+        except Exception as e:
+            _emit_error(f"Failed to build field-regen context: {e}")
+        for target in field_targets:
+            try:
+                field_results.append(handler(ctx, target))  # type: ignore[possibly-unbound]
+            except KeyError as e:
+                _emit_error(
+                    str(e.args[0]) if e.args else str(e), target=target
+                )
+            except Exception as e:
+                _emit_error(
+                    f"Field regen failed for {target!r}: {e}",
+                    traceback=traceback.format_exc(),
+                )
+
+    plan = None
+    if node_targets:
+        try:
+            plan = mark_stale(bible, node_targets)  # type: ignore[possibly-unbound]
+        except KeyError as e:
+            _emit_error(
+                str(e.args[0]) if e.args else str(e), targets=node_targets
+            )
+    try:
+        bible.persist(path)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to persist regen state: {e}")
+
+    regen_payload = {
+        "regen": plan.to_dict() if plan else None,
+        "fields": field_results or None,
+    }
+    if mark_only or not node_targets:
+        result = "marked" if (mark_only and node_targets) else "ok"
+        _emit({"result": result, **regen_payload, "bible": str(path)})
+        return
+    _orchestrated_run(
+        path, pipeline, phases, max_concurrency, skip_edit_check=False,
+        extra_payload=regen_payload,
+    )
 
 
 @app.command("resume")

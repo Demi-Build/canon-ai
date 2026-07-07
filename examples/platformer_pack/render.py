@@ -51,10 +51,14 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     return tuple(int(color[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 
 
-def _band_shade(band: int) -> tuple[int, int, int]:
-    """Subtle background gradient per horizon band (placeholder art)."""
-    base = 24 + 7 * (2 - int(band))
-    return (base, base, base + 10)
+def _band_shade(
+    base: tuple[int, ...], band: int, bands: int = 3
+) -> tuple[int, int, int]:
+    """Subtle horizon gradient: the game's BACKGROUND color (empty-slot
+    sample = style palette), lightened toward the top band. The last
+    hardcoded gray left the palette agent unable to own the sky."""
+    scale = 1.0 + 0.16 * (bands - 1 - int(band))
+    return tuple(min(255, round(c * scale)) for c in base[:3])  # type: ignore[return-value]
 
 
 def render_level(
@@ -70,6 +74,14 @@ def render_level(
 
     height, width = terrain.shape
     slot_colors, slot_categories = _slot_palette(tileset, sheet)
+    bg_base = next(
+        (
+            slot_colors[index][:3]
+            for index, category in slot_categories.items()
+            if category == "empty"
+        ),
+        (24, 24, 32),
+    )
     img = Image.new("RGB", (width * SCALE, height * SCALE))
     draw = ImageDraw.Draw(img)
 
@@ -77,7 +89,7 @@ def render_level(
         for x in range(width):
             slot = int(terrain[y, x])
             if slot_categories.get(slot) == "empty":
-                color = _band_shade(int(background[y, x]))
+                color = _band_shade(bg_base, int(background[y, x]))
             else:
                 color = tuple(slot_colors.get(slot, (255, 0, 255))[:3])
             draw.rectangle(

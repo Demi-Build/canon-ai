@@ -109,6 +109,38 @@ class PlatformerPrompts:
             max_tokens=256,
         )
 
+    def enemy_flavor(
+        self,
+        name: str,
+        archetype: str,
+        theme: str,
+        current_flavor: str,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        """Field-level regen (parts of rows): a fresh flavor sentence for
+        an EXISTING definition — name and mechanics are locked."""
+        fb = (
+            "\nPrior attempt rejected:\n- " + "\n- ".join(feedback) + "\n"
+            if feedback
+            else ""
+        )
+        return LLMRequest(
+            system=_SYSTEM,
+            user_message=(
+                "### TASK: enemy_flavor\n"
+                f"### NAME: {name}\n"
+                f"Stage theme: {theme}\n"
+                f"Enemy: {name} ({archetype} — mechanics locked, name "
+                "locked).\n"
+                f"Current flavor (write something DIFFERENT): "
+                f"{current_flavor}\n{fb}\n"
+                "Write one replacement flavor sentence that fits the name, "
+                "archetype behavior, and theme. Return a JSON object:\n"
+                '{"flavor": str (one sentence)}'
+            ),
+            max_tokens=256,
+        )
+
     def style_generation(
         self,
         world_title: str,
