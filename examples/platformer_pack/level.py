@@ -26,6 +26,7 @@ from examples.platformer_pack.phases import (
     _stamp_metadata,
     stamp_provenance,
 )
+from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.validate import (
     check_level,
     check_placements,
@@ -59,10 +60,12 @@ class LayoutStampPhase:
         width: int = 48,
         height: int = 16,
         movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+        rules: GameRules = DEFAULT_RULES,
     ) -> None:
         self.width = width
         self.height = height
         self.movement = movement
+        self.rules = rules
 
     def run(self, ctx: Any) -> None:
         spec = load_skeleton_spec(SCHEMAS_DIR / "level_layout.json")
@@ -97,7 +100,8 @@ class LayoutStampPhase:
             ) -> str:
                 request = ctx.prompts.layout_generation(
                     _lid, _brief, _knobs, _w, _h,
-                    self.movement, previous=_last["content"], feedback=feedback,
+                    self.movement, rules=self.rules,
+                    previous=_last["content"], feedback=feedback,
                 )
                 if max_tokens is not None:
                     request.max_tokens = max_tokens
@@ -113,7 +117,8 @@ class LayoutStampPhase:
                 except DslError as exc:
                     return False, [str(exc)]
                 problems = check_level(
-                    result.grid, result.spawn, result.exit, self.movement
+                    result.grid, result.spawn, result.exit, self.movement,
+                    rules=self.rules,
                 )
                 return (not problems), problems
 
@@ -187,8 +192,13 @@ class LayoutStampPhase:
 class PlacementPhase:
     name = "plat:placement"
 
-    def __init__(self, max_enemies_per_level: int = 4) -> None:
+    def __init__(
+        self,
+        max_enemies_per_level: int = 4,
+        rules: GameRules = DEFAULT_RULES,
+    ) -> None:
         self.max_enemies = max_enemies_per_level
+        self.rules = rules
 
     def run(self, ctx: Any) -> None:
         import numpy as np
@@ -243,7 +253,7 @@ class PlacementPhase:
                 if obj is None or not isinstance(obj.get("placements"), list):
                     return False, ['Return {"placements": [...]} as bare JSON.']
                 accepted, problems = check_placements(
-                    grid, obj["placements"], spawn, archetypes
+                    grid, obj["placements"], spawn, archetypes, rules=self.rules
                 )
                 accepted_holder["placements"] = accepted
                 last_problems[:] = problems

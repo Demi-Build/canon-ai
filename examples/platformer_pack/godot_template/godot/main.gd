@@ -53,9 +53,13 @@ var player_rect: ColorRect
 var status: Label
 
 
+var rules := {}
+
+
 func _ready() -> void:
 	manifest = _load_json("res://manifest.json")
 	movement = manifest["movement"]
+	rules = manifest.get("rules", {})
 	stage_id = manifest["stage_id"]
 	level_ids = manifest["levels"]
 	status = $Status
@@ -268,6 +272,19 @@ func _in_water(x: float, y: float) -> bool:
 	return water.has(_tile(x + BODY_L, y)) or water.has(_tile(x + BODY_R, y))
 
 
+func _enemy_can_occupy(archetype: String, x: float, y: float) -> bool:
+	# Terrain constraint for an enemy's next step (GameRules-aware):
+	# swimmers stay in their pool; land enemies keep solid footing and —
+	# unless the game is 'amphibious' — never enter water.
+	var cell := _tile(x, y)
+	var below := _tile(x, y + 1.0)
+	if archetype == "swimmer":
+		return water.has(cell)
+	if water.has(cell) and str(rules.get("enemy_water_policy", "swimmers_only")) != "amphibious":
+		return false
+	return blocking.has(below) or one_way.has(below)  # no cliff-walking
+
+
 func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_ESCAPE):
 		get_tree().quit()
@@ -296,11 +313,25 @@ func _process(delta: float) -> void:
 		or Input.is_key_pressed(KEY_UP)
 		or Input.is_key_pressed(KEY_W)
 	)
+	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
 	if jump_pressed:
 		if swimming:
 			player_vy = -float(movement.get("swim_impulse", 5.0))
+		elif (
+			on_ground and down_held
+			and bool(rules.get("platform_drop_through", true))
+			and (
+				one_way.has(_tile(player_pos.x + BODY_L, player_pos.y + 1.0))
+				or one_way.has(_tile(player_pos.x + BODY_R, player_pos.y + 1.0))
+			)
+		):
+			player_pos.y += 0.06  # drop through a one-way platform
+			player_vy = 0.5
+			on_ground = false
 		elif on_ground:
-			player_vy = -sqrt(2.0 * gravity * float(movement["jump_height"]))
+			# jump_height + headroom margin: discrete integration undershoots
+			# the analytic apex, which made exact-height platforms unlandable.
+			player_vy = -sqrt(2.0 * gravity * (float(movement["jump_height"]) + 0.4))
 	if swimming:
 		player_vy += float(movement.get("water_gravity", 8.0)) * delta
 		player_vy = minf(player_vy, 3.0)  # terminal sink speed
@@ -334,14 +365,20 @@ func _process(delta: float) -> void:
 		var behavior: Dictionary = spec["behavior"]
 		var archetype := str(spec.get("archetype", "sentry"))
 		var pos: Vector2 = enemy["pos"]
-		# swimmers patrol their pool exactly like patrollers patrol land
 		if (archetype == "patroller" or archetype == "swimmer") and espeed > 0.0:
-			pos.x += enemy["dir"] * espeed * delta
-			if absf(pos.x - enemy["home_x"]) >= float(behavior.get("patrol_range", 4)):
+			var next_x: float = pos.x + enemy["dir"] * espeed * delta
+			if (
+				absf(next_x - enemy["home_x"]) >= float(behavior.get("patrol_range", 4))
+				or not _enemy_can_occupy(archetype, next_x, pos.y)
+			):
 				enemy["dir"] = enemy["dir"] * -1.0
+			else:
+				pos.x = next_x
 		elif archetype == "chaser" and espeed > 0.0:
 			if absf(player_pos.x - pos.x) <= float(behavior.get("aggro_range", 6)):
-				pos.x += signf(player_pos.x - pos.x) * espeed * delta
+				var next_x: float = pos.x + signf(player_pos.x - pos.x) * espeed * delta
+				if _enemy_can_occupy(archetype, next_x, pos.y):
+					pos.x = next_x  # halts at water/cliff edges
 		enemy["pos"] = pos
 		enemy["node"].position = pos * CELL + Vector2(2, 2)
 		if enemy["frame"] != null:

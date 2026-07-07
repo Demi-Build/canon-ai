@@ -12,6 +12,7 @@ import json
 
 from canon.llm.request import LLMRequest
 from examples.platformer_pack.movement import PlayerMovementSpec
+from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 
 _SYSTEM = (
     "You are a level and content designer for a 2D side-scrolling platformer. "
@@ -91,6 +92,7 @@ class PlatformerPrompts:
         width: int,
         height: int,
         movement: PlayerMovementSpec,
+        rules: GameRules = DEFAULT_RULES,
         previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
@@ -138,7 +140,15 @@ class PlatformerPrompts:
                 "spikes need floor under them; platform/ledge rows are ABOVE "
                 "the ground (smaller y = higher); water fills DOWN from its "
                 "surface row and needs solid floor beneath (never pour it "
-                "over a gap or pit); keep the spawn and exit columns clear — "
+                "over a gap or pit)"
+                + (
+                    "; every pool must be CONTAINED — put wall() columns at "
+                    "both sides of the water (a basin lip the player jumps "
+                    "over), unless the pool reaches the level edge"
+                    if rules.water_containment == "contained"
+                    else ""
+                )
+                + "; keep the spawn and exit columns clear — "
                 "no platform, wall, spike, water, or gap may cover them or "
                 "remove the floor beneath them."
             ),

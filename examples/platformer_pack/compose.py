@@ -19,6 +19,7 @@ from examples.platformer_pack.level import (
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import EnemyGeneratorPhase, StagePhase, WorldPhase
 from examples.platformer_pack.render import RenderPhase
+from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tileset import PlaceholderTilesetPhase
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,9 @@ class SliceManifestPhase:
 
     name = "plat:manifest"
 
+    def __init__(self, rules: GameRules = DEFAULT_RULES) -> None:
+        self.rules = rules
+
     def run(self, ctx: Any) -> None:
         stage_id = ctx.artifacts["stage_id"]
         manifest = {
@@ -40,6 +44,10 @@ class SliceManifestPhase:
             "levels": list(ctx.bible.stages[stage_id].level_ids),
             "enemies": sorted(ctx.bible.enemy_definitions),
             "movement": DEFAULT_MOVEMENT.model_dump(),
+            # Per-game behavior policy (Appendix E.7) — one source read by
+            # validators at generation time and every play surface at runtime.
+            # model_dump includes unknown (inert) keys: open carriage.
+            "rules": self.rules.model_dump(),
             # Fallbacks and dropped content are failures wearing a suit —
             # they must survive the run and reach the reviewer.
             "warnings": list(ctx.artifacts.get("slice_warnings", [])),
@@ -68,6 +76,7 @@ def compose_pipeline(
     width: int = 48,
     height: int = 16,
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    rules: GameRules = DEFAULT_RULES,
     engine: str = "json",
 ) -> list:
     # Order enforces invariant I5: collision before every other layer;
@@ -77,13 +86,15 @@ def compose_pipeline(
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         EnemyGeneratorPhase(count=num_enemies),
         PlaceholderTilesetPhase(),
-        LayoutStampPhase(width=width, height=height, movement=movement),
+        LayoutStampPhase(
+            width=width, height=height, movement=movement, rules=rules
+        ),
         TileAssignmentPhase(),
         BackgroundPhase(),
-        PlacementPhase(),
+        PlacementPhase(rules=rules),
         DecoratorPhase(),
         RenderPhase(),
-        SliceManifestPhase(),
+        SliceManifestPhase(rules=rules),
     ]
     if engine == "godot":
         from examples.platformer_pack.godot_export import GodotExportPhase

@@ -15,8 +15,12 @@ from collections import deque
 
 from canon.bible.platformer import TileType
 from examples.platformer_pack.movement import PlayerMovementSpec
+from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 
 _SOLID = {int(TileType.FLOOR), int(TileType.PLATFORM), int(TileType.WALL)}
+#: Side containment for water: solid walls (one-way platforms don't hold
+#: water; more water continues the pool).
+_HOLDS_WATER = {int(TileType.FLOOR), int(TileType.WALL), int(TileType.WATER)}
 
 
 def standable_cells(grid) -> set[tuple[int, int]]:
@@ -114,6 +118,7 @@ def check_level(
     spawn: tuple[int, int],
     exit_: tuple[int, int],
     movement: PlayerMovementSpec,
+    rules: GameRules = DEFAULT_RULES,
 ) -> list[str]:
     """Return problem strings (empty = valid). Messages are written to be
     fed back to the Layout Agent verbatim."""
@@ -123,6 +128,8 @@ def check_level(
         problems.append(_diagnose_unstandable(grid, spawn, "spawn"))
     if exit_ not in stand:
         problems.append(_diagnose_unstandable(grid, exit_, "exit"))
+    if rules.water_containment == "contained":
+        problems.extend(check_water_containment(grid))
     if not problems:
         reached = reachable_cells(grid, spawn, movement)
         if exit_ not in reached:
@@ -130,6 +137,27 @@ def check_level(
                 _describe_reachability_break(spawn, exit_, movement, stand, reached)
             )
     return problems
+
+
+def check_water_containment(grid) -> list[str]:
+    """Under the 'contained' rule, every water cell's sides must be held
+    by solid tiles, more water, or the level edge — pools sit in basins,
+    they don't spill sideways. ('free' games skip this — waterfalls.)"""
+    height, width = grid.shape
+    problems: list[str] = []
+    for x, y in sorted(water_cells(grid)):
+        for nx in (x - 1, x + 1):
+            if nx < 0 or nx >= width:
+                continue  # level edge holds water
+            if int(grid[y, nx]) not in _HOLDS_WATER:
+                side = "left" if nx < x else "right"
+                problems.append(
+                    f"water at ({x}, {y}) spills out its {side} side — "
+                    f"contain the pool with wall({nx},{y},{y}) / raised "
+                    "ground, or extend the water to the level edge."
+                )
+                break
+    return problems[:3]  # a few located examples beat a wall of repeats
 
 
 def _describe_reachability_break(
@@ -179,12 +207,13 @@ def check_placements(
     placements: list[dict],
     spawn: tuple[int, int],
     archetypes: dict[str, str],
+    rules: GameRules = DEFAULT_RULES,
 ) -> tuple[list[dict], list[str]]:
     """Split proposed placements into (accepted, problem strings).
 
-    Rules: known enemy id; land enemies on standable cells, swimmers IN
-    water cells (Appendix E.1); not within 3 columns of spawn on the spawn
-    row (no spawn-camping). An optional boolean ``elite`` rides through
+    Rules: known enemy id; the game's ``enemy_water_policy`` decides who
+    may occupy water; not within 3 columns of spawn on the spawn row (no
+    spawn-camping). An optional boolean ``elite`` rides through
     (per-placement variation, §6.1 overrides).
     """
     stand = standable_cells(grid)
@@ -201,26 +230,39 @@ def check_placements(
         if not isinstance(x, int) or not isinstance(y, int):
             problems.append(f"{eid} placement needs integer x and y; got {p!r}.")
             continue
+        cell = (x, y)
         is_swimmer = archetypes[eid] == "swimmer"
-        if is_swimmer and (x, y) not in water:
+        if rules.enemy_water_policy == "forbidden" and cell in water:
             problems.append(
-                f"{eid} is a swimmer and ({x}, {y}) is not a water cell — "
-                "swimmers must be placed inside water."
+                f"{eid} at {cell} is in water and this game forbids enemies "
+                "in water — place it on land."
             )
             continue
-        if not is_swimmer and (x, y) not in stand:
-            hint = (
-                " (that's a water cell — only swimmers go in water)"
-                if (x, y) in water
-                else ""
-            )
+        if rules.enemy_water_policy == "swimmers_only":
+            if is_swimmer and cell not in water:
+                problems.append(
+                    f"{eid} is a swimmer and {cell} is not a water cell — "
+                    "swimmers must be placed inside water."
+                )
+                continue
+            if not is_swimmer and cell not in stand:
+                hint = (
+                    " (that's a water cell — only swimmers go in water)"
+                    if cell in water
+                    else ""
+                )
+                problems.append(
+                    f"{eid} at {cell} is not a standable cell{hint} — land "
+                    "enemies need solid ground below and a free cell to occupy."
+                )
+                continue
+        elif cell not in stand and cell not in water:
             problems.append(
-                f"{eid} at ({x}, {y}) is not a standable cell{hint} — land "
-                "enemies need solid ground below and a free cell to occupy."
+                f"{eid} at {cell} is neither standable nor in water."
             )
             continue
         if y == spawn[1] and abs(x - spawn[0]) <= 3:
-            problems.append(f"{eid} at ({x}, {y}) is too close to spawn {spawn}.")
+            problems.append(f"{eid} at {cell} is too close to spawn {spawn}.")
             continue
         accepted.append(
             {"enemy_id": eid, "x": x, "y": y, "elite": bool(p.get("elite", False))}

@@ -522,15 +522,109 @@ class TestEndToEnd:
         span as a dry gap is not."""
         from examples.platformer_pack.validate import reachable_cells
 
-        pool = stamp(
-            "floor(0,47)\nwater(20,30,12)\nspawn(2)\nexit(45)", W, H
+        contained = stamp(
+            "floor(0,47)\nwall(19,12,13)\nwall(31,12,13)\n"
+            "water(20,30,12)\nspawn(2)\nexit(45)", W, H,
         )
-        assert not check_level(pool.grid, pool.spawn, pool.exit, DEFAULT_MOVEMENT)
-        reached = reachable_cells(pool.grid, pool.spawn, DEFAULT_MOVEMENT)
+        assert not check_level(
+            contained.grid, contained.spawn, contained.exit, DEFAULT_MOVEMENT
+        )
+        reached = reachable_cells(contained.grid, contained.spawn, DEFAULT_MOVEMENT)
         assert (25, 13) in reached  # swimming through the pool
 
         dry = stamp("floor(0,19)\nfloor(31,47)\nspawn(2)\nexit(45)", W, H)
         assert check_level(dry.grid, dry.spawn, dry.exit, DEFAULT_MOVEMENT)
+
+    def test_water_containment_rule(self) -> None:
+        """GameRules decides: open-sided pools fail 'contained' with a
+        locate-and-instruct message, pass 'free' (waterfall games)."""
+        from examples.platformer_pack.rules import GameRules
+
+        open_pool = stamp(
+            "floor(0,47)\nwater(20,30,12)\nspawn(2)\nexit(45)", W, H
+        )
+        problems = check_level(
+            open_pool.grid, open_pool.spawn, open_pool.exit, DEFAULT_MOVEMENT
+        )
+        assert problems and "spills out" in problems[0] and "wall(" in problems[0]
+
+        free_rules = GameRules(water_containment="free")
+        assert not check_level(
+            open_pool.grid, open_pool.spawn, open_pool.exit, DEFAULT_MOVEMENT,
+            rules=free_rules,
+        )
+
+    def test_rules_are_template_data(self, tmp_path: Path) -> None:
+        """E.7 split: values load from a per-game file; unknown keys are
+        carried into manifest.json inert (open carriage); known keys stay
+        validated (hardened enforcement)."""
+        import pydantic
+
+        from examples.platformer_pack.rules import (
+            DEFAULT_RULES_PATH,
+            GameRules,
+            load_rules,
+        )
+
+        # The pack's template file is the source of DEFAULT_RULES.
+        assert load_rules(DEFAULT_RULES_PATH).water_containment == "contained"
+
+        # A future rule sketched in data rides through, inert.
+        custom = tmp_path / "my_game_rules.json"
+        custom.write_text(json.dumps({
+            "water_containment": "free",
+            "lava_swimmable": True,  # no enforcement exists yet
+        }))
+        rules = load_rules(custom)
+        assert rules.water_containment == "free"
+        assert rules.model_dump()["lava_swimmable"] is True
+
+        # Known keys stay validated — a typo'd VALUE fails loudly.
+        with pytest.raises(pydantic.ValidationError):
+            GameRules.model_validate({"water_containment": "sideways"})
+
+    def test_manifest_carries_composed_rules(self, tmp_path: Path) -> None:
+        """The manifest reflects the rules the run actually used —
+        including inert extras — not the pack defaults."""
+        from examples.platformer_pack.rules import GameRules
+
+        run = tmp_path / "run"
+        custom = GameRules(water_containment="free", lava_swimmable=True)
+        ctx = PipelineContext(
+            bible=Bible.empty(seed="s"),
+            config=CanonConfig(seed="s", output_dir=run),
+            rng=random.Random(0),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        run_pipeline(compose_pipeline(rules=custom), ctx)
+        manifest = json.loads((run / "manifest.json").read_text())
+        assert manifest["rules"]["water_containment"] == "free"
+        assert manifest["rules"]["lava_swimmable"] is True
+
+    def test_enemy_water_policy_rules(self) -> None:
+        from examples.platformer_pack.rules import GameRules
+
+        pool = stamp(
+            "floor(0,47)\nwall(19,12,13)\nwall(31,12,13)\n"
+            "water(20,30,12)\nspawn(2)\nexit(45)", W, H,
+        )
+        archetypes = {"fish": "swimmer", "beetle": "patroller"}
+        in_water = [{"enemy_id": "fish", "x": 25, "y": 12},
+                    {"enemy_id": "beetle", "x": 25, "y": 12}]
+
+        # forbidden: nobody in water.
+        accepted, problems = check_placements(
+            pool.grid, in_water, pool.spawn, archetypes,
+            rules=GameRules(enemy_water_policy="forbidden"),
+        )
+        assert not accepted and len(problems) == 2
+        # amphibious: everybody allowed.
+        accepted, problems = check_placements(
+            pool.grid, in_water, pool.spawn, archetypes,
+            rules=GameRules(enemy_water_policy="amphibious"),
+        )
+        assert len(accepted) == 2 and not problems
 
     def test_godot_engine_output(self, tmp_path: Path) -> None:
         """--engine godot: playable project files + grid.json siblings,

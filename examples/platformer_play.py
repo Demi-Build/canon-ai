@@ -96,6 +96,10 @@ def main() -> None:
         h = h.lstrip("#")
         return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
 
+    rules = manifest.get("rules", {})
+    water_policy = rules.get("enemy_water_policy", "swimmers_only")
+    drop_through = bool(rules.get("platform_drop_through", True))
+
     class Enemy:
         def __init__(self, placement: dict) -> None:
             self.spec = enemies[placement["enemy_id"]]
@@ -106,18 +110,36 @@ def main() -> None:
             self.elite = bool(placement.get("elite", False))
             self.color = hex_rgb(self.spec["stats"].get("placeholder_color", "#ff00ff"))
 
+        def _can_occupy(self, x: float) -> bool:
+            """Terrain constraint for the NEXT step (GameRules-aware):
+            swimmers stay in their pool; land enemies keep solid footing
+            and — under swimmers_only/forbidden — never enter water."""
+            cell = tile_at(x, self.y)
+            below = tile_at(x, self.y + 1)
+            if self.spec.get("archetype") == "swimmer":
+                return cell in WATER
+            if cell in WATER and water_policy != "amphibious":
+                return False
+            return below in BLOCKING or below in ONE_WAY  # no cliff-walking
+
         def update(self, dt: float, player_x: float) -> None:
             behavior = self.spec["behavior"]
             speed = float(self.spec["stats"].get("speed", 0))
             archetype = self.spec.get("archetype", "sentry")
-            # swimmers patrol their pool exactly like patrollers patrol land
             if archetype in ("patroller", "swimmer") and speed > 0:
-                self.x += self.direction * speed * dt
-                if abs(self.x - self.home) >= behavior.get("patrol_range", 4):
+                new_x = self.x + self.direction * speed * dt
+                if (
+                    abs(new_x - self.home) >= behavior.get("patrol_range", 4)
+                    or not self._can_occupy(new_x)
+                ):
                     self.direction *= -1.0
+                else:
+                    self.x = new_x
             elif archetype == "chaser" and speed > 0:
                 if abs(player_x - self.x) <= behavior.get("aggro_range", 6):
-                    self.x += (1.0 if player_x > self.x else -1.0) * speed * dt
+                    new_x = self.x + (1.0 if player_x > self.x else -1.0) * speed * dt
+                    if self._can_occupy(new_x):  # halts at water/cliff edges
+                        self.x = new_x
             # sentry: stationary by definition
 
     pygame.init()
@@ -165,8 +187,10 @@ def main() -> None:
     water_factor = float(movement.get("water_speed_factor", 0.55))
     water_gravity = float(movement.get("water_gravity", 8.0))
     swim_impulse = float(movement.get("swim_impulse", 5.0))
-    # Initial jump velocity to rise exactly jump_height cells: v = sqrt(2gh)
-    jump_v = (2.0 * gravity * float(movement["jump_height"])) ** 0.5
+    # Jump velocity for jump_height cells PLUS a headroom margin: discrete
+    # frame integration undershoots the analytic apex, which made exactly-
+    # jump_height platforms unlandable (feet never cleared the top).
+    jump_v = (2.0 * gravity * (float(movement["jump_height"]) + 0.4)) ** 0.5
 
     running = True
     while running:
@@ -182,8 +206,18 @@ def main() -> None:
                     respawn()
                     won = False
                 elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
+                    down_held = (
+                        pygame.key.get_pressed()[pygame.K_DOWN]
+                        or pygame.key.get_pressed()[pygame.K_s]
+                    )
                     if swimming:
                         vy = -swim_impulse  # swim stroke, works anywhere in water
+                    elif on_ground and down_held and drop_through and (
+                        tile_at(px + BODY_L, py + 1) in ONE_WAY
+                        or tile_at(px + BODY_R, py + 1) in ONE_WAY
+                    ):
+                        py += 0.06  # drop through a one-way platform
+                        vy, on_ground = 0.5, False
                     elif on_ground:
                         vy = -jump_v
 

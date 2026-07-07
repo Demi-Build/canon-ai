@@ -42,20 +42,25 @@ from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa
 # ---------------------------------------------------------------------------
 
 _FAKE_LAYOUTS = {
+    # Pools are CONTAINED (GameRules.water_containment): flanking walls
+    # form the basin lip — jump over, swim across, climb out.
     "l1": (
         "floor(0,47)\nplatform(10,11,4)\nledge(16,21,9)\n"
-        "water(30,36,12)\nspike(40,41)\nspawn(2)\nexit(45)"
+        "wall(29,12,13)\nwall(37,12,13)\nwater(30,36,12)\n"
+        "spike(40,41)\nspawn(2)\nexit(45)"
     ),
     "l2": (
         "floor(0,20)\nplatform(22,11,2)\nfloor(25,55)\n"
-        "water(30,38,11)\nspike(46,47)\nledge(48,51,11)\n"
-        "spawn(2)\nexit(53)"
+        "wall(29,11,13)\nwall(39,11,13)\nwater(30,38,11)\n"
+        "spike(46,47)\nledge(48,51,11)\nspawn(2)\nexit(53)"
     ),
     "l3": (
         "floor(0,10)\npit(11,13)\nfloor(14,30)\nspike(20,22)\n"
-        "water(24,29,14)\nfloor(35,63)\nplatform(32,13,2)\n"
-        "platform(37,14,2)\nledge(40,46,12)\nspike(50,52)\n"
-        "water(55,60,15)\nspawn(3)\nexit(62)"
+        "wall(23,14,15)\nwall(30,14,15)\nwater(24,29,14)\n"
+        "floor(35,63)\nplatform(32,13,2)\nplatform(37,14,2)\n"
+        "ledge(40,46,12)\nspike(50,52)\n"
+        "wall(54,15,15)\nwall(61,15,15)\nwater(55,60,15)\n"
+        "spawn(3)\nexit(62)"
     ),
 }
 
@@ -198,6 +203,11 @@ def main() -> None:
         help="godot: use GodotOutputAdapter and emit a playable Godot "
         "project into the output dir (open it in Godot 4.3+).",
     )
+    parser.add_argument(
+        "--rules", default=None,
+        help="Path to a game_rules.json (defaults to the pack's). Copy the "
+        "pack file and edit it to make a different game.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -217,9 +227,12 @@ def main() -> None:
         prompts=PlatformerPrompts(),
         adapter=adapter,
     )
+    from examples.platformer_pack.rules import load_rules
+
+    rules = load_rules(args.rules) if args.rules else load_rules()
     phases = compose_pipeline(
         num_levels=args.num_levels, num_enemies=args.num_enemies,
-        engine=args.engine,
+        engine=args.engine, rules=rules,
     )
     run_pipeline(phases, ctx)
 
