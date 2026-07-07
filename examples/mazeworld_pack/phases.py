@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from canon.persistence import write_array_db, write_singleton
 from canon.pipeline.phases.manifest import ManifestPhase as _BaseManifestPhase
 
 
@@ -75,7 +74,8 @@ class MazeworldManifestPhase(_BaseManifestPhase):
         ``stat_template``); (2) stamps the room environment for parity; (3)
         coerces optional null strings PlayerClass requires non-null.
         """
-        path = output_dir / output_paths.get("classes", "classes/classes.json")
+        classes_rel = output_paths.get("classes", "classes/classes.json")
+        path = output_dir / classes_rel
         if not path.exists():
             return
         classes = json.loads(path.read_text(encoding="utf-8"))
@@ -99,14 +99,14 @@ class MazeworldManifestPhase(_BaseManifestPhase):
                 if cls.get(str_field) is None:
                     cls[str_field] = ""
 
-        write_array_db(path, classes)
+        ctx.adapter.write_json_array(classes_rel, classes)
 
     def _write_story_json(
         self, ctx: Any, output_dir: Path, output_paths: dict
     ) -> None:
         story_obj = self._mazeworld_story_dict(ctx.bible)
-        path = output_dir / output_paths.get("story", "story/story.json")
-        write_singleton(path, story_obj)
+        path = output_paths.get("story", "story/story.json")
+        ctx.adapter.write_json_singleton(path, story_obj)
 
     # ------------------------------------------------------------------
     # Shared story transform — canon shape → mazeworld OverarchingStory shape
@@ -303,8 +303,8 @@ class MazeworldManifestPhase(_BaseManifestPhase):
             "entity_index": {},
         }
 
-        path = output_dir / output_paths.get("world_bible", "world_bible.json")
-        write_singleton(path, world_bible)
+        path = output_paths.get("world_bible", "world_bible.json")
+        ctx.adapter.write_json_singleton(path, world_bible)
 
         # Flat rooms/rooms.json index so Cradle's "rooms" entity tab resolves.
         # Cradle reads <type>/<type>.json first, so this keyed index is found
@@ -315,4 +315,4 @@ class MazeworldManifestPhase(_BaseManifestPhase):
             rid: {"id": rid, **room, "maze_ref": f"rooms/{rid}/maze.json"}
             for rid, room in rooms.items()
         }
-        write_singleton(output_dir / "rooms" / "rooms.json", rooms_index)
+        ctx.adapter.write_json_singleton("rooms/rooms.json", rooms_index)

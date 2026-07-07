@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from canon.adapters import JsonOutputAdapter, OutputAdapter
 from canon.persistence import IDAllocator
 from canon.pipeline.stats import GenerationStats
 
@@ -62,6 +63,16 @@ class PipelineContext:
             }
         )
     )
+    adapter: OutputAdapter | None = None
+
+    def __post_init__(self) -> None:
+        # Default adapter rooted at config.output_dir, falling back to "."
+        # exactly as the phases historically did — contexts constructed
+        # without an adapter behave identically to pre-adapter code.
+        if self.adapter is None:
+            self.adapter = JsonOutputAdapter(
+                getattr(self.config, "output_dir", ".")
+            )
 
 
 def run_pipeline(

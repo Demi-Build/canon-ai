@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
-from canon.persistence import write_singleton
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +79,7 @@ class ManifestPhase:
         }
 
     def _write_world_bible(self, ctx: Any, output_dir: Path, output_paths: dict) -> None:
-        path = output_dir / output_paths.get("world_bible", "world_bible.json")
+        path = output_paths.get("world_bible", "world_bible.json")
         bible = ctx.bible
         # Build the {"story": ..., "rooms": {...}} shape mazeworld expects
         rooms = {}
@@ -127,10 +126,10 @@ class ManifestPhase:
             "story": bible.story.model_dump(mode="json") if bible.story else {},
             "rooms": rooms,
         }
-        write_singleton(path, world_bible)
+        ctx.adapter.write_json_singleton(path, world_bible)
 
     def _write_manifest(self, ctx: Any, output_dir: Path, output_paths: dict) -> None:
-        path = output_dir / output_paths.get("manifest", "manifest.json")
+        path = output_paths.get("manifest", "manifest.json")
         bible = ctx.bible
 
         # Counts
@@ -215,8 +214,8 @@ class ManifestPhase:
             "music": music_paths,
             "sfx": sfx_paths,
         }
-        write_singleton(path, manifest)
+        ctx.adapter.write_json_singleton(path, manifest)
 
     def _write_stats(self, ctx: Any, output_dir: Path, output_paths: dict) -> None:
-        path = output_dir / output_paths.get("generation_stats", "generation_stats.json")
-        write_singleton(path, ctx.stats.to_dict() if ctx.stats else {})
+        path = output_paths.get("generation_stats", "generation_stats.json")
+        ctx.adapter.write_json_singleton(path, ctx.stats.to_dict() if ctx.stats else {})

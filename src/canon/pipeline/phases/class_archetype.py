@@ -12,12 +12,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from canon.bible.models import Ability, BibleMetadata, ClassArchetype, Spell
 from canon.llm.parsing import extract_json_object
-from canon.persistence import write_array_db
 from canon.pipeline.phases.spell_pool import generate_named_entries
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
 from canon.skeleton.core import SkeletonSpec, roll_skeleton
@@ -195,9 +193,8 @@ class ClassPhase:
 
     def _persist(self, ctx: Any) -> None:
         """Write classes.json as a flat array (no archetype_id field — mazeworld positional)."""
-        output_dir = Path(getattr(ctx.config, "output_dir", "."))
         output_paths = getattr(ctx.config, "output_paths", {})
-        classes_path = output_dir / output_paths.get("classes", "classes/classes.json")
+        classes_path = output_paths.get("classes", "classes/classes.json")
 
         classes_list = []
         for arch in ctx.bible.class_archetypes.values():
@@ -206,7 +203,7 @@ class ClassPhase:
             entry.pop("archetype_id", None)
             classes_list.append(entry)
 
-        write_array_db(classes_path, classes_list)
+        ctx.adapter.write_json_array(classes_path, classes_list)
 
     def _generate_one(
         self,

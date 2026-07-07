@@ -1,0 +1,260 @@
+"""Run the platformer vertical slice end-to-end.
+
+    # deterministic, $0
+    uv run --extra platformer python examples/run_platformer_slice.py \
+        --backend fake --output-dir /tmp/plat_slice --seed emberfall_001
+
+    # real content
+    ANTHROPIC_API_KEY=sk-... uv run --extra platformer --extra anthropic \
+        python examples/run_platformer_slice.py --backend anthropic \
+        --output-dir /tmp/plat_slice_real
+
+Then review PNGs under <output-dir>/review/ and play a level:
+
+    uv run --extra platformer --extra play \
+        python examples/platformer_play.py <output-dir> l1
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT))
+
+from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline  # noqa: E402
+from canon.bible.models import Bible  # noqa: E402
+from canon.pipeline.runner import PipelineContext  # noqa: E402
+from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Canned fake responses — deterministic, matched to prompt markers.
+# Layouts are hand-verified against the movement spec (jump 3 up / 4 across;
+# water is swimmable) and against the schema dims: l1 48x16, l2 56x16,
+# l3 64x18. Each exercises the 3a feature set: water pool, ledge tier,
+# variable dims.
+# ---------------------------------------------------------------------------
+
+_FAKE_LAYOUTS = {
+    # Pools are CONTAINED (GameRules.water_containment): flanking walls
+    # form the basin lip — jump over, swim across, climb out.
+    "l1": (
+        "floor(0,47)\nplatform(10,11,4)\nledge(16,21,9)\n"
+        "wall(29,12,13)\nwall(37,12,13)\nwater(30,36,12)\n"
+        "spike(40,41)\nspawn(2)\nexit(45)"
+    ),
+    "l2": (
+        "floor(0,20)\nplatform(22,11,2)\nfloor(25,55)\n"
+        "wall(29,11,13)\nwall(39,11,13)\nwater(30,38,11)\n"
+        "spike(46,47)\nledge(48,51,11)\nspawn(2)\nexit(53)"
+    ),
+    "l3": (
+        "floor(0,10)\npit(11,13)\nfloor(14,30)\nspike(20,22)\n"
+        "wall(23,14,15)\nwall(30,14,15)\nwater(24,29,14)\n"
+        "floor(35,63)\nplatform(32,13,2)\nplatform(37,14,2)\n"
+        "ledge(40,46,12)\nspike(50,52)\n"
+        "wall(54,15,15)\nwall(61,15,15)\nwater(55,60,15)\n"
+        "spawn(3)\nexit(62)"
+    ),
+}
+
+#: Hand-verified spots per level: land (standable) and water cells.
+_FAKE_SPOTS = {
+    "l1": {"land": [(14, 13), (18, 8), (43, 13)], "water": [(33, 12), (32, 13)]},
+    "l2": {"land": [(10, 13), (27, 13), (49, 10)], "water": [(34, 12), (36, 11)]},
+    "l3": {"land": [(17, 15), (41, 11), (48, 15)], "water": [(26, 14), (57, 15)]},
+}
+
+_FAKE_DECOR = {
+    "l1": [
+        {"x": 6, "y": 2, "type": "stalactite"},
+        {"x": 22, "y": 8, "type": "crystal"},
+        {"x": 35, "y": 11, "type": "vine"},
+    ],
+    "l2": [
+        {"x": 10, "y": 3, "type": "stalactite"},
+        {"x": 33, "y": 10, "type": "vine"},
+        {"x": 50, "y": 10, "type": "moss"},
+    ],
+    "l3": [
+        {"x": 8, "y": 4, "type": "stalactite"},
+        {"x": 42, "y": 11, "type": "crystal"},
+        {"x": 57, "y": 13, "type": "vine"},
+    ],
+}
+
+_FAKE_ENEMY_NAMES = ["Cinder Beetle", "Ash Wraith", "Slag Sentry", "Vent Skimmer"]
+
+
+def make_fake_responder():
+    def respond(request) -> str:
+        msg = request.user_message
+        task_match = re.search(r"### TASK: (\w+)", msg)
+        task = task_match.group(1) if task_match else ""
+        level_match = re.search(r"### LEVEL: (\w+)", msg)
+        level_id = level_match.group(1) if level_match else "l1"
+
+        if task == "world":
+            return json.dumps(
+                {
+                    "title": "Emberfall Hollows",
+                    "stage_id": "ashen_depths",
+                    "stage_brief": (
+                        "Collapsed lava tubes below a dead volcano; warm ash "
+                        "drifts through cold stone corridors."
+                    ),
+                }
+            )
+        if task == "stage":
+            count_match = re.search(r"exactly (\d+) strings", msg)
+            n = int(count_match.group(1)) if count_match else 3
+            briefs = [
+                "A gentle descent teaching jumps over low ledges.",
+                "Broken ground: a collapsed bridge over a glowing chasm.",
+                "The deep vents: spike fields and crumbling footholds.",
+            ]
+            briefs = (briefs * ((n // 3) + 1))[:n]
+            return json.dumps(
+                {
+                    "theme": "ashen lava tubes",
+                    "level_briefs": briefs,
+                    "roster_brief": "Ash-crusted vermin and ember constructs.",
+                }
+            )
+        if task == "enemy":
+            index_match = re.search(r"### INDEX: (\d+)", msg)
+            i = int(index_match.group(1)) if index_match else 0
+            name = (
+                _FAKE_ENEMY_NAMES[i]
+                if i < len(_FAKE_ENEMY_NAMES)
+                else f"Ember Drone {i}"
+            )
+            return json.dumps(
+                {"name": name, "flavor": f"A {name.lower()} of the ashen depths."}
+            )
+        if task == "layout":
+            return _FAKE_LAYOUTS.get(level_id, _FAKE_LAYOUTS["l1"])
+        if task == "placement":
+            roster_match = re.search(
+                r"roster \(id, archetype, behavior\): (\[.*?\])\n", msg
+            )
+            roster = json.loads(roster_match.group(1)) if roster_match else []
+            spots = _FAKE_SPOTS.get(level_id, _FAKE_SPOTS["l1"])
+            land = list(spots["land"])
+            water = list(spots["water"])
+            placements = []
+            # Archetype-aware: swimmers into water spots, everyone else on
+            # land; first placement of each level marked elite.
+            for entry in roster:
+                pool = water if entry["archetype"] == "swimmer" else land
+                if not pool:
+                    continue
+                x, y = pool.pop(0)
+                placements.append(
+                    {
+                        "enemy_id": entry["id"],
+                        "x": x,
+                        "y": y,
+                        "elite": not placements,
+                    }
+                )
+            return json.dumps({"placements": placements})
+        if task == "decor":
+            return json.dumps({"decor": _FAKE_DECOR.get(level_id, [])})
+        raise ValueError(f"Fake responder: unrecognized prompt task {task!r}.")
+
+    return respond
+
+
+def build_backend(kind: str, model: str | None):
+    if kind == "fake":
+        return FakeLLMBackend(make_fake_responder())
+    if kind == "anthropic":
+        from canon.backends.anthropic import AnthropicBackend
+
+        return AnthropicBackend(model=model) if model else AnthropicBackend()
+    raise SystemExit(f"Unknown --backend: {kind!r}")
+
+
+def main() -> None:
+    # INFO-level logging so successful generations are visible, not just
+    # failures (mirrors run_mazeworld_full.py); quiet the HTTP chatter.
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=["fake", "anthropic"], default="fake")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--output-dir", default="./plat_slice_output")
+    parser.add_argument("--seed", default="emberfall_001")
+    parser.add_argument("--num-levels", type=int, default=3)
+    parser.add_argument("--num-enemies", type=int, default=4)
+    parser.add_argument(
+        "--engine", choices=["json", "godot"], default="json",
+        help="godot: use GodotOutputAdapter and emit a playable Godot "
+        "project into the output dir (open it in Godot 4.3+).",
+    )
+    parser.add_argument(
+        "--rules", default=None,
+        help="Path to a game_rules.json (defaults to the pack's). Copy the "
+        "pack file and edit it to make a different game.",
+    )
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    config = CanonConfig(seed=args.seed, output_dir=output_dir)
+
+    adapter = None
+    if args.engine == "godot":
+        from canon.adapters import GodotOutputAdapter
+
+        adapter = GodotOutputAdapter(output_dir)
+
+    ctx = PipelineContext(
+        bible=Bible.empty(seed=args.seed),
+        config=config,
+        rng=random.Random(args.seed),
+        llm=LLMClient(build_backend(args.backend, args.model)),
+        prompts=PlatformerPrompts(),
+        adapter=adapter,
+    )
+    from examples.platformer_pack.rules import load_rules
+
+    rules = load_rules(args.rules) if args.rules else load_rules()
+    phases = compose_pipeline(
+        num_levels=args.num_levels, num_enemies=args.num_enemies,
+        engine=args.engine, rules=rules,
+    )
+    run_pipeline(phases, ctx)
+
+    warnings = ctx.artifacts.get("slice_warnings", [])
+    if warnings:
+        print(f"\n!! {len(warnings)} generation warning(s) — content fell "
+              "back or was dropped (also in manifest.json):")
+        for message in warnings:
+            print(f"   - {message}")
+
+    print(f"\nSlice generated at {output_dir}/")
+    print(f"  Review PNGs:  {output_dir}/review/")
+    if args.engine == "godot":
+        print(
+            f"  Godot:        open {output_dir}/project.godot in "
+            "Godot 4.3+ and press Play"
+        )
+    print(
+        "  Pygame:       uv run --extra platformer --extra play "
+        f"python examples/platformer_play.py {output_dir} l1"
+    )
+
+
+if __name__ == "__main__":
+    main()

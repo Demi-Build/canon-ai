@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata, Character
-from canon.persistence import write_array_db
 from canon.pipeline.phases.dialogue import DialoguePhase
 
 logger = logging.getLogger(__name__)
@@ -58,7 +57,8 @@ class MazeworldDialoguePhase:
     def run(self, ctx: Any) -> None:
         output_dir = Path(getattr(ctx.config, "output_dir", "."))
         output_paths = getattr(ctx.config, "output_paths", {})
-        npcs_path = output_dir / output_paths.get("npcs", "npcs/npcs.json")
+        npcs_rel = output_paths.get("npcs", "npcs/npcs.json")
+        npcs_path = output_dir / npcs_rel
 
         if not npcs_path.exists():
             logger.warning("MazeworldDialoguePhase: %s not found; skipping.", npcs_path)
@@ -110,7 +110,7 @@ class MazeworldDialoguePhase:
                     npc["dialogue_tree"] = self._to_mazeworld_tree(tree)
             generated += 1
 
-        write_array_db(npcs_path, npcs)
+        ctx.adapter.write_json_array(npcs_rel, npcs)
         self._stamp_metadata(ctx)
         logger.info("MazeworldDialoguePhase processed %d NPCs.", generated)
 

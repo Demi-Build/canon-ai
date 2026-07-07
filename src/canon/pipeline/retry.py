@@ -11,6 +11,20 @@ INITIAL_MAX_TOKENS = 1024
 TOKEN_CAP = 8192
 
 
+def _is_non_retryable(exc: Exception) -> bool:
+    """Auth/permission failures never succeed on retry.
+
+    Without this, a bad API key burns the full retry budget on every
+    pipeline step (3 doomed calls x N steps) and produces an all-fallback
+    output tree. Duck-typed so core never imports backend SDKs: provider
+    errors carry ``status_code`` (401/403) and conventional class names.
+    """
+    if getattr(exc, "status_code", None) in (401, 403):
+        return True
+    name = type(exc).__name__
+    return "Authentication" in name or "PermissionDenied" in name
+
+
 def default_token_escalation(attempt: int, prev_max_tokens: int) -> int:
     """Bump max_tokens by 1.5x per attempt, capped at TOKEN_CAP.
 
@@ -88,6 +102,12 @@ def retry_with_feedback(
         try:
             content = _call_generate(generate_fn, kwargs)
         except Exception as e:
+            if _is_non_retryable(e):
+                logger.error(
+                    "[%s] non-retryable error (auth/permission) — aborting "
+                    "instead of retrying: %s", label, e,
+                )
+                raise
             logger.warning("[%s] attempt %d generation error: %s", label, attempt, e)
             feedback = [str(e)]
             if token_escalation is not None:

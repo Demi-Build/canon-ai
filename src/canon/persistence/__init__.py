@@ -11,10 +11,14 @@ All writers:
 - Use 2-space indentation (matches mazeworld).
 - Accept both Pydantic ``BaseModel`` instances (serialised via
   ``model_dump(mode="json")``) and plain dicts / JSON-serialisable objects.
+- Return the content hash (``"sha256:<hex>"``) of the exact bytes written,
+  so callers (the adapter layer, PRD §8.2) can stamp provenance without
+  re-reading the file. Callers that don't need it ignore the return.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -41,11 +45,12 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
-def _write_json(path: Path, data: Any) -> None:
+def _write_json(path: Path, data: Any) -> str:
     """Write *data* to *path* as JSON with 2-space indent.
 
     Creates parent directories.  Writes atomically via a temp file in the
     same directory so a crash mid-write does not leave a truncated file.
+    Returns the content hash of the written bytes.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,29 +69,31 @@ def _write_json(path: Path, data: Any) -> None:
         except OSError:
             pass
         raise
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def write_array_db(path: str | Path, entities: list) -> None:
+def write_array_db(path: str | Path, entities: list) -> str:
     """Write a flat JSON array of entity dicts.
 
     Used for npcs.json, events.json, quests.json, classes.json.
 
     Each entity may be a Pydantic BaseModel (serialised via
     ``model_dump(mode="json")``) or a plain dict.
+    Returns the content hash of the written bytes.
     """
     data = [_to_jsonable(e) for e in entities]
-    _write_json(Path(path), data)
+    return _write_json(Path(path), data)
 
 
 def write_keyed_db(
     path: str | Path,
     entities: list | dict,
     key_field: str = "id",
-) -> None:
+) -> str:
     """Write a keyed-object JSON file.
 
     Mazeworld convention: ``{"<id>": {entity_dict_minus_id}}``.
@@ -108,25 +115,26 @@ def write_keyed_db(
             serialised = _to_jsonable(entity)
             key = str(serialised[key_field])
             data[key] = serialised
-    _write_json(Path(path), data)
+    return _write_json(Path(path), data)
 
 
-def write_singleton(path: str | Path, obj: Any) -> None:
+def write_singleton(path: str | Path, obj: Any) -> str:
     """Write a single JSON object to *path*.
 
     Used for manifest.json, narrative.json, generation_stats.json,
     world_bible.json, story.json, spell_pools.json.
 
     *obj* may be a Pydantic BaseModel, a dict, or any JSON-serialisable value.
+    Returns the content hash of the written bytes.
     """
-    _write_json(Path(path), _to_jsonable(obj))
+    return _write_json(Path(path), _to_jsonable(obj))
 
 
 def write_per_map_file(
     path_template: str | Path,
     map_id: str,
     obj: Any,
-) -> None:
+) -> str:
     """Format *path_template* with *map_id* and call ``write_singleton``.
 
     Example::
@@ -137,7 +145,7 @@ def write_per_map_file(
     The template is formatted with a single ``{map_id}`` placeholder.
     """
     resolved = str(path_template).format(map_id=map_id)
-    write_singleton(Path(resolved), obj)
+    return write_singleton(Path(resolved), obj)
 
 
 # Re-export IDAllocator for convenience.

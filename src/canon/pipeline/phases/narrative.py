@@ -27,12 +27,10 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
 from canon.llm.request import LLMRequest
-from canon.persistence import write_singleton
 from canon.pipeline.retry import retry_with_feedback
 
 logger = logging.getLogger(__name__)
@@ -163,8 +161,7 @@ class NarrativePhase:
         # ------------------------------------------------------------------
         # v0.2: Write narrative.json with mazeworld shape
         # ------------------------------------------------------------------
-        output_dir = Path(getattr(ctx.config, "output_dir", "."))
-        narrative_path = output_dir / getattr(
+        narrative_path = getattr(
             ctx.config, "output_paths", {}
         ).get("narrative", "narrative.json")
 
@@ -177,7 +174,7 @@ class NarrativePhase:
         for map_id, intro in artifacts.get("map_intros", {}).items():
             narrative_json[f"room_intro_{map_id}"] = intro or ""
 
-        write_singleton(narrative_path, narrative_json)
+        ctx.adapter.write_json_singleton(narrative_path, narrative_json)
 
         # ------------------------------------------------------------------
         # Metadata stamp

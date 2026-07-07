@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from canon.bible.models import (
@@ -24,7 +23,6 @@ from canon.bible.models import (
     StoryBeat,
 )
 from canon.llm.parsing import extract_json_object
-from canon.persistence import write_singleton
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
 
 logger = logging.getLogger(__name__)
@@ -144,12 +142,11 @@ class StoryPhase:
 
     def _persist(self, ctx: Any, story: StoryArc) -> None:
         """Write story.json and the initial world_bible.json skeleton."""
-        output_dir = Path(getattr(ctx.config, "output_dir", "."))
         output_paths = getattr(ctx.config, "output_paths", {})
 
         # 1. data/story/story.json — full StoryArc dump
-        story_path = output_dir / output_paths.get("story", "story/story.json")
-        write_singleton(story_path, story.model_dump(mode="json"))
+        story_path = output_paths.get("story", "story/story.json")
+        ctx.adapter.write_json_singleton(story_path, story.model_dump(mode="json"))
 
         # 2. data/world_bible.json — initial skeleton with empty room buckets.
         #    ManifestPhase overwrites this at pipeline end with the full version.
@@ -174,8 +171,8 @@ class StoryPhase:
             "story": story.model_dump(mode="json"),
             "rooms": rooms,
         }
-        wb_path = output_dir / output_paths.get("world_bible", "world_bible.json")
-        write_singleton(wb_path, world_bible)
+        wb_path = output_paths.get("world_bible", "world_bible.json")
+        ctx.adapter.write_json_singleton(wb_path, world_bible)
 
     @staticmethod
     def _parse_story(content: str, seed: str) -> StoryArc:

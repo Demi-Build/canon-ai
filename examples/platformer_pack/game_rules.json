@@ -1,0 +1,6 @@
+{
+  "_doc": "Per-game behavior policy (PRD Appendix E.7). Known keys are enforced by validators/prompts/play surfaces; unknown keys are carried into manifest.json but INERT until enforcement code exists. Copy this file to make a different game and point the runner at it with --rules.",
+  "water_containment": "contained",
+  "enemy_water_policy": "swimmers_only",
+  "platform_drop_through": true
+}

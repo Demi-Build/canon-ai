@@ -323,6 +323,146 @@ def run_single_phase(
     _emit({"phase": phase_name, "result": "ok"})
 
 
+# ---------------------------------------------------------------------------
+# Orchestrator verbs (PRD §7.5): run / resume / status
+# ---------------------------------------------------------------------------
+
+
+def _orchestrated_run(
+    path: Path,
+    pipeline: str | None,
+    phases_spec: str | None,
+    max_concurrency: int | None,
+    skip_edit_check: bool,
+) -> None:
+    """Shared body of `canon run` and `canon resume` — resume IS run:
+    completed nodes are skipped from bible.metadata.node_status."""
+    try:
+        from canon.pipeline.orchestrator import detect_edits, orchestrate
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    if not pipeline:
+        _emit_error("--pipeline is required (module:attr -> ctx factory)")
+    if not phases_spec:
+        _emit_error("--phases is required (module:attr -> phases factory)")
+
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    try:
+        ctx_factory = _resolve_module_attr(pipeline)  # type: ignore[arg-type]
+        ctx = ctx_factory(bible)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to build PipelineContext from --pipeline: {e}")
+
+    try:
+        phases_factory = _resolve_module_attr(phases_spec)  # type: ignore[arg-type]
+        phases = phases_factory(ctx) if callable(phases_factory) else phases_factory  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to build phases from --phases: {e}")
+
+    edit_report = None
+    if not skip_edit_check:
+        try:
+            edits = detect_edits(  # type: ignore[possibly-unbound]
+                bible, getattr(ctx.config, "output_dir", ".")  # type: ignore[possibly-unbound]
+            )
+            edit_report = edits.to_dict()
+        except Exception as e:
+            _emit_error(f"Edit detection failed: {e}", traceback=traceback.format_exc())
+
+    try:
+        report = orchestrate(  # type: ignore[possibly-unbound]
+            phases, ctx, max_concurrency=max_concurrency, persist_path=path,  # type: ignore[possibly-unbound]
+        )
+    except Exception as e:
+        _emit_error(f"Orchestrated run failed: {e}", traceback=traceback.format_exc())
+
+    _emit(
+        {
+            "result": "ok" if report.ok else "incomplete",  # type: ignore[possibly-unbound]
+            "report": report.to_dict(),  # type: ignore[possibly-unbound]
+            "edit_detection": edit_report,
+            "bible": str(path),
+        }
+    )
+    if not report.ok:  # type: ignore[possibly-unbound]
+        raise typer.Exit(3)
+
+
+@app.command("run")
+def run_pipeline_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file (state lives here)."),
+    pipeline: str | None = typer.Option(
+        None, "--pipeline",
+        help="module:attr resolving to a PipelineContext factory callable(bible) -> ctx.",
+    ),
+    phases: str | None = typer.Option(
+        None, "--phases",
+        help="module:attr resolving to a phase list, or a callable(ctx) -> phase list.",
+    ),
+    max_concurrency: int | None = typer.Option(
+        None, "--max-concurrency", help="Override config.max_concurrency for this run.",
+    ),
+    skip_edit_check: bool = typer.Option(
+        False, "--skip-edit-check", help="Skip on-disk hash recompute / stale cascade.",
+    ),
+) -> None:
+    """Run a pipeline through the DAG orchestrator (resume-aware)."""
+    _orchestrated_run(path, pipeline, phases, max_concurrency, skip_edit_check)
+
+
+@app.command("resume")
+def resume_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+    pipeline: str | None = typer.Option(None, "--pipeline"),
+    phases: str | None = typer.Option(None, "--phases"),
+    max_concurrency: int | None = typer.Option(None, "--max-concurrency"),
+    skip_edit_check: bool = typer.Option(False, "--skip-edit-check"),
+) -> None:
+    """Alias for `run` — resume after a failure, edit, or gate pause."""
+    _orchestrated_run(path, pipeline, phases, max_concurrency, skip_edit_check)
+
+
+@app.command("status")
+def status_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+) -> None:
+    """Print the state-machine summary from the bible (per-node + coarse)."""
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    node_status = {
+        k: str(v) for k, v in bible.metadata.node_status.items()  # type: ignore[possibly-unbound]
+    }
+    counts: dict[str, int] = {}
+    for value in node_status.values():
+        counts[value] = counts.get(value, 0) + 1
+    _emit(
+        {
+            "phases_run": bible.metadata.phases_run,  # type: ignore[possibly-unbound]
+            "phase_status": {
+                k: str(v) for k, v in bible.metadata.phase_status.items()  # type: ignore[possibly-unbound]
+            },
+            "node_counts": counts,
+            "node_status": node_status,
+            "attention": sorted(
+                nid for nid, s in node_status.items()
+                if s in ("escalated", "stale", "user_edited", "awaiting_review")
+            ),
+        }
+    )
+
+
 def main() -> None:
     app()
 

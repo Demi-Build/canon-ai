@@ -21,12 +21,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
 from canon.llm.parsing import extract_json_array
-from canon.persistence import write_singleton
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
 from canon.skeleton.core import SkeletonSpec, roll_skeleton
 
@@ -75,14 +73,14 @@ class SpellPoolPhase:
         else:
             pools = self._regroup_archetype_pools(ctx)
 
-        path = self._path(ctx)
-        write_singleton(path, pools)
+        rel_path = self._rel_path(ctx)
+        ctx.adapter.write_json_singleton(rel_path, pools)
         self._stamp_metadata(ctx)
         logger.info(
             "SpellPoolPhase wrote %d spells across %d pools to %s",
             sum(len(v) for v in pools.values()),
             len(pools),
-            path,
+            ctx.adapter.resolve_path(rel_path),
         )
 
     # ------------------------------------------------------------------
@@ -153,12 +151,10 @@ class SpellPoolPhase:
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _path(self, ctx: Any) -> Path:
-        out = Path(getattr(ctx.config, "output_dir", "."))
-        rel = getattr(ctx.config, "output_paths", {}).get(
+    def _rel_path(self, ctx: Any) -> str:
+        return getattr(ctx.config, "output_paths", {}).get(
             "spell_pools", "classes/spell_pools.json"
         )
-        return out / rel
 
     def _stamp_metadata(self, ctx: Any) -> None:
         if not isinstance(getattr(ctx.bible, "metadata", None), BibleMetadata):

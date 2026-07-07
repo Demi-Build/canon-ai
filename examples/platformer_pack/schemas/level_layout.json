@@ -1,0 +1,34 @@
+{
+  "schema_version": "3",
+  "entity_type": "level_layout",
+  "fields": {
+    "difficulty": {
+      "lookup": [[1, 1], [2, 2], [3, 3]],
+      "depends_on_context": "level_number"
+    },
+    "grid_width": {
+      "lookup": [[1, 48], [2, 56], [3, 64]],
+      "depends_on": "difficulty"
+    },
+    "grid_height": {
+      "lookup": [[1, 16], [2, 16], [3, 18]],
+      "depends_on": "difficulty"
+    },
+    "platform_count": {
+      "lookup": [[1, 2], [2, 3], [3, 4]],
+      "depends_on": "difficulty"
+    },
+    "hazard_count": {
+      "lookup": [[1, 1], [2, 2], [3, 3]],
+      "depends_on": "difficulty"
+    },
+    "gap_count": {
+      "lookup": [[1, 0], [2, 1], [3, 2]],
+      "depends_on": "difficulty"
+    },
+    "water_pools": {
+      "lookup": [[1, 1], [2, 1], [3, 2]],
+      "depends_on": "difficulty"
+    }
+  }
+}
