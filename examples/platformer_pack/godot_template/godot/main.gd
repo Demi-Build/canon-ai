@@ -16,7 +16,8 @@ extends Node2D
 const CELL := 32.0
 const TILE_EMPTY := 0
 const TILE_SPIKE := 10
-const SOLID := [1, 2, 3]  # FLOOR, PLATFORM, WALL
+# Tile semantics: 1=FLOOR and 3=WALL block from all sides; 2=PLATFORM is
+# one-way (land from above only) — see _blocked_at/_landing_at.
 
 var manifest: Dictionary
 var movement: Dictionary
@@ -159,12 +160,39 @@ func _respawn() -> void:
 	player_vy = 0.0
 
 
-func _solid_at(x: float, y: float) -> bool:
+# The player body spans [x + BODY_L, x + BODY_R] horizontally (in cells),
+# so collision samples BOTH corners — single-point sampling let players
+# clip through platform edges.
+const BODY_L := 0.15
+const BODY_R := 0.85
+
+
+func _tile(x: float, y: float) -> int:
 	var ix := int(x)
 	var iy := int(y)
 	if ix < 0 or ix >= grid_w or iy < 0 or iy >= grid_h:
-		return false
-	return int(grid[iy][ix]) in SOLID
+		return TILE_EMPTY
+	return int(grid[iy][ix])
+
+
+func _blocked_at(x: float, y: float) -> bool:
+	# Walls/floors block from every side; PLATFORM is one-way (handled
+	# only in the landing check) so you can jump up through it.
+	var left := _tile(x + BODY_L, y)
+	var right := _tile(x + BODY_R, y)
+	return left == 1 or left == 3 or right == 1 or right == 3
+
+
+func _landing_at(x: float, y: float, prev_bottom: float) -> bool:
+	# Falling: land on solids always; land on a PLATFORM only when the
+	# feet were above its top edge last frame (classic one-way platform).
+	for cx in [x + BODY_L, x + BODY_R]:
+		var tile := _tile(cx, y)
+		if tile == 1 or tile == 3:
+			return true
+		if tile == 2 and prev_bottom <= float(int(y)):
+			return true
+	return false
 
 
 func _process(delta: float) -> void:
@@ -181,7 +209,7 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		dx -= 1.0
 	var new_x: float = player_pos.x + dx * float(movement["run_speed"]) * delta
-	if not _solid_at(new_x, player_pos.y):
+	if not _blocked_at(new_x, player_pos.y):
 		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
 
 	var gravity := float(movement["gravity"])
@@ -193,12 +221,13 @@ func _process(delta: float) -> void:
 	if jump_pressed and on_ground:
 		player_vy = -sqrt(2.0 * gravity * float(movement["jump_height"]))
 	player_vy += gravity * delta
+	var prev_bottom: float = player_pos.y + 0.99
 	var new_y: float = player_pos.y + player_vy * delta
-	if player_vy > 0.0 and _solid_at(player_pos.x, new_y + 0.99):
+	if player_vy > 0.0 and _landing_at(player_pos.x, new_y + 0.99, prev_bottom):
 		player_pos.y = float(int(new_y + 0.99) - 1)
 		player_vy = 0.0
 		on_ground = true
-	elif player_vy < 0.0 and _solid_at(player_pos.x, new_y):
+	elif player_vy < 0.0 and _blocked_at(player_pos.x, new_y):
 		player_vy = 0.0
 		on_ground = false
 	else:
@@ -207,10 +236,12 @@ func _process(delta: float) -> void:
 
 	if player_pos.y > grid_h + 2.0:
 		_respawn()
-	# clampi (not mini): a negative y would wrap to the bottom row and
-	# false-kill the player on pit spikes while jumping above the screen.
-	var cell_y := clampi(int(player_pos.y), 0, grid_h - 1)
-	if int(grid[cell_y][int(player_pos.x)]) == TILE_SPIKE:
+	# _tile is bounds-safe (returns EMPTY off-grid), so jumping above the
+	# screen can't wrap onto bottom-row pit spikes.
+	if (
+		_tile(player_pos.x + BODY_L, player_pos.y) == TILE_SPIKE
+		or _tile(player_pos.x + BODY_R, player_pos.y) == TILE_SPIKE
+	):
 		_respawn()
 
 	# --- enemies: execute their database behavior params ---

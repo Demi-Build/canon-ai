@@ -74,8 +74,10 @@ def main() -> None:
     movement = manifest["movement"]
     tile_colors = _tile_colors(data_dir, tileset)
     height, width = grid.shape
-    SOLID = {1, 2, 3}  # FLOOR, PLATFORM, WALL (PLATFORM treated solid-simple)
+    BLOCKING = {1, 3}  # FLOOR, WALL block all sides; PLATFORM (2) is one-way
+    PLATFORM = 2
     SPIKE = 10
+    BODY_L, BODY_R = 0.15, 0.85  # player body span — sample BOTH corners
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
@@ -120,11 +122,24 @@ def main() -> None:
     won = False
     live_enemies = [Enemy(p) for p in placements]
 
-    def solid_at(cx: float, cy: float) -> bool:
+    def tile_at(cx: float, cy: float) -> int:
         ix, iy = int(cx), int(cy)
         if not (0 <= ix < width and 0 <= iy < height):
-            return False
-        return int(grid[iy, ix]) in SOLID
+            return 0
+        return int(grid[iy, ix])
+
+    def blocked_at(x: float, y: float) -> bool:
+        # Both body corners; PLATFORM is one-way and never blocks sideways.
+        return tile_at(x + BODY_L, y) in BLOCKING or tile_at(x + BODY_R, y) in BLOCKING
+
+    def landing_at(x: float, y: float, prev_bottom: float) -> bool:
+        for cx in (x + BODY_L, x + BODY_R):
+            tile = tile_at(cx, y)
+            if tile in BLOCKING:
+                return True
+            if tile == PLATFORM and prev_bottom <= float(int(y)):
+                return True
+        return False
 
     def respawn() -> None:
         nonlocal px, py, vy
@@ -155,22 +170,23 @@ def main() -> None:
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
         new_x = px + dx * run_speed * dt
-        if not solid_at(new_x, py):
+        if not blocked_at(new_x, py):
             px = max(0.0, min(new_x, width - 1.0))
 
         vy += gravity * dt
+        prev_bottom = py + 0.99
         new_y = py + vy * dt
-        if vy > 0 and solid_at(px, new_y + 0.99):
+        if vy > 0 and landing_at(px, new_y + 0.99, prev_bottom):
             py = float(int(new_y + 0.99) - 1)
             vy, on_ground = 0.0, True
-        elif vy < 0 and solid_at(px, new_y):
+        elif vy < 0 and blocked_at(px, new_y):
             vy, on_ground = 0.0, False
         else:
             py, on_ground = new_y, False
 
         if py > height + 2:
             respawn()
-        if int(grid[min(int(py), height - 1), int(px)]) == SPIKE:
+        if tile_at(px + BODY_L, py) == SPIKE or tile_at(px + BODY_R, py) == SPIKE:
             respawn()
         for enemy in live_enemies:
             enemy.update(dt, px)
