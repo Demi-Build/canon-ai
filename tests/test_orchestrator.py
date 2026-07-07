@@ -195,6 +195,63 @@ class TestScheduling:
         assert run_once(1) == run_once(4)
 
 
+class TestEditSemantics:
+    def test_user_edited_node_is_never_rerun(self, tmp_path: Path) -> None:
+        """§6.3: the edit is authoritative. A node whose status is
+        USER_EDITED is skipped as complete (its output satisfies
+        dependents as-is); only STALE descendants re-run."""
+        runs: dict[str, int] = {}
+        ctx = _ctx(tmp_path)
+        orchestrate(
+            [RecorderPhase(DIAMOND, body=lambda n: runs.__setitem__(n, runs.get(n, 0) + 1))],
+            ctx,
+        )
+        # Simulate detect_edits: b edited by the user, d stale behind it.
+        ctx.bible.metadata.node_status["b"] = ArtifactStatus.USER_EDITED
+        ctx.bible.metadata.node_status["d"] = ArtifactStatus.STALE
+        report = orchestrate(
+            [RecorderPhase(DIAMOND, body=lambda n: runs.__setitem__(n, runs.get(n, 0) + 1))],
+            ctx,
+        )
+        assert report.ok
+        assert "b" in report.skipped  # edited: skipped, NOT regenerated
+        assert report.done == ["d"]  # stale descendant re-ran
+        assert runs == {"a": 1, "b": 1, "c": 1, "d": 2}
+        assert ctx.bible.metadata.node_status["d"] is ArtifactStatus.DONE
+        # The user_edited mark survives as the broken-provenance record.
+        assert (
+            ctx.bible.metadata.node_status["b"] is ArtifactStatus.USER_EDITED
+        )
+
+    def test_always_node_reruns_every_orchestration(self, tmp_path: Path) -> None:
+        runs: dict[str, int] = {}
+
+        class AlwaysPhase:
+            name = "always"
+
+            def expand(self, ctx) -> list[Node]:
+                def body(_ctx, _nid="derived") -> None:
+                    runs[_nid] = runs.get(_nid, 0) + 1
+
+                def base(_ctx) -> None:
+                    runs["base"] = runs.get("base", 0) + 1
+
+                return [
+                    Node(node_id="base", run=base),
+                    Node(
+                        node_id="derived", run=body, requires=["base"],
+                        always=True,
+                    ),
+                ]
+
+        ctx = _ctx(tmp_path)
+        orchestrate([AlwaysPhase()], ctx)
+        report = orchestrate([AlwaysPhase()], ctx)
+        assert report.skipped == ["base"]
+        assert report.done == ["derived"]
+        assert runs == {"base": 1, "derived": 2}
+
+
 class TestGates:
     def test_gate_pauses_cleanly_when_not_auto(self, tmp_path: Path) -> None:
         phase = RecorderPhase(DIAMOND, gates=("b",))

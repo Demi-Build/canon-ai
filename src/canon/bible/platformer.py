@@ -36,10 +36,13 @@ from canon.bible.artifacts import ArtifactMeta
 
 
 class TileType(IntEnum):
-    """Collision-grid cell values. The LevelSchema (§4.2) owns the
-    authoritative, user-extensible set; these are the framework defaults.
-    Numbering bands are deliberate: solids < 10, hazards >= 10 < 20,
-    traversable volumes >= 20 (PRD Appendix E.1)."""
+    """Collision-grid cell values — the FRAMEWORK DEFAULT vocabulary.
+
+    Since Phase 3b the authoritative per-game set is a tile registry file
+    (``tile_types.json``, values-in-data); this enum mirrors the default
+    registry so framework code and tests have stable names. Numbering
+    bands are deliberate and registry-enforced: solids < 10, hazards
+    >= 10 < 20, traversable volumes >= 20 (PRD Appendix E.1)."""
 
     EMPTY = 0
     FLOOR = 1
@@ -97,19 +100,26 @@ class SparseMaskEntry(BaseModel):
 
 
 class TileSlot(BaseModel):
-    """One slot of a tilesheet: which region is which TileType.
+    """One slot of a tilesheet: which region is which tile id.
 
-    ``collision`` (PRD Appendix E.3) carries the tile's physics semantics
+    ``collision`` (PRD Appendix E.3) carries the tile's physics CATEGORY
     so consumers derive behavior from the tileset manifest instead of
     hardcoding tile IDs — the seam where per-tile collision shapes attach
-    when real art arrives. Empty string = derive from tile_type (back-compat
-    for pre-3a manifests).
+    when real art arrives. Since 3b the vocabulary is the tile-registry
+    category set: "empty" | "solid" | "one_way" | "hazard" | "volume"
+    (pre-3b manifests used "none"/"water" for the last two). ``params``
+    carries the category's data knobs (volume speed_factor/gravity/
+    impulse/damage_per_second, hazard damage, ...) — values in data,
+    interpreters in code. ``tile_type`` is a plain int because registries
+    define game-specific ids beyond the framework-default ``TileType``.
     """
 
     index: int
-    tile_type: TileType
+    tile_type: int
+    name: str = ""  # registry tile name ("water", "lava", ...)
     px_region: tuple[int, int, int, int] | None = None  # x, y, w, h in pixels
-    collision: str = ""  # "solid" | "one_way" | "none" | "hazard" | "water"
+    collision: str = ""  # category: "empty"|"solid"|"one_way"|"hazard"|"volume"
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +160,10 @@ class Level(ArtifactMeta):
     grid_width: int = 0  # cells
     grid_height: int = 0
     pixels_per_cell: int | None = None  # None → ProjectConfig global (§4.2)
+    #: The stage-planning brief this level was generated against. Persisted
+    #: so per-step REGENERATION (placement/decor re-rolls on a loaded
+    #: Bible) prompts with the same context the original run had.
+    brief: str = ""
 
     # First-class point markers (standing-cell grid coords). These are level
     # structure, not gameplay triggers — every consumer (validators, render,
@@ -206,9 +220,15 @@ class BossDefinition(EnemyDefinition):
 
 
 class Tileset(ArtifactMeta):
-    """A stage's tilesheet + slot metadata. Addressed ``tileset:<stage_id>``."""
+    """A stage's tilesheet + slot metadata. Addressed ``tileset:<stage_id>``.
+
+    ``palette`` records the color_role → hex map the sheet was actually
+    painted with (style-guide agent output, or the placeholder fallback)
+    — Bible-complete: reviewers and future art tools read it from here.
+    """
 
     stage_id: str
     tilesheet_path: str = ""  # output_dir-relative PNG
     tilesheet_hash: str = ""
     slots: list[TileSlot] = Field(default_factory=list)
+    palette: dict[str, str] = Field(default_factory=dict)

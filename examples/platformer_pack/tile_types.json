@@ -1,0 +1,17 @@
+{
+  "_doc": "Per-game tile registry (Phase 3b): values in data, categories in code. Each tile is {id, name, category, color_role, params}; categories (empty/solid/one_way/hazard/volume) are the code-enforced interpreters, so a new hazard or volume is a data entry, not code. Bands: empty=0, solids/one_way 1-9, hazards 10-19, volumes 20-127. floor/platform/wall names are required (structural DSL ops). Copy this file to make a different game and point the runner at it with --tiles.",
+  "tiles": [
+    { "id": 0, "name": "empty", "category": "empty", "color_role": "background" },
+    { "id": 1, "name": "floor", "category": "solid", "color_role": "ground" },
+    { "id": 2, "name": "platform", "category": "one_way", "color_role": "platform" },
+    { "id": 3, "name": "wall", "category": "solid", "color_role": "wall" },
+    { "id": 10, "name": "spike", "category": "hazard", "color_role": "danger" },
+    {
+      "id": 20,
+      "name": "water",
+      "category": "volume",
+      "color_role": "water",
+      "params": { "speed_factor": 0.55, "gravity": 8.0, "impulse": 5.0 }
+    }
+  ]
+}

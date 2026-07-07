@@ -1,0 +1,22 @@
+{
+  "_doc": "Lava-world tile registry: the pack template with the water volume swapped for SWIMMABLE LAVA — a damaging volume, defined entirely in data (category 'volume' + damage_per_second param). No water tile exists here, so the DSL's water() alias errors and agents are offered volume(lava, ...) instead.",
+  "tiles": [
+    { "id": 0, "name": "empty", "category": "empty", "color_role": "background" },
+    { "id": 1, "name": "floor", "category": "solid", "color_role": "basalt" },
+    { "id": 2, "name": "platform", "category": "one_way", "color_role": "platform" },
+    { "id": 3, "name": "wall", "category": "solid", "color_role": "wall" },
+    { "id": 10, "name": "spike", "category": "hazard", "color_role": "danger" },
+    {
+      "id": 20,
+      "name": "lava",
+      "category": "volume",
+      "color_role": "lava",
+      "params": {
+        "speed_factor": 0.45,
+        "gravity": 6.0,
+        "impulse": 5.0,
+        "damage_per_second": 1.0
+      }
+    }
+  ]
+}

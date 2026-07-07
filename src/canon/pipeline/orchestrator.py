@@ -49,6 +49,11 @@ class Node:
     against other nodes' ``produces`` (default: the node's own id).
     Requires that nothing in the run produces are treated as satisfied
     externally (pre-existing Bible artifacts) and logged once.
+
+    ``always`` marks a node that re-runs every orchestration even when
+    recorded DONE — for cheap, deterministic derived outputs (review
+    renders, the root manifest) that must stay fresh after any upstream
+    regeneration without needing their own place in the stale cascade.
     """
 
     node_id: str
@@ -56,6 +61,7 @@ class Node:
     requires: list[str] = field(default_factory=list)
     produces: str = ""  # defaults to node_id
     gate: bool = False  # human gate (I4): pause point unless auto-approved
+    always: bool = False  # re-run even when DONE (cheap derived outputs)
 
     def __post_init__(self) -> None:
         if not self.produces:
@@ -196,8 +202,10 @@ def orchestrate(
     persist_path: str | Path | None = None,
 ) -> OrchestratorReport:
     """Run pipeline items as a DAG. Resume-aware: nodes recorded DONE in
-    ``bible.metadata.node_status`` are skipped unless marked stale or
-    user_edited by :func:`detect_edits`."""
+    ``bible.metadata.node_status`` are skipped unless marked STALE by
+    :func:`detect_edits`. USER_EDITED nodes are also skipped — the edit
+    is authoritative and is never regenerated (§6.3); only its
+    descendants (stale) re-run. ``always`` nodes re-run every time."""
     cap = max_concurrency or int(getattr(ctx.config, "max_concurrency", 1))
     auto_gates = bool(getattr(ctx.config, "gates_auto_approve", True))
     metadata = _ensure_metadata(ctx)
@@ -210,12 +218,21 @@ def orchestrate(
     report = OrchestratorReport()
     status = metadata.node_status
     rerun = {
-        nid for nid, s in status.items()
-        if s in (ArtifactStatus.STALE, ArtifactStatus.USER_EDITED)
+        nid for nid, s in status.items() if s is ArtifactStatus.STALE
     }
     completed: set[str] = set()
-    for nid in node_map:
-        if status.get(nid) == ArtifactStatus.DONE and nid not in rerun:
+    for nid, node in node_map.items():
+        node_status = status.get(nid)
+        if node_status == ArtifactStatus.USER_EDITED:
+            # The user's edit is authoritative — NEVER regenerate it
+            # (§6.3); its output satisfies dependents as-is.
+            completed.add(nid)
+            report.skipped.append(nid)
+        elif (
+            node_status == ArtifactStatus.DONE
+            and nid not in rerun
+            and not node.always
+        ):
             completed.add(nid)
             report.skipped.append(nid)
 
@@ -310,9 +327,11 @@ class EditReport:
 
 
 def _iter_hashed_files(bible: Any):
-    """Yield (artifact_id, relative_path, stored_hash, owner) for every
-    file-backed, hash-stamped artifact. Only Bible-complete entities
-    participate (§8.5) — MazeWorld stubs never appear here."""
+    """Yield (artifact_id, relative_path, stored_hash, owner, hash_attr)
+    for every file-backed, hash-stamped artifact. Only Bible-complete
+    entities participate (§8.5) — MazeWorld stubs never appear here.
+    ``hash_attr`` names the owner's hash field so an authoritative user
+    edit can be adopted (stored hash re-stamped from disk)."""
     for level in getattr(bible, "levels", {}).values():
         prefix = f"level:{level.stage_id}/{level.level_id}"
         base = f"level/{level.stage_id}/{level.level_id}"
@@ -323,7 +342,7 @@ def _iter_hashed_files(bible: Any):
         )
         for step, rel, stored in dense:
             if rel and stored:
-                yield f"{prefix}/{step}", rel, stored, level
+                yield f"{prefix}/{step}", rel, stored, level, f"{step}_hash"
         sparse = (
             ("hazards", level.hazards_hash),
             ("triggers", level.triggers_hash),
@@ -332,7 +351,10 @@ def _iter_hashed_files(bible: Any):
         )
         for step, stored in sparse:
             if stored:
-                yield f"{prefix}/{step}", f"{base}/{step}.json", stored, level
+                yield (
+                    f"{prefix}/{step}", f"{base}/{step}.json", stored,
+                    level, f"{step}_hash",
+                )
     for tileset in getattr(bible, "tilesets", {}).values():
         if tileset.tilesheet_path and tileset.tilesheet_hash:
             yield (
@@ -340,6 +362,7 @@ def _iter_hashed_files(bible: Any):
                 tileset.tilesheet_path,
                 tileset.tilesheet_hash,
                 tileset,
+                "tilesheet_hash",
             )
 
 
@@ -373,12 +396,18 @@ def detect_edits(bible: Any, output_dir: str | Path) -> EditReport:
     ``user_edited`` (the edit is authoritative — it is NEVER re-run) and
     every §6.1 descendant ``stale`` (schedulable for regeneration).
     Statuses land in ``bible.metadata.node_status`` and on owning entities;
-    staleness is surfaced, not auto-regenerated."""
+    staleness is surfaced, not auto-regenerated.
+
+    Because the edit is authoritative, it is ADOPTED: the stored content
+    hash is re-stamped from disk, so the next detection pass is clean
+    instead of re-cascading the same edit forever. The ``user_edited``
+    status (and the untouched provenance hash) remain as the record that
+    the artifact's content no longer traces to its generation inputs."""
     output_dir = Path(output_dir)
     report = EditReport()
     owners: dict[str, Any] = {}
 
-    for artifact_id, rel, stored, owner in _iter_hashed_files(bible):
+    for artifact_id, rel, stored, owner, hash_attr in _iter_hashed_files(bible):
         owners[artifact_id] = owner
         target = output_dir / rel
         if not target.exists():
@@ -387,6 +416,7 @@ def detect_edits(bible: Any, output_dir: str | Path) -> EditReport:
         actual = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
         if actual != stored:
             report.user_edited.append(artifact_id)
+            setattr(owner, hash_attr, actual)  # adopt: edit is authoritative
 
     if report.user_edited:
         edges = _dependency_edges(bible)

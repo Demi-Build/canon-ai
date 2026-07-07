@@ -1,16 +1,19 @@
 """THROWAWAY pygame review harness — filler code, not the game.
 
 Exists solely to simulate what the generated databases look like in motion:
-tiles resolve through the Tileset artifact, enemy squares through
-EnemyDefinition placeholder colors, and enemy movement executes the rolled
-behavior params. The real platformer ships in Godot (Phase 4); this file
-dies when that lives. Do not polish it.
+tiles resolve through the Tileset artifact (categories + params on slots),
+enemy squares through EnemyDefinition placeholder colors + the manifest's
+variant vocabulary, and enemy movement executes the rolled behavior params.
+The real platformer ships in Godot (Phase 4); this file dies when that
+lives. Do not polish it.
 
     uv run --extra platformer --extra play \
         python examples/platformer_play.py <data_dir> [level_id]
 
-Controls: arrows/A-D move, space/up jumps, R respawns, Esc quits.
-Touch a spike or fall off: respawn. Reach the green exit: level complete.
+Controls: arrows/A-D move, space/up jumps or swims, R respawns, Esc quits.
+Touch a hazard or fall off: respawn (at the last checkpoint you crossed).
+Linger in a damaging volume (lava): respawn. Reach the green exit: level
+complete.
 """
 
 from __future__ import annotations
@@ -21,6 +24,9 @@ from pathlib import Path
 
 SCALE = 32
 FPS = 60
+#: Damage a player can soak in a damaging volume before respawning —
+#: crude stand-in for HP so lava reads "quick dips only" (throwaway).
+DAMAGE_BUDGET = 3.0
 
 
 def _load(data_dir: Path, level_id: str):
@@ -45,7 +51,7 @@ def _load(data_dir: Path, level_id: str):
 
 def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
     """Resolve tile colors by sampling the tilesheet via the Tileset slots —
-    same resolution path the renderer and (later) Godot use."""
+    same resolution path the renderer and Godot use."""
     from PIL import Image
 
     sheet = Image.open(data_dir / tileset["tilesheet_path"]).convert("RGB")
@@ -76,21 +82,34 @@ def main() -> None:
     height, width = grid.shape
     BODY_L, BODY_R = 0.15, 0.85  # player body span — sample BOTH corners
 
-    # Physics semantics from the tileset manifest (Appendix E.3) — no
-    # hardcoded tile IDs; real art later ships its own semantics here.
-    def _types_with(collision: str) -> set:
+    # Physics semantics from the tileset manifest (Appendix E.3 / 3b) — no
+    # hardcoded tile IDs; categories + params ride on the slots.
+    def _types_with(category: str) -> set:
         return {
             int(s["tile_type"]) for s in tileset["slots"]
-            if s.get("collision") == collision
+            if s.get("collision") == category
         }
 
     BLOCKING = _types_with("solid")
     ONE_WAY = _types_with("one_way")
     HAZARD = _types_with("hazard")
-    WATER = _types_with("water")
+    #: tile id → volume params (speed_factor/gravity/impulse/damage_per_second)
+    VOLUMES = {
+        int(s["tile_type"]): dict(s.get("params") or {})
+        for s in tileset["slots"]
+        if s.get("collision") == "volume"
+    }
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
+    # Checkpoints from the triggers layer (3b): crossing one moves the
+    # respawn point there.
+    checkpoints = [
+        {"x": t["x"], "y": t["y"], "active": False}
+        for t in level.get("triggers", [])
+        if t.get("type") == "checkpoint"
+    ]
+    respawn_point = dict(spawn)
 
     def hex_rgb(h: str) -> tuple:
         h = h.lstrip("#")
@@ -99,6 +118,9 @@ def main() -> None:
     rules = manifest.get("rules", {})
     water_policy = rules.get("enemy_water_policy", "swimmers_only")
     drop_through = bool(rules.get("platform_drop_through", True))
+    #: Variant vocabulary from the manifest — consumers never hardcode
+    #: what "elite" or "champion" means.
+    variant_defs = {v["name"]: v for v in manifest.get("variants", [])}
 
     class Enemy:
         def __init__(self, placement: dict) -> None:
@@ -107,38 +129,45 @@ def main() -> None:
             self.y = float(placement["y"])
             self.home = float(placement["x"])
             self.direction = 1.0
-            self.elite = bool(placement.get("elite", False))
+            self.variant = variant_defs.get(str(placement.get("variant", "")))
+            speed_mult = self.variant.get("speed_mult", 1.0) if self.variant else 1.0
+            self.speed = float(self.spec["stats"].get("speed", 0)) * speed_mult
+            self.size = float(self.variant.get("size", 1.0)) if self.variant else 1.0
+            visual = self.variant.get("visual", "outline") if self.variant else ""
+            self.outlined = "outline" in visual
             self.color = hex_rgb(self.spec["stats"].get("placeholder_color", "#ff00ff"))
+            behavior = dict(self.spec["behavior"])
+            if self.variant:
+                behavior.update(self.variant.get("behavior", {}))
+            self.behavior = behavior
 
         def _can_occupy(self, x: float) -> bool:
             """Terrain constraint for the NEXT step (GameRules-aware):
-            swimmers stay in their pool; land enemies keep solid footing
-            and — under swimmers_only/forbidden — never enter water."""
+            swimmers stay in their volume; land enemies keep solid footing
+            and — under swimmers_only/forbidden — never enter a volume."""
             cell = tile_at(x, self.y)
             below = tile_at(x, self.y + 1)
             if self.spec.get("archetype") == "swimmer":
-                return cell in WATER
-            if cell in WATER and water_policy != "amphibious":
+                return cell in VOLUMES
+            if cell in VOLUMES and water_policy != "amphibious":
                 return False
             return below in BLOCKING or below in ONE_WAY  # no cliff-walking
 
         def update(self, dt: float, player_x: float) -> None:
-            behavior = self.spec["behavior"]
-            speed = float(self.spec["stats"].get("speed", 0))
             archetype = self.spec.get("archetype", "sentry")
-            if archetype in ("patroller", "swimmer") and speed > 0:
-                new_x = self.x + self.direction * speed * dt
+            if archetype in ("patroller", "swimmer") and self.speed > 0:
+                new_x = self.x + self.direction * self.speed * dt
                 if (
-                    abs(new_x - self.home) >= behavior.get("patrol_range", 4)
+                    abs(new_x - self.home) >= self.behavior.get("patrol_range", 4)
                     or not self._can_occupy(new_x)
                 ):
                     self.direction *= -1.0
                 else:
                     self.x = new_x
-            elif archetype == "chaser" and speed > 0:
-                if abs(player_x - self.x) <= behavior.get("aggro_range", 6):
-                    new_x = self.x + (1.0 if player_x > self.x else -1.0) * speed * dt
-                    if self._can_occupy(new_x):  # halts at water/cliff edges
+            elif archetype == "chaser" and self.speed > 0:
+                if abs(player_x - self.x) <= self.behavior.get("aggro_range", 6):
+                    new_x = self.x + (1.0 if player_x > self.x else -1.0) * self.speed * dt
+                    if self._can_occupy(new_x):  # halts at volume/cliff edges
                         self.x = new_x
             # sentry: stationary by definition
 
@@ -154,6 +183,7 @@ def main() -> None:
     vy = 0.0
     on_ground = False
     won = False
+    damage_soaked = 0.0
     live_enemies = [Enemy(p) for p in placements]
 
     def tile_at(cx: float, cy: float) -> int:
@@ -163,8 +193,17 @@ def main() -> None:
         return int(grid[iy, ix])
 
     def blocked_at(x: float, y: float) -> bool:
-        # Both body corners; PLATFORM is one-way and never blocks sideways.
-        return tile_at(x + BODY_L, y) in BLOCKING or tile_at(x + BODY_R, y) in BLOCKING
+        # Both body corners AND both body rows — mid-jump the body spans
+        # two rows, and sampling only the head row let players clip
+        # sideways through the first column of a wall or platform tier
+        # (found in the first real-content play test).
+        for cy in (y, y + 0.99):
+            if (
+                tile_at(x + BODY_L, cy) in BLOCKING
+                or tile_at(x + BODY_R, cy) in BLOCKING
+            ):
+                return True
+        return False
 
     def landing_at(x: float, y: float, prev_bottom: float) -> bool:
         for cx in (x + BODY_L, x + BODY_R):
@@ -175,18 +214,20 @@ def main() -> None:
                 return True
         return False
 
-    def in_water(x: float, y: float) -> bool:
-        return tile_at(x + BODY_L, y) in WATER or tile_at(x + BODY_R, y) in WATER
+    def volume_params_at(x: float, y: float) -> dict | None:
+        for cx in (x + BODY_L, x + BODY_R):
+            params = VOLUMES.get(tile_at(cx, y))
+            if params is not None:
+                return params
+        return None
 
     def respawn() -> None:
-        nonlocal px, py, vy
-        px, py, vy = float(spawn["x"]), float(spawn["y"]), 0.0
+        nonlocal px, py, vy, damage_soaked
+        px, py = float(respawn_point["x"]), float(respawn_point["y"])
+        vy, damage_soaked = 0.0, 0.0
 
     run_speed = float(movement["run_speed"])
     gravity = float(movement["gravity"])
-    water_factor = float(movement.get("water_speed_factor", 0.55))
-    water_gravity = float(movement.get("water_gravity", 8.0))
-    swim_impulse = float(movement.get("swim_impulse", 5.0))
     # Jump velocity for jump_height cells PLUS a headroom margin: discrete
     # frame integration undershoots the analytic apex, which made exactly-
     # jump_height platforms unlandable (feet never cleared the top).
@@ -195,7 +236,7 @@ def main() -> None:
     running = True
     while running:
         dt = clock.tick(FPS) / 1000.0
-        swimming = in_water(px, py)
+        volume = volume_params_at(px, py)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -210,8 +251,15 @@ def main() -> None:
                         pygame.key.get_pressed()[pygame.K_DOWN]
                         or pygame.key.get_pressed()[pygame.K_s]
                     )
-                    if swimming:
-                        vy = -swim_impulse  # swim stroke, works anywhere in water
+                    if volume is not None:
+                        # Submerged: small swim stroke. At the surface
+                        # (open air above): a full jump — the reachability
+                        # validator models volume exit by the normal jump
+                        # rule, so the harness must actually deliver it.
+                        if volume_params_at(px, py - 1.0) is None:
+                            vy = -jump_v
+                        else:
+                            vy = -float(volume.get("impulse", 5.0))
                     elif on_ground and down_held and drop_through and (
                         tile_at(px + BODY_L, py + 1) in ONE_WAY
                         or tile_at(px + BODY_R, py + 1) in ONE_WAY
@@ -225,14 +273,18 @@ def main() -> None:
         dx = (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
-        speed = run_speed * (water_factor if swimming else 1.0)
+        speed = run_speed * (
+            float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
+        )
         new_x = px + dx * speed * dt
         if not blocked_at(new_x, py):
             px = max(0.0, min(new_x, width - 1.0))
 
-        vy += (water_gravity if swimming else gravity) * dt
-        if swimming:
-            vy = min(vy, 3.0)  # terminal sink speed in water
+        vy += (
+            float(volume.get("gravity", 8.0)) if volume is not None else gravity
+        ) * dt
+        if volume is not None:
+            vy = min(vy, 3.0)  # terminal sink speed in a volume
         prev_bottom = py + 0.99
         new_y = py + vy * dt
         if vy > 0 and landing_at(px, new_y + 0.99, prev_bottom):
@@ -243,6 +295,15 @@ def main() -> None:
         else:
             py, on_ground = new_y, False
 
+        # Damaging volumes (swimmable lava): drain a small damage budget,
+        # then respawn — reset when back on safe ground.
+        if volume is not None:
+            damage_soaked += float(volume.get("damage_per_second", 0.0)) * dt
+            if damage_soaked >= DAMAGE_BUDGET:
+                respawn()
+        else:
+            damage_soaked = 0.0
+
         if py > height + 2:
             respawn()
         if tile_at(px + BODY_L, py) in HAZARD or tile_at(px + BODY_R, py) in HAZARD:
@@ -251,6 +312,15 @@ def main() -> None:
             enemy.update(dt, px)
             if abs(enemy.x - px) < 0.7 and abs(enemy.y - py) < 0.7:
                 respawn()
+        # Crossing a checkpoint moves the respawn point (3b triggers).
+        for checkpoint in checkpoints:
+            if (
+                not checkpoint["active"]
+                and int(px) == checkpoint["x"]
+                and int(py) == checkpoint["y"]
+            ):
+                checkpoint["active"] = True
+                respawn_point = {"x": checkpoint["x"], "y": checkpoint["y"]}
         if int(px) == exit_["x"] and int(py) == exit_["y"]:
             won = True
 
@@ -268,15 +338,34 @@ def main() -> None:
             screen, (64, 255, 112),
             (exit_["x"] * SCALE + 4, exit_["y"] * SCALE + 4, SCALE - 8, SCALE - 8), 3,
         )
-        for enemy in live_enemies:
+        for checkpoint in checkpoints:
             pygame.draw.rect(
-                screen, enemy.color,
-                (enemy.x * SCALE + 2, enemy.y * SCALE + 2, SCALE - 4, SCALE - 4),
+                screen, (255, 210, 74),
+                (
+                    checkpoint["x"] * SCALE + 4, checkpoint["y"] * SCALE + 4,
+                    SCALE - 8, SCALE - 8,
+                ),
+                0 if checkpoint["active"] else 3,
             )
-            if enemy.elite:  # elite variation marker (§6.1 overrides)
+        for enemy in live_enemies:
+            half_extra = (enemy.size - 1.0) * SCALE / 2.0
+            rect = (
+                enemy.x * SCALE + 2 - half_extra,
+                enemy.y * SCALE + 2 - half_extra,
+                (SCALE - 4) * enemy.size,
+                (SCALE - 4) * enemy.size,
+            )
+            pygame.draw.rect(screen, enemy.color, rect)
+            if enemy.outlined:  # variant marker (§6.1 overrides)
                 pygame.draw.rect(
                     screen, (255, 255, 255),
-                    (enemy.x * SCALE, enemy.y * SCALE, SCALE, SCALE), 2,
+                    (
+                        enemy.x * SCALE - half_extra,
+                        enemy.y * SCALE - half_extra,
+                        SCALE * enemy.size,
+                        SCALE * enemy.size,
+                    ),
+                    2,
                 )
         pygame.draw.rect(
             screen, (240, 240, 240),
