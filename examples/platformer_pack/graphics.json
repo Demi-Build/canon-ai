@@ -1,0 +1,9 @@
+{
+  "tile_px": 32,
+  "art_style": "crisp 16-bit pixel art, clean dithering, hard pixel edges",
+  "render_filter": "crisp",
+  "gen_px": 512,
+  "posterize_levels": 16,
+  "view_cells": 20,
+  "actor_scale": 1.4
+}

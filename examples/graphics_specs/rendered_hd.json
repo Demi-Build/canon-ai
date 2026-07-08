@@ -1,0 +1,9 @@
+{
+  "tile_px": 128,
+  "art_style": "modern pre-rendered 3D side-scroller, soft global illumination, glossy toy-like materials, painterly depth",
+  "render_filter": "smooth",
+  "gen_px": 1024,
+  "posterize_levels": null,
+  "view_cells": 22,
+  "actor_scale": 1.3
+}

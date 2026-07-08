@@ -76,6 +76,12 @@ class SkeletonField(BaseModel):
     lookup: dict[Any, Any] | None = None
     depends_on: str | None = None
     depends_on_context: str | None = None
+    #: Opt-in: a lookup VALUE that is a two-int ``[lo, hi]`` list rolls
+    #: ``rng.randint(lo, hi)`` instead of being returned verbatim — banded
+    #: ranges keyed off difficulty/position as pure data (design-variety).
+    #: Explicit so packs whose lookup values are legitimately pairs keep
+    #: them untouched.
+    lookup_ranges: bool = False
 
     model_config = ConfigDict(extra="forbid")
 
@@ -123,6 +129,11 @@ class SkeletonField(BaseModel):
             raise ValueError(
                 f"SkeletonField sets {key_sources!r} but no `lookup` table; "
                 "key sources are only meaningful for lookup fields."
+            )
+        if self.lookup_ranges and self.lookup is None:
+            raise ValueError(
+                "SkeletonField sets `lookup_ranges` but no `lookup` table; "
+                "it only affects lookup values."
             )
 
         if self.choices is not None and len(self.choices) == 0:
@@ -263,7 +274,15 @@ def roll_skeleton(
                 assert field.depends_on is not None  # noqa: S101 — invariant
                 key = rolled[field.depends_on]
             try:
-                rolled[name] = field.lookup[key]
+                value = field.lookup[key]
+                if (
+                    field.lookup_ranges
+                    and isinstance(value, (list, tuple))
+                    and len(value) == 2
+                    and all(isinstance(v, int) for v in value)
+                ):
+                    value = rng.randint(value[0], value[1])
+                rolled[name] = value
             except KeyError as exc:
                 source = (
                     f"context {field.depends_on_context!r}"

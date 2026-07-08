@@ -45,6 +45,7 @@ from typing import Any
 
 from canon.pipeline.orchestrator import Node, OrchestratorReport, orchestrate
 from examples.platformer_pack.godot_export import GodotExportPhase
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.layers import (
     assign_level_terrain,
     paint_level_background,
@@ -107,6 +108,7 @@ class LevelStepsDagPhase:
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
         max_enemies_per_level: int = 4,
         max_decor: int = 6,
     ) -> None:
@@ -116,6 +118,7 @@ class LevelStepsDagPhase:
         self.rules = rules
         self.tiles = tiles
         self.variants = variants
+        self.graphics = graphics
         self.max_enemies = max_enemies_per_level
         self.max_decor = max_decor
 
@@ -137,7 +140,8 @@ class LevelStepsDagPhase:
                 level = stamp_level_collision(
                     c, level_id, index,
                     movement=self.movement, rules=self.rules,
-                    tiles=self.tiles, default_width=self.width,
+                    tiles=self.tiles, graphics=self.graphics,
+                    default_width=self.width,
                     default_height=self.height, phase_name="plat:layout",
                 )
                 del level  # registered in the Bible by the body
@@ -278,14 +282,17 @@ class ManifestDagPhase:
 
     def __init__(
         self,
+        movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     ) -> None:
         from examples.platformer_pack.compose import SliceManifestPhase
 
         self._phase = SliceManifestPhase(
-            rules=rules, tiles=tiles, variants=variants
+            movement=movement, rules=rules, tiles=tiles, variants=variants,
+            graphics=graphics,
         )
 
     def expand(self, ctx: Any) -> list[Node]:
@@ -327,7 +334,8 @@ class GodotExportDagPhase:
 
 
 def macro_phases(num_levels: int = 3, num_enemies: int = 4, *,
-                 tiles: TileRegistry = DEFAULT_TILES) -> list:
+                 tiles: TileRegistry = DEFAULT_TILES,
+                 graphics: GraphicsSpec = DEFAULT_GRAPHICS) -> list:
     """The bootstrap prefix: world/stage/style/enemies/tileset as legacy
     nodes (style first — enemy hues avoid the palette's hazard/volume
     hues)."""
@@ -338,7 +346,7 @@ def macro_phases(num_levels: int = 3, num_enemies: int = 4, *,
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         StyleGuidePhase(tiles=tiles),
         EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
-        PlaceholderTilesetPhase(tiles=tiles),
+        PlaceholderTilesetPhase(tiles=tiles, graphics=graphics),
     ]
 
 
@@ -352,17 +360,38 @@ def compose_dag_pipeline(
     tiles: TileRegistry = DEFAULT_TILES,
     variants: VariantSet = DEFAULT_VARIANTS,
     engine: str = "json",
+    image_producer: Any = None,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    music_producer: Any = None,
+    sfx_producer: Any = None,
 ) -> list:
     """The full orchestrated pipeline. Per-level nodes expand only when
     the Bible already has a stage plan (see module docstring)."""
+    from examples.platformer_pack.art_phases import (
+        BackdropArtPhase,
+        SpriteArtPhase,
+        TilesetArtPhase,
+    )
+    from examples.platformer_pack.audio_phases import AudioPhase
+
     items = [
-        *macro_phases(num_levels, num_enemies, tiles=tiles),
+        *macro_phases(num_levels, num_enemies, tiles=tiles, graphics=graphics),
         LevelStepsDagPhase(
             width=width, height=height, movement=movement, rules=rules,
-            tiles=tiles, variants=variants,
+            tiles=tiles, variants=variants, graphics=graphics,
         ),
+        # Art AT THE END: legacy barrier edges make these depend on every
+        # level node above and gate the renders below — paid generation
+        # never runs before the levels validate.
+        TilesetArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        SpriteArtPhase(producer=image_producer, graphics=graphics),
+        BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderDagPhase(variants=variants),
-        ManifestDagPhase(rules=rules, tiles=tiles, variants=variants),
+        ManifestDagPhase(
+            movement=movement, rules=rules, tiles=tiles, variants=variants,
+            graphics=graphics,
+        ),
     ]
     if engine == "godot":
         items.append(GodotExportDagPhase())
@@ -385,7 +414,7 @@ def run_orchestrated(
     if not getattr(ctx.bible, "stages", {}):
         bootstrap_kwargs = {
             k: compose_kwargs[k]
-            for k in ("num_levels", "num_enemies", "tiles")
+            for k in ("num_levels", "num_enemies", "tiles", "graphics")
             if k in compose_kwargs
         }
         report = orchestrate(
@@ -429,7 +458,31 @@ def cli_ctx_factory(bible: Any):
 
 
 def cli_phases_factory(ctx: Any) -> list:
-    return compose_dag_pipeline()
+    from examples.platformer_pack.audio_phases import (
+        build_music_producer,
+        build_sfx_producer,
+    )
+    from examples.platformer_pack.graphics import load_graphics
+    from examples.platformer_pack.tileset_art import build_image_producer
+
+    # CANON_PLAT_IMAGE_BACKEND: "", "fake", "fal", or "local" — same
+    # explicit opt-in as the runner's --image-backend; empty stays on the
+    # deterministic placeholder sheet. CANON_PLAT_MUSIC_BACKEND /
+    # CANON_PLAT_SFX_BACKEND mirror --music-backend/--sfx-backend (empty =
+    # silent). CANON_PLAT_GRAPHICS: path to a graphics.json (the runner's
+    # --graphics; default = pack spec).
+    producer = build_image_producer(
+        os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
+        os.environ.get("CANON_PLAT_IMAGE_MODEL") or None,
+    )
+    music = build_music_producer(os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""))
+    sfx = build_sfx_producer(os.environ.get("CANON_PLAT_SFX_BACKEND", ""))
+    graphics_path = os.environ.get("CANON_PLAT_GRAPHICS")
+    graphics = load_graphics(graphics_path) if graphics_path else DEFAULT_GRAPHICS
+    return compose_dag_pipeline(
+        image_producer=producer, graphics=graphics,
+        music_producer=music, sfx_producer=sfx,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -180,6 +180,53 @@ def enforce_contrast(
     return out, adjusted
 
 
+#: Minimum luminance distance BETWEEN structural roles (ground/platform/
+#: wall). The first real palette put all three within ~15 of each other —
+#: readable against the background, indistinguishable from one another.
+MIN_ROLE_SEPARATION = 22.0
+
+
+def separate_structural_roles(
+    palette: dict[str, str], tiles: TileRegistry
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Repair TOOL: push STRUCTURAL roles (solid + one_way tile roles)
+    apart to ``MIN_ROLE_SEPARATION`` luminance, hue kept — walkable
+    surfaces must be tellable apart at a glance, and pairwise spacing is
+    arithmetic, not a design choice. Shifts away from the background's
+    side where possible so the readability bar survives; run
+    :func:`enforce_contrast` after to re-assert it. Returns
+    ``(palette, {role: old_hex})``."""
+    bg_role = background_role(tiles)
+    structural = [
+        spec["role"]
+        for spec in role_specs(tiles)
+        if spec["role"] != bg_role
+        and any(c in ("solid", "one_way") for c in spec["categories"])
+    ]
+    if len(structural) < 2:
+        return palette, {}
+    out = dict(palette)
+    adjusted: dict[str, str] = {}
+    bg_lum = _luminance(out[bg_role])
+    # Walk roles from nearest-to-background outward, pushing each at
+    # least MIN_ROLE_SEPARATION past the previous one, away from the bg.
+    ordered = sorted(structural, key=lambda r: abs(_luminance(out[r]) - bg_lum))
+    direction = 1.0 if _luminance(out[ordered[0]]) >= bg_lum else -1.0
+    previous = _luminance(out[ordered[0]])
+    for role in ordered[1:]:
+        lum = _luminance(out[role])
+        if abs(lum - previous) >= MIN_ROLE_SEPARATION:
+            previous = lum
+            continue
+        target = previous + direction * MIN_ROLE_SEPARATION
+        if not 0.0 <= target <= 255.0:  # no room on that side: flip
+            target = previous - direction * MIN_ROLE_SEPARATION
+        adjusted[role] = out[role]
+        out[role] = _shift_luminance(out[role], min(255.0, max(0.0, target)))
+        previous = _luminance(out[role])
+    return out, adjusted
+
+
 def fallback_palette(tiles: TileRegistry) -> dict[str, str]:
     """The hardcoded placeholder palette, as hex, for this registry's
     roles — the loud fallback when the LLM never validates."""
@@ -241,6 +288,17 @@ class StyleGuidePhase:
                 ctx,
                 "style: LLM palette never validated; tiles use the "
                 "PLACEHOLDER palette, not generated style.",
+            )
+        palette, separated = separate_structural_roles(palette, self.tiles)
+        if separated:
+            logger.info(
+                "StyleGuidePhase separation tool spread %d structural "
+                "role(s): %s (hue kept, spacing computed).",
+                len(separated),
+                ", ".join(
+                    f"{role} {old}->{palette[role]}"
+                    for role, old in separated.items()
+                ),
             )
         palette, adjusted = enforce_contrast(palette, self.tiles)
         if adjusted:

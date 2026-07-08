@@ -222,28 +222,57 @@ def _suggest_bridge(
     frontier: tuple[int, int],
     nearest: tuple[int, int],
     movement: PlayerMovementSpec,
-) -> str:
+) -> str | None:
     """A concrete platform op that bridges from the frontier toward the
     unreachable foothold — the arithmetic is ours, never the model's
-    (code-for-computation: LLMs choose designs, tools compute)."""
-    width = grid.shape[1]
+    (code-for-computation: LLMs choose designs, tools compute).
+
+    Candidates are verified against the GRID: the platform's two cells
+    AND the standing cells above them must be open air, and standing on
+    it must be arc-jumpable from the frontier. The first real run's
+    fallback levels traced to the old blind formula: with a foothold
+    directly above the frontier (dx=0, rise 4) it proposed a platform
+    whose standing cell was the foothold's own supporting solid — a
+    structurally dead op that auto_bridge re-emitted until its bound.
+    Returns None when no valid bridge exists (a design problem)."""
+    height, width = grid.shape
     fx, fy = frontier
     nx, ny = nearest
-    dx = abs(nx - fx)
-    rise = fy - ny
-    if rise > movement.jump_height:
-        # Vertical break: a step at max jump rise, at/toward the frontier.
-        row = fy - movement.jump_height + 1  # stand atop = fy - jump_height
-        col = fx if dx <= 1 else fx + (1 if nx > fx else -2)
-    else:
-        # Horizontal break: a step midway across the gap.
-        row = fy - 1
-        col = (fx + nx) // 2
-        if abs(col - fx) >= movement.jump_width:
-            col = fx + (movement.jump_width - 1) * (1 if nx > fx else -1)
-    row = max(1, row)
-    col = max(0, min(col, width - 2))
-    return f"platform({col},{row},2)"
+
+    def _free(x: int, y: int) -> bool:
+        return 0 <= x < width and 0 <= y < height and int(grid[y, x]) == 0
+
+    def _ok(col: int, row: int) -> bool:
+        if not (1 <= row <= height - 3) or not (0 <= col <= width - 2):
+            return False
+        # Platform cells and the cells stood in above them: open air.
+        if not all(_free(col + i, row) and _free(col + i, row - 1) for i in range(2)):
+            return False
+        stand_rise = fy - (row - 1)
+        if stand_rise > movement.jump_height:
+            return False
+        # Reachable from the frontier under the arc rule (falling is free).
+        reach = max(1, max_dx_for_rise(movement, max(stand_rise, 0)))
+        return min(abs(col - fx), abs(col + 1 - fx)) <= reach
+
+    # Rows whose STANDING level lands closest to the foothold's row first
+    # (flat gaps get flat steps, tiers get risers), columns spiralling
+    # out from between frontier and target.
+    mid = (fx + nx) // 2
+    cols = sorted(
+        range(max(0, min(fx, nx) - 2), min(width - 2, max(fx, nx) + 2) + 1),
+        key=lambda c: (abs(c - mid), abs(c - fx)),
+    )
+    top = max(1, fy - movement.jump_height + 1)
+    rows = sorted(
+        range(top, min(height - 3, fy - 1) + 1),
+        key=lambda r: abs((r - 1) - ny),
+    )
+    for row in rows:
+        for col in cols:
+            if _ok(col, row):
+                return f"platform({col},{row},2)"
+    return None
 
 
 def _describe_reachability_break(
@@ -288,16 +317,107 @@ def _describe_reachability_break(
             )
         )
     detail = " and ".join(constraints) or "no standable path connects them"
-    bridge = _suggest_bridge(grid, frontier, nearest, movement)
-    return (
+    base = (
         f"{label} at {target} is not reachable from spawn {spawn}. The player "
         f"gets as far as {frontier} but cannot reach the next foothold at "
-        f"{nearest}: {detail}. Fix: ADD THIS ONE LINE to your layout, "
+        f"{nearest}: {detail}."
+    )
+    bridge = _suggest_bridge(grid, frontier, nearest, movement)
+    if bridge is None:
+        # No platform placement can bridge this — a DESIGN problem: the
+        # surrounding geometry must change, not just gain a step.
+        return (
+            f"{base} No stepping platform fits here — open up the "
+            f"terrain between {frontier} and {nearest} (widen the "
+            f"passage or lower the ledge) so a path can exist."
+        )
+    return (
+        f"{base} Fix: ADD THIS ONE LINE to your layout, "
         f"changing nothing else: {bridge} — it is jumpable from "
         f"{frontier} and bridges toward {nearest}. "
         f"Remember: a flat gap wider than {movement.jump_width - 1} columns "
         "is impossible to cross without a stepping platform."
     )
+
+
+#: How far a checkpoint may be snapped to the nearest valid column — a
+#: checkpoint's exact column within a few tiles carries no design intent.
+MAX_CHECKPOINT_SNAP = 8
+
+
+def snap_checkpoints(
+    text: str,
+    width: int,
+    height: int,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> tuple[str, list[str]]:
+    """Repair TOOL for misplaced checkpoints: rewrite ``checkpoint(x)``
+    ops whose column has no floor beneath it (or whose standing cell is
+    occupied, e.g. by a spike) to the nearest valid column within
+    ``MAX_CHECKPOINT_SNAP``.
+
+    Code-for-computation: the second real run's l3 burned all three
+    attempts on checkpoint placement while the validator recited the
+    exact list of valid columns — a lookup code can do. WHERE roughly a
+    checkpoint goes is the agent's design; WHICH exact column has floor
+    under it is arithmetic. Ops with no valid column nearby are left
+    untouched so the informative stamp error reaches the agent.
+
+    Returns ``(text, moves)`` — ``moves`` describes each snap for the log.
+    """
+    import re
+
+    from examples.platformer_pack.dsl import DslError, parse_dsl, stamp
+
+    ops = parse_dsl(text)  # may raise DslError — caller's feedback path
+    checkpoint_xs = [args[0] for name, args in ops if name == "checkpoint"]
+    if not checkpoint_xs:
+        return text, []
+    without = "\n".join(
+        line
+        for line in text.splitlines()
+        if not re.match(r"\s*checkpoint\(", line)
+    )
+    try:
+        result = stamp(without, width, height, tiles=tiles)
+    except DslError:
+        return text, []  # deeper problems; let the real stamp explain
+    grid = result.grid
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = next(t.id for t in tiles.tiles if t.name == "floor")
+
+    def _valid(col: int, taken: set[int]) -> bool:
+        return (
+            0 <= col < width
+            and col not in taken
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    moves: list[str] = []
+    taken: set[int] = set()
+    for x in checkpoint_xs:
+        if _valid(x, taken):
+            taken.add(x)
+            continue
+        snapped = next(
+            (
+                c
+                for d in range(1, MAX_CHECKPOINT_SNAP + 1)
+                for c in (x - d, x + d)
+                if _valid(c, taken)
+            ),
+            None,
+        )
+        if snapped is None:
+            taken.add(x)  # unfixable here — stamp's error is the feedback
+            continue
+        taken.add(snapped)
+        text = re.sub(
+            rf"checkpoint\(\s*{x}\s*\)", f"checkpoint({snapped})", text, count=1
+        )
+        moves.append(f"checkpoint({x}) -> checkpoint({snapped})")
+    return text, moves
 
 
 #: Bound on deterministic bridge insertions per level — far above any
@@ -352,6 +472,11 @@ def auto_bridge(
         if nearest is None:  # pragma: no cover — guarded by check_level
             return text, added, problems
         op = _suggest_bridge(result.grid, frontier, nearest, movement)
+        if op is None or op in added:
+            # No valid bridge exists, or the last one changed nothing —
+            # give the problems to the agent instead of burning the bound
+            # on a dead op (the first real run's l1/l3 failure mode).
+            return text, added, problems
         text = f"{text}\n# auto-bridge\n{op}"
         added.append(op)
 

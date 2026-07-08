@@ -36,12 +36,18 @@ logger = logging.getLogger(__name__)
 
 def _slot_palette(tileset: Tileset, sheet) -> tuple[dict[int, tuple], dict[int, str]]:
     """Per-SLOT color samples + slot→category map. Consumers resolve
-    appearance AND semantics through the Tileset artifact, never constants."""
+    appearance AND semantics through the Tileset artifact, never constants.
+    The sample is the tile REGION's average — flat placeholder squares
+    resolve unchanged, generated textures resolve to their palette-
+    conformed mean instead of one arbitrary pixel."""
+    from PIL import Image
+
     colors: dict[int, tuple] = {}
     categories: dict[int, str] = {}
     for slot in tileset.slots:
-        x, y, _w, _h = slot.px_region or (0, 0, 1, 1)
-        colors[slot.index] = sheet.getpixel((x + 1, y + 1))
+        x, y, w, h = slot.px_region or (0, 0, 1, 1)
+        region = sheet.crop((x, y, x + w, y + h))
+        colors[slot.index] = region.resize((1, 1), Image.BILINEAR).getpixel((0, 0))
         categories[slot.index] = slot.collision
     return colors, categories
 
@@ -187,10 +193,120 @@ def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
     return buffer.getvalue()
 
 
+def render_level_skinned(
+    terrain,
+    background,
+    level: Level,
+    enemies: dict[str, EnemyDefinition],
+    tileset: Tileset,
+    sheet,
+    backdrop_bands: list,
+    enemy_sprites: dict[str, Any],
+    player_sprite: Any,
+    variants: VariantSet = DEFAULT_VARIANTS,
+) -> bytes:
+    """The 'what it looks like' render: real tile regions, sprites, and
+    parallax scenery composited flat (camera-less). This is the skinned
+    half of the block-vs-skinned pair the VLM fidelity loop will judge —
+    on the placeholder sheet it degrades to flat squares, so the fake
+    path exercises it byte-identically."""
+    from PIL import Image, ImageDraw
+
+    height, width = terrain.shape
+    px = tileset.slots[0].px_region[2] if tileset.slots else 32
+    slot_colors, slot_categories = _slot_palette(tileset, sheet)
+    bg_base = next(
+        (
+            slot_colors[index][:3]
+            for index, category in slot_categories.items()
+            if category == "empty"
+        ),
+        (24, 24, 32),
+    )
+    img = Image.new("RGB", (width * px, height * px))
+    draw = ImageDraw.Draw(img)
+
+    # Sky gradient by background band rows, then scenery bands over it.
+    for y in range(height):
+        color = _band_shade(bg_base, int(background[y][0] if background.ndim > 1 else 0))
+        draw.rectangle((0, y * px, width * px, (y + 1) * px - 1), fill=color)
+    for band in backdrop_bands:
+        scale = (height * px) / band.height
+        band_w = max(1, round(band.width * scale))
+        scaled = band.convert("RGB").resize((band_w, height * px))
+        for x in range(0, width * px, band_w):
+            img.paste(scaled, (x, 0))
+
+    # Tiles: real px_region art (placeholder = flat squares, same path).
+    regions: dict[int, Any] = {}
+    for slot in tileset.slots:
+        x0, y0, w, h = slot.px_region
+        regions[slot.index] = sheet.crop((x0, y0, x0 + w, y0 + h)).resize((px, px))
+    for y in range(height):
+        for x in range(width):
+            slot = int(terrain[y, x])
+            if slot_categories.get(slot) == "empty":
+                continue
+            tile = regions.get(slot)
+            if tile is not None:
+                img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
+
+    # Actors: sprites when the art track produced them, rects otherwise.
+    for placement in level.entities:
+        enemy_id = placement.ref.split(":", 1)[1]
+        enemy = enemies.get(enemy_id)
+        x, y = placement.pos
+        sprite = enemy_sprites.get(enemy_id)
+        if sprite is not None:
+            img.paste(
+                sprite.resize((px, px)), (x * px, y * px),
+                sprite.resize((px, px)),
+            )
+        else:
+            color = _hex_to_rgb(
+                (enemy.stats.get("placeholder_color") if enemy else None)
+                or "#ff00ff"
+            )
+            draw.rectangle(
+                (x * px + 1, y * px + 1, (x + 1) * px - 2, (y + 1) * px - 2),
+                fill=color,
+            )
+    if level.spawn is not None:
+        sx, sy = level.spawn
+        if player_sprite is not None:
+            img.paste(
+                player_sprite.resize((px, px)), (sx * px, sy * px),
+                player_sprite.resize((px, px)),
+            )
+        else:
+            draw.rectangle(
+                (sx * px + 2, sy * px + 2, (sx + 1) * px - 3, (sy + 1) * px - 3),
+                fill=(240, 240, 240),
+            )
+
+    # Placeholder decor diamonds are OMITTED here — the skinned surface
+    # shows only art that exists (they read as bugs next to real tiles);
+    # the block render above still shows every decor record.
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _load_sprite(ctx: Any, rel: str) -> Any:
+    from PIL import Image
+
+    path = ctx.adapter.resolve_path(rel)
+    if not rel or not path.exists():
+        return None
+    return Image.open(path).convert("RGBA")
+
+
 def render_level_review(
     ctx: Any, level: Level, variants: VariantSet = DEFAULT_VARIANTS
 ) -> None:
-    """One level's review PNG — shared by RenderPhase and the DAG nodes."""
+    """One level's review PNGs (block + skinned) — shared by RenderPhase
+    and the DAG nodes."""
     import numpy as np
     from PIL import Image
 
@@ -208,6 +324,27 @@ def render_level_review(
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}.png", png
+    )
+
+    backdrop = ctx.bible.backdrops.get(level.stage_id)
+    bands = []
+    if backdrop is not None:
+        for rel in backdrop.band_paths:
+            band = _load_sprite(ctx, rel)
+            if band is not None:
+                bands.append(band)
+    enemy_sprites = {
+        eid: sprite
+        for eid, enemy in ctx.bible.enemy_definitions.items()
+        if (sprite := _load_sprite(ctx, enemy.sprite_path)) is not None
+    }
+    skinned = render_level_skinned(
+        terrain, background, level, ctx.bible.enemy_definitions, tileset,
+        sheet, bands, enemy_sprites,
+        _load_sprite(ctx, "sprite/player/base.png"), variants=variants,
+    )
+    ctx.adapter.write_binary(
+        f"review/{level.stage_id}/{level.level_id}_skinned.png", skinned
     )
 
 

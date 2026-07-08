@@ -251,6 +251,39 @@ class TestEditSemantics:
         assert report.done == ["derived"]
         assert runs == {"base": 1, "derived": 2}
 
+    def test_stale_owned_artifact_reruns_legacy_node(self, tmp_path: Path) -> None:
+        """A legacy phase node is keyed phase:<name>, but the stale
+        cascade marks the ENTITY ids it stamps (e.g. tileset:<stage>).
+        An `owns(ctx)` hook maps those marks back to the node: owned-id
+        STALE forces a re-run, and completion clears the mark to DONE."""
+        runs: dict[str, int] = {}
+
+        class OwningPhase:
+            name = "maker"
+
+            def run(self, ctx) -> None:
+                runs["maker"] = runs.get("maker", 0) + 1
+
+            def owns(self, ctx) -> list[str]:
+                return ["tileset:s1"]
+
+        ctx = _ctx(tmp_path)
+        orchestrate([OwningPhase()], ctx)
+        report = orchestrate([OwningPhase()], ctx)
+        assert report.skipped == ["phase:maker"]  # DONE, nothing stale
+
+        # Simulate mark_stale cascading to the owned entity id.
+        ctx.bible.metadata.node_status["tileset:s1"] = ArtifactStatus.STALE
+        report = orchestrate([OwningPhase()], ctx)
+        assert report.done == ["phase:maker"]
+        assert runs == {"maker": 2}
+        # Cleared on completion — no infinite re-run on the next pass.
+        assert (
+            ctx.bible.metadata.node_status["tileset:s1"] is ArtifactStatus.DONE
+        )
+        report = orchestrate([OwningPhase()], ctx)
+        assert report.skipped == ["phase:maker"]
+
 
 class TestGates:
     def test_gate_pauses_cleanly_when_not_auto(self, tmp_path: Path) -> None:

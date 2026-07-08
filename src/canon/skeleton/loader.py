@@ -47,7 +47,10 @@ from canon.skeleton.core import SkeletonField, SkeletonSpec
 #: Version written by dump_skeleton_spec and accepted by load_skeleton_spec.
 SCHEMA_FORMAT_VERSION = "1"
 
-_FIELD_KEYS = {"choices", "range", "lookup", "depends_on", "depends_on_context"}
+_FIELD_KEYS = {
+    "choices", "range", "lookup", "depends_on", "depends_on_context",
+    "lookup_ranges",
+}
 
 
 class SchemaLoadError(ValueError):
@@ -137,6 +140,10 @@ def _load_field(label: str, name: str, raw: Any) -> SkeletonField:
         kwargs["depends_on"] = raw["depends_on"]
     if "depends_on_context" in raw:
         kwargs["depends_on_context"] = raw["depends_on_context"]
+    if "lookup_ranges" in raw:
+        if not isinstance(raw["lookup_ranges"], bool):
+            raise SchemaLoadError(f"{where}: 'lookup_ranges' must be a bool.")
+        kwargs["lookup_ranges"] = raw["lookup_ranges"]
 
     try:
         return SkeletonField(**kwargs)

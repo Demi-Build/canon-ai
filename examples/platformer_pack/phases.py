@@ -51,15 +51,28 @@ def warn(ctx: Any, message: str) -> None:
     ctx.artifacts.setdefault("slice_warnings", []).append(message)
 
 
-def stamp_provenance(ctx: Any, entity: Any, content_hash: str, schema_version: str = "1") -> None:
+def stamp_provenance(
+    ctx: Any,
+    entity: Any,
+    content_hash: str,
+    schema_version: str = "1",
+    model_extra: str = "",
+) -> None:
     """Fold the adapter's content hash + generation inputs into the entity's
     provenance hash (PRD §6.3). Stamped on the Bible entity only — the
-    artifact file holds data, the Bible holds provenance."""
+    artifact file holds data, the Bible holds provenance.
+
+    ``model_extra`` folds a second generator into the model input (an
+    asset phase's image backend alongside the LLM) so an image-model bump
+    invalidates like an LLM-model bump does."""
+    model = str(getattr(getattr(ctx.llm, "backend", None), "model", "fake"))
+    if model_extra:
+        model = f"{model}+{model_extra}"
     entity.provenance_hash = compute_provenance_hash(
         content_hash,
         schema_version=schema_version,
         prompt_version=PROMPT_VERSION,
-        model=str(getattr(getattr(ctx.llm, "backend", None), "model", "fake")),
+        model=model,
         seed=str(getattr(ctx.config, "seed", "")),
     )
 
@@ -237,7 +250,13 @@ class StagePhase:
         )
         briefs = [str(b) for b in data.get("level_briefs") or []]
         briefs = (briefs + ["A level."] * self.num_levels)[: self.num_levels]
+        # View hints are optional and lenient: unknown/missing → standard
+        # (the game-global framing). Deliberate exceptions only.
+        views = [str(v) for v in data.get("level_views") or []]
+        views = (views + ["standard"] * self.num_levels)[: self.num_levels]
         level_ids = [f"l{i + 1}" for i in range(self.num_levels)]
+
+        from examples.platformer_pack.effects import sanitize_effects
 
         stage = Stage(
             artifact_id=make_artifact_id("stage", stage_id),
@@ -245,6 +264,9 @@ class StagePhase:
             theme=str(data["theme"]),
             level_ids=level_ids,
             tileset_ref=make_artifact_id("tileset", stage_id),
+            effects=sanitize_effects(
+                data.get("effects"), warn=lambda m: warn(ctx, m)
+            ),
             parents=[make_artifact_id("world")],
         )
         content_hash = ctx.adapter.write_json_singleton(
@@ -253,6 +275,7 @@ class StagePhase:
         stamp_provenance(ctx, stage, content_hash)
         ctx.bible.stages[stage_id] = stage
         ctx.artifacts["level_briefs"] = dict(zip(level_ids, briefs))
+        ctx.artifacts["level_views"] = dict(zip(level_ids, views))
         ctx.artifacts["roster_brief"] = str(data["roster_brief"])
         logger.info(
             "StagePhase planned stage %r (theme %r): %d levels; roster: %s",

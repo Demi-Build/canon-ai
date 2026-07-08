@@ -1,31 +1,36 @@
-"""PlaceholderTilesetTool — a deterministic Tool (no LLM, no diffusion)
-that emits a REAL Tileset artifact whose tilesheet happens to be solid
-color squares.
+"""Tileset phase — one Tileset artifact per stage, art-source pluggable.
 
 This is the core of the slice's review story: every consumer (renderer,
 pygame harness, Godot) resolves tile appearance through the Tileset model
-+ tilesheet PNG. When diffusion-generated art arrives, only the tool
-producing the sheet changes — nothing downstream does.
++ tilesheet PNG, so only the sheet producer changes when art quality
+does — nothing downstream.
+
+This phase emits the PLACEHOLDER sheet only — deterministic solid-color
+squares from the style palette (placeholder palette filling gaps): the
+fake-backend look, byte-identical across runs, and what every gameplay
+phase debugs against. Generated art arrives at the END of the run via
+``art_phases.TilesetArtPhase``, which repaints the PNG in place with the
+slot geometry frozen (art-at-the-end: no art money is spent before the
+levels validate).
 
 Since 3b the slots come from the game's tile registry (values in data):
 one slot per registry tile, carrying the tile's name, physics category
-(``collision``) and params, colored by ``color_role`` through the
-placeholder palette below. The Phase 3b-deferred style-guide agent will
-replace this palette with generated ones at the same seam.
+(``collision``) and params, colored by ``color_role``.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import logging
 from typing import Any
 
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import Tileset, TileSlot
+from canon.pipeline.orchestrator import pinned_ids
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, warn
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
-
-TILE_PX = 16
 
 logger = logging.getLogger(__name__)
 
@@ -52,20 +57,58 @@ _UNKNOWN_ROLE_COLOR = (255, 0, 255, 255)
 class PlaceholderTilesetPhase:
     name = "plat:tileset"
 
-    def __init__(self, tiles: TileRegistry = DEFAULT_TILES) -> None:
+    def __init__(
+        self,
+        tiles: TileRegistry = DEFAULT_TILES,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
         self.tiles = tiles
+        self.graphics = graphics
+
+    def owns(self, ctx: Any) -> list[str]:
+        """The Tileset entity ids this node stamps — how a stale mark on
+        ``tileset:<stage>`` (e.g. cascaded from a style regen) reschedules
+        this phase, whose node id is ``phase:plat:tileset``."""
+        return [
+            make_artifact_id("tileset", sid)
+            for sid in getattr(ctx.bible, "stages", {})
+        ]
+
+    def _style_palette(self, ctx: Any, stage_id: str) -> dict[str, str]:
+        """Role → hex from the style-guide agent: in-process when the
+        style phase ran this run, otherwise re-read from its artifact
+        (``style/<stage>/style.json``) so a tileset-only regen still
+        paints the generated palette, not the placeholder."""
+        palette = ctx.artifacts.get("palette")
+        if palette is not None:
+            return palette
+        style_path = ctx.adapter.resolve_path(f"style/{stage_id}/style.json")
+        if style_path.exists():
+            return json.loads(style_path.read_text()).get("palette", {})
+        return {}
 
     def run(self, ctx: Any) -> None:
         from PIL import Image
 
         stage_id = ctx.artifacts["stage_id"]
+        if make_artifact_id("tileset", stage_id) in pinned_ids(ctx.bible):
+            # This phase otherwise overwrites the tilesheet with flat
+            # placeholder squares AND replaces the whole Tileset entity —
+            # for a pinned (paid) tilesheet both must survive untouched.
+            logger.info(
+                "PlaceholderTilesetPhase: tileset:%s is pinned — kept.",
+                stage_id,
+            )
+            _stamp_metadata(ctx, self.name)
+            return
         ordered = sorted(self.tiles.tiles, key=lambda t: t.id)
-        # Style-guide palette (role → hex) when the style phase ran;
-        # PLACEHOLDER_PALETTE fills any role it didn't cover.
-        style: dict[str, str] = ctx.artifacts.get("palette", {})
+        # Style-guide palette (role → hex); PLACEHOLDER_PALETTE fills any
+        # role it didn't cover.
+        style: dict[str, str] = self._style_palette(ctx, stage_id)
         used: dict[str, str] = {}
 
-        sheet = Image.new("RGBA", (TILE_PX * len(ordered), TILE_PX))
+        tile_px = self.graphics.tile_px
+        sheet = Image.new("RGBA", (tile_px * len(ordered), tile_px))
         slots: list[TileSlot] = []
         for i, tile in enumerate(ordered):
             styled = style.get(tile.color_role)
@@ -84,14 +127,15 @@ class PlaceholderTilesetPhase:
                 color = _UNKNOWN_ROLE_COLOR
             if tile.color_role:
                 used[tile.color_role] = "#{:02x}{:02x}{:02x}".format(*color[:3])
-            square = Image.new("RGBA", (TILE_PX, TILE_PX), color)
-            sheet.paste(square, (i * TILE_PX, 0))
+
+            square = Image.new("RGBA", (tile_px, tile_px), color)
+            sheet.paste(square, (i * tile_px, 0))
             slots.append(
                 TileSlot(
                     index=i,
                     tile_type=tile.id,
                     name=tile.name,
-                    px_region=(i * TILE_PX, 0, TILE_PX, TILE_PX),
+                    px_region=(i * tile_px, 0, tile_px, tile_px),
                     collision=tile.category,
                     params=dict(tile.params),
                 )
@@ -109,12 +153,22 @@ class PlaceholderTilesetPhase:
             tilesheet_hash=sheet_hash,
             slots=slots,
             palette=used,
-            parents=[make_artifact_id("stage", stage_id)],
+            render_filter=self.graphics.render_filter,
+            # §6.1 edges: the stage it belongs to, and the style guide
+            # that seeds the art — a style regen cascades here.
+            parents=[make_artifact_id("stage", stage_id), "phase:plat:style"],
         )
         manifest_hash = ctx.adapter.write_json_singleton(
             f"tileset/{stage_id}/manifest.json", tileset.model_dump(mode="json")
         )
-        stamp_provenance(ctx, tileset, manifest_hash)
+        # The graphics spec is a generation input like the model: fold its
+        # digest in so a spec swap invalidates even when (placeholder)
+        # sheet bytes happen to match. TilesetArtPhase re-stamps with the
+        # image model when it repaints at the end of the run.
+        stamp_provenance(
+            ctx, tileset, manifest_hash,
+            model_extra=f"gfx:{self.graphics.digest()}",
+        )
         ctx.bible.tilesets[stage_id] = tileset
         logger.info(
             "PlaceholderTilesetPhase wrote %s (%d slots: %s).",

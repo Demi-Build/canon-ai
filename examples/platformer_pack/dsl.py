@@ -59,6 +59,7 @@ _SIGNATURES: dict[str, str] = {
     "ledge": "iii",
     "wall": "iii",
     "spike": "ii",
+    "carve": "iiii",
     "water": "iii",
     "volume": "niii",
     "pool": "nii",
@@ -370,6 +371,20 @@ def stamp(
             x1, x2, y_surface = args
             tile = _resolve(tiles, name, "water", "volume")
             _stamp_volume(name, tile, x1, x2, y_surface)
+        elif name == "carve":
+            x1, y1, x2, y2 = args
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            _check_x(name, x1, x2)
+            if not 0 <= y1 <= y2 <= standing_row:
+                raise DslError(
+                    f"carve: rows {y1}..{y2} outside 0..{standing_row} — "
+                    "carve clears air/structure above the ground row only; "
+                    "break the ground with gap() or pit() instead."
+                )
+            grid[y1 : y2 + 1, x1 : x2 + 1] = empty_id
         elif name == "hazard_strip":
             tile_name, x1, x2 = args
             tile = _resolve(tiles, name, tile_name, "hazard")
@@ -393,18 +408,52 @@ def stamp(
             )
         elif name in ("spawn", "exit"):
             (x,) = args
-            marker = _standing_marker(name, x)
             if name == "spawn":
+                marker = _standing_marker(name, x)
                 if result.spawn is not None:
                     raise DslError("spawn: declared more than once.")
                 result.spawn = marker
             else:
+                # exit(x)'s x is ADVISORY: the exit relocates to the
+                # rightmost floored column after all ops (below) — levels
+                # exit off the right edge, side-scroller style. The op
+                # stays required so a layout still DECLARES its exit.
                 if result.exit is not None:
                     raise DslError("exit: declared more than once.")
-                result.exit = marker
+                _check_x(name, x)
+                result.exit = (x, standing_row)
 
     if result.spawn is None:
         raise DslError("missing spawn(x) — every level needs exactly one.")
     if result.exit is None:
         raise DslError("missing exit(x) — every level needs exactly one.")
+    # Ops apply in order and a later carve can clear a stamped hazard
+    # strip — records must mirror the FINAL grid, not the op history.
+    hazard_ids = {t.id for t in hazard_tiles}
+    result.hazards = [
+        h for h in result.hazards if int(grid[h.y, h.x]) in hazard_ids
+    ]
+    # Relocate the exit to the rightmost column with ground floor and an
+    # open standing cell — consumers treat that whole COLUMN, bottom to
+    # top, as the exit zone (no exit graphic; you leave to the right).
+    exit_x = next(
+        (
+            x
+            for x in range(width - 1, -1, -1)
+            if grid[ground_row, x] == floor_id and grid[standing_row, x] == 0
+        ),
+        None,
+    )
+    if exit_x is None:
+        ranges = _floor_ranges()
+        raise DslError(
+            "exit: no column has open ground floor to exit onto — "
+            + (
+                f"floor exists at columns {ranges} but every standing "
+                "cell is occupied; clear one near the right edge."
+                if ranges
+                else f"start with floor(0,{width - 1}) and carve."
+            )
+        )
+    result.exit = (exit_x, standing_row)
     return result

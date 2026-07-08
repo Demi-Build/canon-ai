@@ -22,11 +22,12 @@ from typing import Any
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import Level, Placement, SparseMaskEntry
 from canon.llm.parsing import extract_json_object
-from canon.pipeline.retry import retry_with_feedback
+from canon.pipeline.retry import default_token_escalation, retry_with_feedback
 from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
 from examples.platformer_pack.dsl import DslError, StampResult, parse_dsl, stamp
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import (
     SCHEMAS_DIR,
@@ -39,6 +40,7 @@ from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
     auto_bridge,
     check_placements,
+    snap_checkpoints,
     standable_cells,
     volume_cells,
 )
@@ -73,6 +75,7 @@ def stamp_level_collision(
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
     rules: GameRules = DEFAULT_RULES,
     tiles: TileRegistry = DEFAULT_TILES,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     default_width: int = 48,
     default_height: int = 16,
     phase_name: str = "plat:layout",
@@ -96,6 +99,15 @@ def stamp_level_collision(
     # defaults are the fallback for schemas without them.
     width = int(knobs.get("grid_width", default_width))
     height = int(knobs.get("grid_height", default_height))
+    # Per-level camera framing: a deliberate stage-plan exception
+    # ("intimate"/"vista"), resolved to cells here so consumers read a
+    # number, not a vocabulary. Resume path (stage phase skipped, hints
+    # absent) keeps the prior level's framing, like the brief.
+    hint = ctx.artifacts.get("level_views", {}).get(level_id, "")
+    view_cells = graphics.view_for(hint)
+    if not hint:
+        prior = ctx.bible.levels.get(level_id)
+        view_cells = prior.view_cells if prior is not None else None
     last_attempt: dict[str, str | None] = {"content": None}
     accepted: dict[str, Any] = {"dsl": None, "bridges": []}
 
@@ -115,9 +127,13 @@ def stamp_level_collision(
 
     def validate(content: str) -> tuple[bool, list[str]]:
         # Design problems (DSL errors, covered spawn, spilled pools) go
-        # back to the agent; reachability breaks are ARITHMETIC and the
-        # bridge tool repairs them in code (never an LLM round-trip).
+        # back to the agent; reachability breaks and checkpoint columns
+        # are ARITHMETIC — the bridge/snap tools repair them in code
+        # (never an LLM round-trip).
         try:
+            content, snaps = snap_checkpoints(
+                content, width, height, tiles=tiles
+            )
             repaired, bridges, problems = auto_bridge(
                 content, width, height, movement, rules=rules, tiles=tiles
             )
@@ -126,22 +142,54 @@ def stamp_level_collision(
         if problems:
             return False, problems
         accepted["dsl"], accepted["bridges"] = repaired, bridges
+        accepted["snaps"] = snaps
         return True, []
 
     fallback_dsl = _fallback_dsl(width)
+    attempts: list[dict[str, Any]] = []
     raw_text = retry_with_feedback(
         generate_fn=generate,
         validate_fn=validate,
         fallback=fallback_dsl,
         max_retries=getattr(ctx.config, "max_retries", 3),
         label=f"{phase_name}:{level_id}",
+        attempt_log=attempts,
+        # Wide difficulty-3 grids need more ops than the prompt's 512-token
+        # default allows — a truncated program is a guaranteed DslError, and
+        # identical caps across retries made that failure unrecoverable.
+        token_escalation=default_token_escalation,
+        initial_max_tokens=768,
     )
-    if raw_text == fallback_dsl:
+    fell_back = raw_text == fallback_dsl
+    if fell_back:
         warn(
             ctx,
             f"layout {level_id}: LLM output never validated; level is "
-            "the flat FALLBACK layout, not generated content.",
+            "the flat FALLBACK layout, not generated content. Attempt "
+            f"trace: review/{stage_id}/{level_id}_layout_attempts.json",
         )
+    trace_rel = f"review/{stage_id}/{level_id}_layout_attempts.json"
+    if any(a["outcome"] != "passed" for a in attempts):
+        # Post-mortem evidence beside the skinned renders. Content is
+        # attempt-derived only (no timestamps) — the byte-identical
+        # fake-run verification bar covers this file too.
+        ctx.adapter.write_json_singleton(
+            trace_rel,
+            {
+                "level_id": level_id,
+                "stage_id": stage_id,
+                "grid_width": width,
+                "grid_height": height,
+                "difficulty": knobs.get("difficulty"),
+                "fallback": fell_back,
+                "attempts": attempts,
+            },
+        )
+    else:
+        # A clean re-roll invalidates any earlier failure trace — a
+        # leftover "fallback": true would contradict the level it sits
+        # beside.
+        ctx.adapter.resolve_path(trace_rel).unlink(missing_ok=True)
     dsl_text = accepted["dsl"] or raw_text
     bridges: list[str] = accepted["bridges"]
     if bridges:
@@ -149,6 +197,13 @@ def stamp_level_collision(
             "Layout %s: auto-bridged %d reachability break(s) — %s "
             "(agent design kept; geometry is tool work).",
             level_id, len(bridges), ", ".join(bridges),
+        )
+    snaps: list[str] = accepted.get("snaps") or []
+    if snaps:
+        logger.info(
+            "Layout %s: snapped %d checkpoint(s) to valid ground — %s "
+            "(agent design kept; column lookup is tool work).",
+            level_id, len(snaps), ", ".join(snaps),
         )
     result: StampResult = stamp(dsl_text, width, height, tiles=tiles)
 
@@ -163,6 +218,7 @@ def stamp_level_collision(
         stage_id=stage_id,
         grid_width=width,
         grid_height=height,
+        view_cells=view_cells,
         brief=brief,
         spawn=result.spawn,
         exit=result.exit,
@@ -170,6 +226,7 @@ def stamp_level_collision(
         collision_hash=collision_hash,
         hazards=result.hazards,
         triggers=result.triggers,
+        layout_fallback=fell_back,
         parents=[layout_aid, stage.tileset_ref],
         step_parents={
             "collision": [layout_aid],
@@ -430,7 +487,14 @@ def write_level_manifest(ctx: Any, level: Level) -> None:
 
 
 def _level_brief(ctx: Any, level_id: str) -> str:
-    return ctx.artifacts.get("level_briefs", {}).get(level_id, "")
+    brief = ctx.artifacts.get("level_briefs", {}).get(level_id, "")
+    if brief:
+        return brief
+    # Resume path: level_briefs is populated by the stage phase, which a
+    # surgical regen skips — the persisted brief on the prior Level entity
+    # is exactly what Level.brief exists to preserve.
+    prior = ctx.bible.levels.get(level_id)
+    return prior.brief if prior is not None else ""
 
 
 def _volume_summary(grid, tiles: TileRegistry) -> str:
@@ -481,12 +545,14 @@ class LayoutStampPhase:
         movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     ) -> None:
         self.width = width
         self.height = height
         self.movement = movement
         self.rules = rules
         self.tiles = tiles
+        self.graphics = graphics
 
     def run(self, ctx: Any) -> None:
         stage_id = ctx.artifacts["stage_id"]
@@ -495,6 +561,7 @@ class LayoutStampPhase:
             level = stamp_level_collision(
                 ctx, level_id, index,
                 movement=self.movement, rules=self.rules, tiles=self.tiles,
+                graphics=self.graphics,
                 default_width=self.width, default_height=self.height,
                 phase_name=self.name,
             )

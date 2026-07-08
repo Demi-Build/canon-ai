@@ -50,6 +50,7 @@ def retry_with_feedback(
     label: str = "content",
     token_escalation: Callable[[int, int], int] | None = None,
     initial_max_tokens: int = INITIAL_MAX_TOKENS,
+    attempt_log: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Generate-validate-retry loop with optional token escalation.
 
@@ -85,12 +86,29 @@ def retry_with_feedback(
             provides a 1.5x-per-attempt strategy.
         initial_max_tokens: Starting value for ``max_tokens`` escalation.
             Only meaningful when ``token_escalation`` is not ``None``.
+        attempt_log: Optional list the loop appends one record per attempt
+            to: ``{"attempt", "outcome", "reasons", "content"}`` with
+            outcome ``"passed" | "failed_validation" | "generation_error"``.
+            Callers persist it so failure evidence survives the console —
+            log lines scroll away; a fallback with no trace is
+            undiagnosable.
 
     Returns:
         The first validated content, or ``fallback`` after all retries fail.
     """
     feedback: list[str] | None = None
     current_tokens = initial_max_tokens
+
+    def record(attempt: int, outcome: str, reasons: list[str], content: Any) -> None:
+        if attempt_log is not None:
+            attempt_log.append(
+                {
+                    "attempt": attempt,
+                    "outcome": outcome,
+                    "reasons": reasons,
+                    "content": content,
+                }
+            )
 
     for attempt in range(1, max_retries + 1):
         kwargs: dict = {}
@@ -109,6 +127,7 @@ def retry_with_feedback(
                 )
                 raise
             logger.warning("[%s] attempt %d generation error: %s", label, attempt, e)
+            record(attempt, "generation_error", [str(e)], None)
             feedback = [str(e)]
             if token_escalation is not None:
                 current_tokens = token_escalation(attempt, current_tokens)
@@ -117,9 +136,11 @@ def retry_with_feedback(
         passed, reasons = validate_fn(content)
         if passed:
             logger.info("[%s] passed validation on attempt %d.", label, attempt)
+            record(attempt, "passed", [], content)
             return content
 
         logger.warning("[%s] attempt %d failed validation: %s", label, attempt, reasons)
+        record(attempt, "failed_validation", reasons, content)
         feedback = reasons
         if token_escalation is not None:
             current_tokens = token_escalation(attempt, current_tokens)

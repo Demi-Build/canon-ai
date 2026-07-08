@@ -1,5 +1,5 @@
 {
-  "schema_version": "3",
+  "schema_version": "4",
   "entity_type": "level_layout",
   "fields": {
     "difficulty": {
@@ -7,12 +7,14 @@
       "depends_on_context": "level_number"
     },
     "grid_width": {
-      "lookup": [[1, 48], [2, 56], [3, 64]],
-      "depends_on": "difficulty"
+      "lookup": [[1, [40, 52]], [2, [52, 66]], [3, [64, 84]]],
+      "depends_on": "difficulty",
+      "lookup_ranges": true
     },
     "grid_height": {
-      "lookup": [[1, 16], [2, 16], [3, 18]],
-      "depends_on": "difficulty"
+      "lookup": [[1, [14, 16]], [2, [16, 20]], [3, [16, 24]]],
+      "depends_on": "difficulty",
+      "lookup_ranges": true
     },
     "platform_count": {
       "lookup": [[1, 2], [2, 3], [3, 4]],

@@ -51,14 +51,19 @@ def _load(data_dir: Path, level_id: str):
 
 def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
     """Resolve tile colors by sampling the tilesheet via the Tileset slots —
-    same resolution path the renderer and Godot use."""
+    same resolution path the renderer and Godot use. Each sample is the
+    tile REGION's average, so generated textures resolve to their
+    palette-conformed mean, not one arbitrary pixel."""
     from PIL import Image
 
     sheet = Image.open(data_dir / tileset["tilesheet_path"]).convert("RGB")
     colors = {}
     for slot in tileset["slots"]:
-        x, y, _w, _h = slot["px_region"]
-        colors[int(slot["tile_type"])] = sheet.getpixel((x + 1, y + 1))
+        x, y, w, h = slot["px_region"]
+        region = sheet.crop((x, y, x + w, y + h))
+        colors[int(slot["tile_type"])] = region.resize(
+            (1, 1), Image.BILINEAR
+        ).getpixel((0, 0))
     return colors
 
 
@@ -179,6 +184,85 @@ def main() -> None:
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 28)
 
+    # Generated audio (manifest["audio"], late audio phase). Best-effort:
+    # music loops, SFX keyed by event; ANY failure (no device, no files,
+    # pre-audio manifest) leaves the game silent — this harness is the
+    # quick pre-art surface, and music confirmation is one of its jobs.
+    sounds: dict = {}
+    try:
+        audio = manifest.get("audio") or {}
+        pygame.mixer.init()
+        if audio.get("music"):
+            pygame.mixer.music.load(str(data_dir / audio["music"]))
+            pygame.mixer.music.play(-1)
+        for sfx_event, rel in (audio.get("sfx") or {}).items():
+            sounds[sfx_event] = pygame.mixer.Sound(str(data_dir / rel))
+    except Exception as exc:  # noqa: BLE001 — silence is the fallback
+        print(f"[audio] disabled: {exc}")
+
+    def play_sfx(event_name: str) -> None:
+        sound = sounds.get(event_name)
+        if sound is not None:
+            sound.play()
+
+    # --- art track (all optional; the harness stays flat-color for tiles,
+    # Godot is the art surface of record) ---
+    def _sprite(rel: str, size: tuple) -> pygame.Surface | None:
+        path = data_dir / rel
+        if not rel or not path.exists():
+            return None
+        return pygame.transform.smoothscale(
+            pygame.image.load(str(path)).convert_alpha(), size
+        )
+
+    stage_id = manifest["stage_id"]
+    player_sprite = _sprite("sprite/player/base.png", (SCALE - 8, SCALE - 8))
+    enemy_sprites = {
+        eid: _sprite(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4))
+        for eid, spec in enemies.items()
+    }
+    backdrop_bands = []
+    backdrop_manifest = data_dir / "backdrop" / stage_id / "manifest.json"
+    if backdrop_manifest.exists():
+        for rel in json.loads(backdrop_manifest.read_text()).get("band_paths", []):
+            band = data_dir / rel
+            if band.exists():
+                raw = pygame.image.load(str(band)).convert()
+                scale_f = (height * SCALE) / raw.get_height()
+                backdrop_bands.append(
+                    pygame.transform.smoothscale(
+                        raw,
+                        (int(raw.get_width() * scale_f), height * SCALE),
+                    )
+                )
+    # Stage effects (values in stage.json; particles_falling is the v1
+    # code interpreter — simple deterministic dots in the harness).
+    import random as _random
+
+    stage_json = data_dir / "stage" / stage_id / "stage.json"
+    effect_dots: list = []
+    if stage_json.exists():
+        rng = _random.Random(0)
+        for record in json.loads(stage_json.read_text()).get("effects", []):
+            if record.get("name") != "particles_falling":
+                continue
+            params = record.get("params", {})
+            effect_dots.append(
+                {
+                    "color": hex_rgb(str(params.get("color", "#e8e8f0"))),
+                    "speed": float(params.get("speed", 80)),
+                    "drift": float(params.get("drift", 0)),
+                    "size": max(1, int(params.get("size", 2))),
+                    "dots": [
+                        [
+                            rng.uniform(0, width * SCALE),
+                            rng.uniform(0, height * SCALE),
+                        ]
+                        for _ in range(int(params.get("density", 40)))
+                    ],
+                }
+            )
+
     px, py = float(spawn["x"]), float(spawn["y"])  # cell coords
     vy = 0.0
     on_ground = False
@@ -225,6 +309,7 @@ def main() -> None:
         nonlocal px, py, vy, damage_soaked
         px, py = float(respawn_point["x"]), float(respawn_point["y"])
         vy, damage_soaked = 0.0, 0.0
+        play_sfx("death")
 
     run_speed = float(movement["run_speed"])
     gravity = float(movement["gravity"])
@@ -268,6 +353,7 @@ def main() -> None:
                         vy, on_ground = 0.5, False
                     elif on_ground:
                         vy = -jump_v
+                        play_sfx("jump")
 
         keys = pygame.key.get_pressed()
         dx = (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (
@@ -321,10 +407,16 @@ def main() -> None:
             ):
                 checkpoint["active"] = True
                 respawn_point = {"x": checkpoint["x"], "y": checkpoint["y"]}
-        if int(px) == exit_["x"] and int(py) == exit_["y"]:
+                play_sfx("checkpoint")
+        # Exit zone: the exit's whole COLUMN, any height (leave right).
+        if not won and int(px) == exit_["x"]:
             won = True
+            play_sfx("win")
 
         screen.fill(tile_colors.get(0, (24, 24, 32)))
+        for band in backdrop_bands:  # static scenery, far → near
+            for bx in range(0, width * SCALE, band.get_width()):
+                screen.blit(band, (bx, 0))
         for y in range(height):
             for x in range(width):
                 t = int(grid[y, x])
@@ -334,10 +426,7 @@ def main() -> None:
                         tile_colors.get(t, (255, 0, 255)),
                         (x * SCALE, y * SCALE, SCALE, SCALE),
                     )
-        pygame.draw.rect(
-            screen, (64, 255, 112),
-            (exit_["x"] * SCALE + 4, exit_["y"] * SCALE + 4, SCALE - 8, SCALE - 8), 3,
-        )
+        # No exit graphic — the exit zone is the rightmost floored column.
         for checkpoint in checkpoints:
             pygame.draw.rect(
                 screen, (255, 210, 74),
@@ -355,7 +444,19 @@ def main() -> None:
                 (SCALE - 4) * enemy.size,
                 (SCALE - 4) * enemy.size,
             )
-            pygame.draw.rect(screen, enemy.color, rect)
+            sprite = enemy_sprites.get(enemy.spec.get("enemy_id", ""))
+            if sprite is not None:
+                image = sprite
+                if enemy.size != 1.0:
+                    image = pygame.transform.smoothscale(
+                        sprite,
+                        (int(rect[2]), int(rect[3])),
+                    )
+                if enemy.direction < 0:
+                    image = pygame.transform.flip(image, True, False)
+                screen.blit(image, (rect[0], rect[1]))
+            else:
+                pygame.draw.rect(screen, enemy.color, rect)
             if enemy.outlined:  # variant marker (§6.1 overrides)
                 pygame.draw.rect(
                     screen, (255, 255, 255),
@@ -367,10 +468,13 @@ def main() -> None:
                     ),
                     2,
                 )
-        pygame.draw.rect(
-            screen, (240, 240, 240),
-            (px * SCALE + 4, py * SCALE + 4, SCALE - 8, SCALE - 8),
-        )
+        if player_sprite is not None:
+            screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))
+        else:
+            pygame.draw.rect(
+                screen, (240, 240, 240),
+                (px * SCALE + 4, py * SCALE + 4, SCALE - 8, SCALE - 8),
+            )
         # Foreground decor — drawn AFTER the player: in front, per §6.2.
         for decor in level.get("foreground", []):
             cx = decor["x"] * SCALE + SCALE // 2
@@ -379,6 +483,19 @@ def main() -> None:
                 screen, (185, 195, 205),
                 [(cx, cy - 10), (cx + 8, cy), (cx, cy + 10), (cx - 8, cy)],
             )
+        # Ambient stage effects on top of everything (screen-space).
+        for effect in effect_dots:
+            for dot in effect["dots"]:
+                dot[0] = (dot[0] + effect["drift"] * dt * SCALE / 32.0) % (
+                    width * SCALE
+                )
+                dot[1] = (dot[1] + effect["speed"] * dt * SCALE / 32.0) % (
+                    height * SCALE
+                )
+                pygame.draw.circle(
+                    screen, effect["color"],
+                    (int(dot[0]), int(dot[1])), effect["size"],
+                )
         if won:
             screen.blit(
                 font.render("LEVEL COMPLETE — R to reset", True, (64, 255, 112)),

@@ -21,6 +21,10 @@ extends Node2D
 const CELL := 32.0
 const BODY_L := 0.15
 const BODY_R := 0.85
+# Camera framing + actor overdraw come from the manifest's GraphicsSpec
+# (per-game data). Defaults match the spec model's defaults.
+var view_w_cells := 20.0
+var actor_scale := 1.4
 # Damage a player can soak in a damaging volume (lava) before respawning —
 # crude stand-in for HP, mirrored in the pygame harness.
 const DAMAGE_BUDGET := 3.0
@@ -42,6 +46,12 @@ var enemy_defs := {}
 var enemies: Array = []
 var checkpoints: Array = []
 
+# Generated audio (late audio phase, manifest["audio"]): a looping music
+# player + one player per SFX event. Missing/failed audio = silence —
+# the game never depends on it.
+var music_player: AudioStreamPlayer = null
+var sfx_players := {}
+
 # Physics semantics from tileset slot metadata: category sets keyed by
 # tile-type int; volumes map tile-type -> params Dictionary.
 var blocking := {}
@@ -51,6 +61,9 @@ var volumes := {}
 var slot_atlas := {}
 var slot_category := {}
 var bg_color := Color8(24, 24, 32)  # empty-slot sample = style palette
+# GraphicsSpec category from the tileset manifest: "crisp" pixel art
+# stays chunky when scaled to CELL; "smooth" HD art samples linearly.
+var tile_filter := CanvasItem.TEXTURE_FILTER_NEAREST
 
 var player_pos := Vector2.ZERO
 var player_vy := 0.0
@@ -60,11 +73,16 @@ var damage_soaked := 0.0
 
 var world_root: Node2D
 var decor_root: Node2D
-var player_rect: ColorRect
+var sky_root: CanvasLayer
+var backdrop_root: ParallaxBackground
+var effects_root: CanvasLayer
+var camera: Camera2D
+var player_node: CanvasItem
 var status: Label
 
 var rules := {}
 var variant_defs := {}
+var stage_effects: Array = []
 
 
 func _ready() -> void:
@@ -75,9 +93,25 @@ func _ready() -> void:
 		variant_defs[str(v["name"])] = v
 	stage_id = manifest["stage_id"]
 	level_ids = manifest["levels"]
-	status = $Status
+	var gfx: Dictionary = manifest.get("graphics", {})
+	view_w_cells = float(gfx.get("view_cells", 20))
+	actor_scale = float(gfx.get("actor_scale", 1.4))
+	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
+	stage_effects = stage.get("effects", [])
+	_setup_audio(manifest.get("audio", {}))
+	status = $UI/Status
+	camera = Camera2D.new()
+	add_child(camera)
+	camera.make_current()
 	_load_tileset()
 	_load_enemy_defs()
+	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
+	# (frame-capture runs verify any level without playing to it).
+	var env_level := OS.get_environment("PLAT_LEVEL")
+	if env_level != "":
+		var env_index := level_ids.find(env_level)
+		if env_index >= 0:
+			level_index = env_index
 	_load_level(level_index)
 
 
@@ -92,6 +126,8 @@ func _load_json(path: String) -> Variant:
 func _load_tileset() -> void:
 	# Appearance AND physics resolve through the Tileset artifact.
 	var ts: Dictionary = _load_json("res://tileset/%s/manifest.json" % stage_id)
+	if str(ts.get("render_filter", "crisp")) == "smooth":
+		tile_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	var image := Image.load_from_file(
 		ProjectSettings.globalize_path("res://" + str(ts["tilesheet_path"]))
 	)
@@ -106,7 +142,13 @@ func _load_tileset() -> void:
 		slot_atlas[index] = atlas
 		slot_category[index] = str(slot.get("collision", ""))
 		if str(slot.get("collision", "")) == "empty":
-			bg_color = image.get_pixel(region[0] + 1, region[1] + 1)
+			# Region AVERAGE, not one pixel — generated sky textures
+			# resolve to their palette-conformed mean for horizon bands.
+			var empty_region := image.get_region(
+				Rect2i(region[0], region[1], region[2], region[3])
+			)
+			empty_region.resize(1, 1, Image.INTERPOLATE_BILINEAR)
+			bg_color = empty_region.get_pixel(0, 0)
 		match str(slot.get("collision", "")):
 			"solid":
 				blocking[tile_type] = true
@@ -135,26 +177,56 @@ func _load_level(index: int) -> void:
 	spawn = Vector2(level["spawn"][0], level["spawn"][1])
 	exit_cell = Vector2(level["exit"][0], level["exit"][1])
 	respawn_point = spawn
-	get_window().size = Vector2i(int(grid_w * CELL), int(grid_h * CELL))
+	# Per-level framing override (level.json "view_cells", null = game
+	# default) — a deliberate stage-plan exception (intimate/vista).
+	# Framing is CAMERA ZOOM at a stable window, never a window resize:
+	# view_cells spans the viewport width, clamped so the view can't show
+	# past the level bounds. (Runtime window resizes are also ignored by
+	# the 4.x editor's embedded play window — zoom works everywhere.)
+	var view_override: Variant = level.get("view_cells")
+	var eff_view_cells: float = float(view_override) if view_override != null else view_w_cells
+	eff_view_cells = minf(float(grid_w), eff_view_cells)
+	var vp := get_viewport_rect().size
+	var k := vp.x / (eff_view_cells * CELL)
+	k = maxf(k, vp.x / (grid_w * CELL))
+	k = maxf(k, vp.y / (grid_h * CELL))
+	camera.zoom = Vector2(k, k)
+	var view_w := vp.x / k  # visible world width, px (sky/effects sizing)
+	camera.limit_left = 0
+	camera.limit_right = int(grid_w * CELL)
+	camera.limit_top = 0
+	camera.limit_bottom = int(grid_h * CELL)
+	camera.position = Vector2(view_w / 2.0, grid_h * CELL / 2.0)
 
 	if world_root != null:
 		world_root.queue_free()
 	world_root = Node2D.new()
 	add_child(world_root)
-	_build_background(background)
+	_build_background(background, view_w)
+	_build_backdrop()
 	_build_tiles()
 	_build_markers(level.get("triggers", []))
 	_spawn_enemies(_load_json(base + "/entities.json"))
 	_spawn_player()
 	_build_decor(level.get("foreground", []))
+	_build_effects()
 	won = false
 	status.text = "%s — %s  (R restart, Esc quit)" % [manifest["world"], level_id]
-	move_child(status, get_child_count() - 1)
 
 
-func _build_background(background: Array) -> void:
+func _build_background(background: Array, view_w: float) -> void:
 	# One rect per horizon band — the game's background color (style
 	# palette via the empty tileset slot), lightened toward the top.
+	# The bands are WORLD-anchored (row coordinates), so the layer must
+	# follow the camera — framing is zoom now, and a static layer would
+	# misalign the horizon against the terrain. Parallax bands (layer
+	# -100) draw on top of it.
+	if sky_root != null:
+		sky_root.queue_free()
+	sky_root = CanvasLayer.new()
+	sky_root.layer = -101
+	sky_root.follow_viewport_enabled = true
+	add_child(sky_root)
 	var band_start := 0
 	for y in range(1, background.size() + 1):
 		var ended := y == background.size()
@@ -168,9 +240,94 @@ func _build_background(background: Array) -> void:
 				minf(bg_color.b * scale, 1.0),
 			)
 			rect.position = Vector2(0, band_start * CELL)
-			rect.size = Vector2(grid_w * CELL, (y - band_start) * CELL)
-			world_root.add_child(rect)
+			# Full grid width, not the camera view — the sky must cover
+			# any viewport (movie mode / resized windows showed gray).
+			rect.size = Vector2(
+				maxf(view_w, grid_w * CELL), (y - band_start) * CELL
+			)
+			sky_root.add_child(rect)
 			band_start = y
+
+
+func _build_backdrop() -> void:
+	# Generated parallax scenery (art track) — ParallaxBackground scrolls
+	# each band by its authored depth as the camera moves. Absent bands
+	# (fake/fallback path) leave the gradient sky as the whole backdrop.
+	if backdrop_root != null:
+		backdrop_root.queue_free()
+		backdrop_root = null
+	if not FileAccess.file_exists("res://backdrop/%s/manifest.json" % stage_id):
+		return
+	var bd: Dictionary = _load_json("res://backdrop/%s/manifest.json" % stage_id)
+	var paths: Array = bd.get("band_paths", [])
+	var depths: Array = bd.get("depths", [])
+	if paths.is_empty():
+		return
+	backdrop_root = ParallaxBackground.new()
+	backdrop_root.layer = -100
+	add_child(backdrop_root)
+	for i in range(paths.size()):
+		var image := Image.load_from_file(
+			ProjectSettings.globalize_path("res://" + str(paths[i]))
+		)
+		if image == null:
+			continue
+		var layer := ParallaxLayer.new()
+		var depth := float(depths[i]) if i < depths.size() else 0.5
+		layer.motion_scale = Vector2(depth, 1.0)
+		var texture := ImageTexture.create_from_image(image)
+		var s := (grid_h * CELL) / float(image.get_height())
+		var band_w := image.get_width() * s
+		layer.motion_mirroring = Vector2(band_w, 0)
+		# Two copies side by side: mirroring alone left a void beyond one
+		# band width until the camera moved (seen in frame captures).
+		for copy_index in range(2):
+			var sprite := Sprite2D.new()
+			sprite.texture = texture
+			sprite.centered = false
+			sprite.texture_filter = tile_filter
+			sprite.scale = Vector2(s, s)
+			sprite.position = Vector2(band_w * copy_index, 0)
+			layer.add_child(sprite)
+		backdrop_root.add_child(layer)
+
+
+func _build_effects() -> void:
+	# Stage-effect vocabulary: values from stage.json, KINDS interpreted
+	# here. Unknown names are inert until an interpreter exists (E.7).
+	# Screen-space ambience overlay (CanvasLayer, camera-independent) —
+	# sized to the viewport so particles always fall across the visible
+	# frame regardless of camera zoom or scroll.
+	var vp := get_viewport_rect().size
+	if effects_root != null:
+		effects_root.queue_free()
+		effects_root = null
+	if stage_effects.is_empty():
+		return
+	effects_root = CanvasLayer.new()
+	effects_root.layer = 10
+	add_child(effects_root)
+	for effect in stage_effects:
+		if str(effect.get("name", "")) != "particles_falling":
+			continue
+		var params: Dictionary = effect.get("params", {})
+		var speed := float(params.get("speed", 80))
+		var particles := CPUParticles2D.new()
+		particles.amount = int(params.get("density", 40))
+		particles.lifetime = (vp.y + 64.0) / maxf(speed, 1.0)
+		particles.preprocess = particles.lifetime
+		particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+		particles.emission_rect_extents = Vector2(vp.x / 2.0 + 32.0, 4.0)
+		particles.position = Vector2(vp.x / 2.0, -8.0)
+		particles.direction = Vector2(float(params.get("drift", 0)), speed)
+		particles.spread = 6.0
+		particles.gravity = Vector2.ZERO
+		particles.initial_velocity_min = speed * 0.8
+		particles.initial_velocity_max = speed * 1.2
+		particles.scale_amount_min = float(params.get("size", 2))
+		particles.scale_amount_max = float(params.get("size", 2)) * 1.5
+		particles.color = Color(str(params.get("color", "#e8e8f0")))
+		effects_root.add_child(particles)
 
 
 func _build_tiles() -> void:
@@ -182,32 +339,37 @@ func _build_tiles() -> void:
 			var sprite := Sprite2D.new()
 			sprite.texture = slot_atlas[slot]
 			sprite.centered = false
+			sprite.texture_filter = tile_filter
 			sprite.position = Vector2(x, y) * CELL
 			sprite.scale = Vector2(CELL, CELL) / sprite.texture.get_size()
 			world_root.add_child(sprite)
 
 
 func _build_markers(triggers: Array) -> void:
-	var marker := ColorRect.new()
-	marker.color = Color("40ff70")
-	marker.position = exit_cell * CELL + Vector2(4, 4)
-	marker.size = Vector2(CELL - 8, CELL - 8)
-	world_root.add_child(marker)
+	# The exit has NO graphic: the exit zone is the exit's whole COLUMN
+	# (rightmost floored column), bottom to top — you leave to the right.
 	# Checkpoints from the triggers layer (3b): amber markers; crossing one
 	# fills it and moves the respawn point there.
 	checkpoints.clear()
 	for t in triggers:
 		if str(t.get("type", "")) != "checkpoint":
 			continue
-		var frame := ColorRect.new()
-		frame.color = Color(1.0, 0.82, 0.29, 0.45)
+		# Gold BORDER, filled only once activated — the filled translucent
+		# rect read as a mystery crate next to real art (play-test note).
+		var frame := _outline_frame(Vector2(CELL - 8, CELL - 8))
+		frame.modulate = Color(1.0, 0.82, 0.29)
 		frame.position = Vector2(t["x"], t["y"]) * CELL + Vector2(4, 4)
-		frame.size = Vector2(CELL - 8, CELL - 8)
 		world_root.add_child(frame)
+		var fill := ColorRect.new()
+		fill.color = Color(1.0, 0.82, 0.29, 0.55)
+		fill.position = frame.position
+		fill.size = Vector2(CELL - 8, CELL - 8)
+		fill.visible = false
+		world_root.add_child(fill)
 		checkpoints.append({
 			"pos": Vector2(t["x"], t["y"]),
 			"active": false,
-			"node": frame,
+			"node": fill,
 		})
 
 
@@ -219,15 +381,29 @@ func _spawn_enemies(placements: Array) -> void:
 		# placement only carries the NAME (§6.1 overrides).
 		var variant: Dictionary = variant_defs.get(str(p.get("variant", "")), {})
 		var size := float(variant.get("size", 1.0))
-		var frame: ColorRect = null
+		var rect := _actor_visual(
+			str(spec.get("sprite_path", "")),
+			Color(str(spec["stats"].get("placeholder_color", "#ff00ff"))),
+			Vector2(CELL - 4, CELL - 4) * size,
+		)
+		# Visual offset from the placement cell: rects sit inside it;
+		# overdrawn sprites are x-centered on it with feet on its floor.
+		var half_extra := (size - 1.0) * CELL / 2.0
+		var vis_off := Vector2(2 - half_extra, 2 - half_extra)
+		if rect is Sprite2D:
+			var vis := (CELL - 4.0) * size * actor_scale
+			vis_off = Vector2(
+				(CELL - vis) / 2.0, CELL - 2.0 + half_extra - vis
+			)
+		var frame: Node2D = null
+		var frame_off := Vector2.ZERO
 		if "outline" in str(variant.get("visual", "")):
-			frame = ColorRect.new()
-			frame.color = Color.WHITE
-			frame.size = Vector2(CELL, CELL) * size
+			if rect is Sprite2D:
+				frame = _silhouette_frame(rect)
+			else:
+				frame = _outline_frame(Vector2(CELL, CELL) * size)
+				frame_off = Vector2(-2, -2)
 			world_root.add_child(frame)
-		var rect := ColorRect.new()
-		rect.color = Color(str(spec["stats"].get("placeholder_color", "#ff00ff")))
-		rect.size = Vector2(CELL - 4, CELL - 4) * size
 		world_root.add_child(rect)
 		var behavior: Dictionary = (spec["behavior"] as Dictionary).duplicate()
 		for key in variant.get("behavior", {}):
@@ -237,48 +413,170 @@ func _spawn_enemies(placements: Array) -> void:
 			"behavior": behavior,
 			"speed": float(spec["stats"].get("speed", 0))
 				* float(variant.get("speed_mult", 1.0)),
-			"half_extra": (size - 1.0) * CELL / 2.0,
+			"vis_off": vis_off,
 			"pos": Vector2(p["x"], p["y"]),
 			"home_x": float(p["x"]),
 			"dir": 1.0,
 			"node": rect,
 			"frame": frame,
+			"frame_off": frame_off,
 		})
 
 
-func _build_decor(foreground: Array) -> void:
+func _build_decor(_foreground: Array) -> void:
 	# Foreground decor sits in a root added AFTER the player — the player
-	# passes BEHIND these pieces (§6.2 layer collapsing).
+	# passes BEHIND these pieces (§6.2 layer collapsing). Placeholder
+	# diamonds are HIDDEN in-game (they read as bugs next to real art —
+	# play-test note); the layer draws once decoration art lands. The
+	# block review render still shows every decor record.
 	if decor_root != null:
 		decor_root.queue_free()
 	decor_root = Node2D.new()
 	add_child(decor_root)
-	for d in foreground:
-		var poly := Polygon2D.new()
-		var cx := float(d["x"]) * CELL + CELL / 2.0
-		var cy := float(d["y"]) * CELL + CELL / 2.0
-		poly.polygon = PackedVector2Array([
-			Vector2(cx, cy - 10), Vector2(cx + 8, cy),
-			Vector2(cx, cy + 10), Vector2(cx - 8, cy),
-		])
-		poly.color = Color8(185, 195, 205)
-		decor_root.add_child(poly)
+
+
+func _outline_frame(size_px: Vector2) -> Node2D:
+	# Four thin edges — a frame, not a filled box (rect-fallback enemies).
+	var frame := Node2D.new()
+	var edges := [
+		Rect2(Vector2.ZERO, Vector2(size_px.x, 2)),
+		Rect2(Vector2(0, size_px.y - 2), Vector2(size_px.x, 2)),
+		Rect2(Vector2.ZERO, Vector2(2, size_px.y)),
+		Rect2(Vector2(size_px.x - 2, 0), Vector2(2, size_px.y)),
+	]
+	for rect in edges:
+		var edge := ColorRect.new()
+		edge.color = Color.WHITE
+		edge.position = rect.position
+		edge.size = rect.size
+		frame.add_child(edge)
+	return frame
+
+
+func _silhouette_frame(body: Sprite2D) -> Node2D:
+	# Variant marker for SPRITE enemies: a white outline hugging the
+	# creature's silhouette (four offset white-alpha copies behind it) —
+	# any rectangle around a transparent sprite reads as a bug.
+	# GOLD, not white — a white outline vanished on the pale skeletal
+	# hound (frame-capture finding); gold contrasts with any sprite the
+	# hue reservations allow. The color lives IN the shader: a custom
+	# canvas fragment that writes COLOR discards node modulate.
+	var material := ShaderMaterial.new()
+	var shader := Shader.new()
+	shader.code = (
+		"shader_type canvas_item;\n"
+		+ "void fragment() {\n"
+		+ "\tCOLOR = vec4(1.0, 0.82, 0.29, texture(TEXTURE, UV).a);\n"
+		+ "}"
+	)
+	material.shader = shader
+	var frame := Node2D.new()
+	for offset in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 2)]:
+		var copy := Sprite2D.new()
+		copy.texture = body.texture
+		copy.centered = false
+		copy.texture_filter = tile_filter
+		copy.scale = body.scale
+		copy.material = material
+		copy.position = offset
+		frame.add_child(copy)
+	return frame
+
+
+func _actor_visual(sprite_rel: String, fallback: Color, size_px: Vector2) -> CanvasItem:
+	# Generated sprite when the art track produced one; the classic rect
+	# otherwise (loud fallback upstream — a missing sprite is a warned-on
+	# generation failure, never a silent hole). Sprites get the SNES
+	# overdraw: drawn actor_scale times their hitbox (uniform, callers
+	# anchor feet) — physics never changes. Rects stay hitbox-true.
+	if sprite_rel != "" and FileAccess.file_exists("res://" + sprite_rel):
+		var image := Image.load_from_file(
+			ProjectSettings.globalize_path("res://" + sprite_rel)
+		)
+		if image != null:
+			var sprite := Sprite2D.new()
+			sprite.texture = ImageTexture.create_from_image(image)
+			sprite.centered = false
+			sprite.texture_filter = tile_filter
+			sprite.scale = size_px * actor_scale / sprite.texture.get_size()
+			return sprite
+	var rect := ColorRect.new()
+	rect.color = fallback
+	rect.size = size_px
+	return rect
+
+
+var player_vis_off := Vector2(4, 4)
 
 
 func _spawn_player() -> void:
-	if player_rect != null:
-		player_rect.queue_free()
-	player_rect = ColorRect.new()
-	player_rect.color = Color(0.94, 0.94, 0.94)
-	player_rect.size = Vector2(CELL - 8, CELL - 8)
-	add_child(player_rect)
+	if player_node != null:
+		player_node.queue_free()
+	player_node = _actor_visual(
+		"sprite/player/base.png",
+		Color(0.94, 0.94, 0.94),
+		Vector2(CELL - 8, CELL - 8),
+	)
+	player_vis_off = Vector2(4, 4)
+	if player_node is Sprite2D:
+		# Overdrawn hero: x-centered on the hitbox cell, feet on its floor.
+		var vis := (CELL - 8.0) * actor_scale
+		player_vis_off = Vector2((CELL - vis) / 2.0, CELL - 4.0 - vis)
+	add_child(player_node)
 	_respawn()
+
+
+func _setup_audio(audio: Dictionary) -> void:
+	var music_rel = audio.get("music")
+	if music_rel != null and str(music_rel) != "":
+		var stream := _load_audio_stream(str(music_rel))
+		if stream != null:
+			if "loop" in stream:
+				stream.loop = true
+			elif "loop_mode" in stream:
+				stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+			music_player = AudioStreamPlayer.new()
+			music_player.stream = stream
+			add_child(music_player)
+			music_player.play()
+	var sfx: Dictionary = audio.get("sfx", {})
+	for event in sfx:
+		var s := _load_audio_stream(str(sfx[event]))
+		if s != null:
+			var p := AudioStreamPlayer.new()
+			p.stream = s
+			add_child(p)
+			sfx_players[str(event)] = p
+
+
+func _load_audio_stream(rel: String) -> AudioStream:
+	# Runtime load by extension — generated files aren't editor-imported.
+	var path := "res://" + rel
+	if not FileAccess.file_exists(path):
+		push_warning("audio file missing: " + path)
+		return null
+	if rel.ends_with(".ogg"):
+		return AudioStreamOggVorbis.load_from_file(path)
+	if rel.ends_with(".mp3"):
+		var mp3 := AudioStreamMP3.new()
+		mp3.data = FileAccess.get_file_as_bytes(path)
+		return mp3
+	if rel.ends_with(".wav"):
+		return AudioStreamWAV.load_from_file(path)
+	push_warning("unsupported audio format: " + rel)
+	return null
+
+
+func _play_sfx(event: String) -> void:
+	if sfx_players.has(event):
+		sfx_players[event].play()
 
 
 func _respawn() -> void:
 	player_pos = respawn_point
 	player_vy = 0.0
 	damage_soaked = 0.0
+	_play_sfx("death")
 
 
 func _tile(x: float, y: float) -> int:
@@ -386,6 +684,7 @@ func _process(delta: float) -> void:
 			# jump_height + headroom margin: discrete integration undershoots
 			# the analytic apex, which made exact-height platforms unlandable.
 			player_vy = -sqrt(2.0 * gravity * (float(movement["jump_height"]) + 0.4))
+			_play_sfx("jump")
 	if volume != null:
 		player_vy += float(volume.get("gravity", 8.0)) * delta
 		player_vy = minf(player_vy, 3.0)  # terminal sink speed
@@ -428,8 +727,9 @@ func _process(delta: float) -> void:
 		var cpos: Vector2 = checkpoint["pos"]
 		if int(player_pos.x) == int(cpos.x) and int(player_pos.y) == int(cpos.y):
 			checkpoint["active"] = true
-			checkpoint["node"].color = Color(1.0, 0.82, 0.29, 1.0)
+			checkpoint["node"].visible = true  # fill lights up when claimed
 			respawn_point = cpos
+			_play_sfx("checkpoint")
 
 	# --- enemies: execute their database behavior params ---
 	for enemy in enemies:
@@ -452,18 +752,30 @@ func _process(delta: float) -> void:
 				if _enemy_can_occupy(archetype, next_x, pos.y):
 					pos.x = next_x  # halts at volume/cliff edges
 		enemy["pos"] = pos
-		var half_extra := float(enemy["half_extra"])
-		enemy["node"].position = pos * CELL + Vector2(2 - half_extra, 2 - half_extra)
+		enemy["node"].position = pos * CELL + enemy["vis_off"]
+		if enemy["node"] is Sprite2D:
+			enemy["node"].flip_h = enemy["dir"] < 0.0
 		if enemy["frame"] != null:
-			enemy["frame"].position = pos * CELL - Vector2(half_extra, half_extra)
+			# Silhouette frames track the body exactly; border frames sit
+			# 2px out around the rect (their stored offset).
+			enemy["frame"].position = enemy["node"].position + enemy["frame_off"]
+			if enemy["node"] is Sprite2D:
+				for copy in enemy["frame"].get_children():
+					copy.flip_h = enemy["dir"] < 0.0
 		if pos.distance_to(player_pos) < 0.7:
 			_respawn()
 
-	player_rect.position = player_pos * CELL + Vector2(4, 4)
+	player_node.position = player_pos * CELL + player_vis_off
+	if player_node is Sprite2D and dx != 0.0:
+		player_node.flip_h = dx < 0.0
+	camera.position = Vector2(
+		(player_pos.x + 0.5) * CELL, (player_pos.y + 0.5) * CELL
+	)
 
-	# --- exit ---
-	if not won and int(player_pos.x) == int(exit_cell.x) and int(player_pos.y) == int(exit_cell.y):
+	# --- exit: the whole column, any height (leave to the right) ---
+	if not won and int(player_pos.x) == int(exit_cell.x):
 		won = true
+		_play_sfx("win")
 		if level_index + 1 < level_ids.size():
 			level_index += 1
 			_load_level(level_index)

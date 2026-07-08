@@ -35,26 +35,28 @@ CANON = [sys.executable, "-m", "canon.cli.main"]
 SEED = "emberfall_001"
 
 
-def _ctx(output_dir: Path, bible: Bible | None = None) -> PipelineContext:
+def _ctx(
+    output_dir: Path, bible: Bible | None = None, responder=None
+) -> PipelineContext:
     return PipelineContext(
         bible=bible if bible is not None else Bible.empty(seed=SEED),
         config=CanonConfig(seed=SEED, output_dir=output_dir),
         rng=random.Random(SEED),
-        llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+        llm=LLMClient(FakeLLMBackend(responder or make_fake_responder())),
         prompts=PlatformerPrompts(),
     )
 
 
-def _orchestrate_fresh(output_dir: Path):
-    ctx = _ctx(output_dir)
+def _orchestrate_fresh(output_dir: Path, responder=None):
+    ctx = _ctx(output_dir, responder=responder)
     report = run_orchestrated(ctx, persist_path=output_dir / "bible.json")
     return ctx, report
 
 
-def _resume(output_dir: Path):
+def _resume(output_dir: Path, responder=None):
     """The runner's resume path: reload the Bible, detect edits, re-run."""
     bible = Bible.load(output_dir / "bible.json")
-    ctx = _ctx(output_dir, bible=bible)
+    ctx = _ctx(output_dir, bible=bible, responder=responder)
     edits = detect_edits(bible, output_dir)
     report = run_orchestrated(ctx, persist_path=output_dir / "bible.json")
     return ctx, edits, report
@@ -129,12 +131,16 @@ class TestOrchestratedGeneration:
 class TestPerStepRegen:
     """The workload the Phase 2 orchestrator was built to schedule."""
 
-    def _edit_l2_collision(self, run: Path) -> None:
+    def _edit_l2_collision(self, run: Path) -> int:
+        """Clear the pool cells on the ground row (dims are schema-rolled,
+        so the row is computed, not hardcoded). Returns the edited row."""
         target = run / "level/ashen_depths/l2/collision.npz"
         with np.load(target) as data:
             grid = data["collision"].copy()
-        grid[14, 5:8] = 0  # the user carves a gap in the floor
+        ground = grid.shape[0] - 2
+        grid[ground, 5:8] = 0  # the user carves a gap in the floor
         np.savez(target, collision=grid)
+        return ground
 
     def test_edit_regenerates_exactly_the_stale_steps(
         self, tmp_path: Path
@@ -167,17 +173,17 @@ class TestPerStepRegen:
         _orchestrate_fresh(run)
         with np.load(run / "level/ashen_depths/l2/terrain.npz") as data:
             terrain_before = data["terrain"].copy()
-        self._edit_l2_collision(run)
+        ground = self._edit_l2_collision(run)
         _resume(run)
 
         # The user's grid survives byte-for-byte in content terms...
         with np.load(run / "level/ashen_depths/l2/collision.npz") as data:
-            assert (data["collision"][14, 5:8] == 0).all()
+            assert (data["collision"][ground, 5:8] == 0).all()
         # ...and the regenerated terrain reflects it (reads from disk).
         with np.load(run / "level/ashen_depths/l2/terrain.npz") as data:
             terrain = data["terrain"]
         assert not (terrain == terrain_before).all()
-        assert (terrain[14, 5:8] == 0).all()
+        assert (terrain[ground, 5:8] == 0).all()
 
     def test_third_run_is_clean_after_adoption(self, tmp_path: Path) -> None:
         """detect_edits adopts the on-disk hash — the same edit must not
@@ -275,6 +281,67 @@ class TestRegenVerb:
         plan = mark_stale(ctx.bible, [entities_id])
         assert entities_id in plan.marked
 
+    def test_regen_level_keeps_brief_on_resume(self, tmp_path: Path) -> None:
+        """Level.brief is persisted precisely so a surgical regen prompts
+        with the original stage-planning context; the resume path must
+        read it back rather than regenerate against an empty brief (the
+        stage phase that fills ctx.artifacts['level_briefs'] is skipped)."""
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        original = ctx.bible.levels["l2"].brief
+        assert original  # fresh runs carry the stage-planned brief
+
+        bible = Bible.load(run / "bible.json")
+        mark_stale(bible, ["l2"])
+        bible.persist(run / "bible.json")
+
+        ctx2, _edits, report = _resume(run)
+        assert "level:ashen_depths/l2/collision" in report.done
+        assert ctx2.bible.levels["l2"].brief == original
+
+    def test_regen_level_keeps_view_on_resume(self, tmp_path: Path) -> None:
+        """The per-level framing override is a stage-plan decision — a
+        surgical level regen (stage phase skipped) must keep it, exactly
+        like the brief."""
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        ctx, _ = _orchestrate_fresh(run)
+        assert ctx.bible.levels["l3"].view_cells == 30  # canned vista finale
+
+        bible = Bible.load(run / "bible.json")
+        mark_stale(bible, ["l3"])
+        bible.persist(run / "bible.json")
+
+        ctx2, _edits, _report = _resume(run)
+        assert ctx2.bible.levels["l3"].view_cells == 30
+
+    def test_fallback_notice_survives_resume(self, tmp_path: Path) -> None:
+        """plat:manifest is an always node: it rebuilds warnings every
+        resume, which used to ERASE the fallback record while the level
+        stayed fallback content. The notice must re-derive from the Bible."""
+        good = make_fake_responder()
+
+        def broken_layouts(request):
+            if "### TASK: layout" in request.user_message:
+                return "not a dsl at all"
+            return good(request)
+
+        run = tmp_path / "run"
+        _orchestrate_fresh(run, responder=broken_layouts)
+        manifest = json.loads((run / "manifest.json").read_text())
+        assert any("FALLBACK" in w for w in manifest["warnings"])
+
+        # A clean no-op resume (good responder, nothing marked) rebuilds
+        # the manifest; the fallback notice must still be there.
+        _resume(run)
+        manifest = json.loads((run / "manifest.json").read_text())
+        fallback_notes = [w for w in manifest["warnings"] if "FALLBACK" in w]
+        assert len(fallback_notes) == 3  # one per fallback level, no dupes
+        assert all("_layout_attempts.json" in w for w in fallback_notes)
+
     def test_regen_step_reruns_exactly_that_chain(self, tmp_path: Path) -> None:
         from canon.pipeline.orchestrator import mark_stale
 
@@ -290,6 +357,56 @@ class TestRegenVerb:
             "level:ashen_depths/l2/entities",
             "level:ashen_depths/l2/level",
         }
+
+    def test_style_regen_cascades_to_tileset_and_terrain(
+        self, tmp_path: Path
+    ) -> None:
+        """The tilesheet is style-seeded art (§6.1 edge on Tileset.parents),
+        so a style regen must re-roll the sheet — and the terrain/background
+        steps behind it — via the tileset node's `owns` mapping (the node is
+        `phase:plat:tileset`; the cascade marks `tileset:<stage>`)."""
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        bible = Bible.load(run / "bible.json")
+        plan = mark_stale(bible, ["phase:plat:style"])
+        assert "tileset:ashen_depths" in plan.marked
+        bible.persist(run / "bible.json")
+
+        _ctx, _edits, report = _resume(run)
+        assert "phase:plat:style" in report.done
+        assert "phase:plat:tileset" in report.done
+        for lid in ("l1", "l2", "l3"):
+            assert f"level:ashen_depths/{lid}/terrain" in report.done
+        # Cleared on completion — the next pass is a no-op resume.
+        _ctx, _edits, report = _resume(run)
+        assert "phase:plat:tileset" not in report.done
+
+    def test_tileset_only_regen_reads_style_seed_from_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """A tileset-only regen runs with fresh scratch artifacts (no
+        in-process palette) — the phase must re-read the style artifact
+        (style/<stage>/style.json), not fall back to placeholder colors."""
+        from canon.pipeline.orchestrator import mark_stale
+
+        run = tmp_path / "run"
+        _orchestrate_fresh(run)
+        sheet_rel = "tileset/ashen_depths/tilesheet.png"
+        before = (run / sheet_rel).read_bytes()
+
+        bible = Bible.load(run / "bible.json")
+        mark_stale(bible, ["phase:plat:tileset"])
+        bible.persist(run / "bible.json")
+        _ctx, _edits, report = _resume(run)
+
+        assert "phase:plat:tileset" in report.done
+        assert "phase:plat:style" not in report.done  # style itself skipped
+        assert (run / sheet_rel).read_bytes() == before, (
+            "regenerated sheet must repaint the GENERATED palette from "
+            "style.json — placeholder colors mean the seed was lost"
+        )
 
     def test_regen_cli_verb(self, tmp_path: Path) -> None:
         run = tmp_path / "run"
@@ -406,7 +523,7 @@ class TestCliRegen:
         target = run / "level/ashen_depths/l2/collision.npz"
         with np.load(target) as data:
             grid = data["collision"].copy()
-        grid[14, 5:8] = 0
+        grid[grid.shape[0] - 2, 5:8] = 0  # ground row — dims are rolled
         np.savez(target, collision=grid)
 
         result = subprocess.run(

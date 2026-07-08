@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 
 from canon.llm.request import LLMRequest
+from examples.platformer_pack.effects import describe_vocabulary as _effects_vocabulary
 from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
@@ -70,8 +71,17 @@ class PlatformerPrompts:
                 '{"theme": str (short), '
                 f'"level_briefs": [exactly {num_levels} strings, one sentence '
                 "each, escalating difficulty], "
+                f'"level_views": [exactly {num_levels} strings from '
+                '"standard" | "intimate" | "vista" — camera framing per '
+                'level. Almost always "standard": scale stays consistent '
+                'within a game. Use "vista" ONLY where zooming out is meant '
+                'to inspire (a big reveal), "intimate" ONLY for tight, '
+                "claustrophobic moments], "
                 f'"roster_brief": str (what kinds of {num_enemies} enemies '
-                "inhabit this stage)}"
+                "inhabit this stage), "
+                '"effects": [0-2 ambient effect records '
+                '{"name": str, "params": {...}} fitting the theme, from: '
+                f"{_effects_vocabulary()}]}}"
             ),
             max_tokens=768,
         )
@@ -217,15 +227,25 @@ class PlatformerPrompts:
         hazards = tiles.named("hazard")
         ops = [
             "floor(x1,x2)", "gap(x1,x2)", "pit(x1,x2)", "platform(x,y,len)",
-            "ledge(x1,x2,y)", "wall(x,y1,y2)", "checkpoint(x)",
-            "spawn(x)", "exit(x)",
+            "ledge(x1,x2,y)", "wall(x,y1,y2)", "carve(x1,y1,x2,y2)",
+            "checkpoint(x)", "spawn(x)", "exit(x)",
         ]
         if hazards:
             ops.append("hazard_strip(name,x1,x2)")
         if volumes:
             ops.append("volume(name,x1,x2,y_surface)")
             ops.append("pool(name,x1,x2)")
-        vocab_lines = []
+        vocab_lines = [
+            # Shape variety is op work, not coaching: carve notches
+            # silhouettes, ledge stacks build tiers — both fully validated.
+            "carve(x1,y1,x2,y2): clears a rectangle back to empty air "
+            f"(rows 0..{height - 3} only — it cannot cut the ground row). "
+            "Use 1-3 cell notches to break up long ledges and vary "
+            "silhouettes.",
+            "Tiers: stack 2-3 ledge(...) strips of DIFFERENT lengths, "
+            "3-4 rows apart, offset horizontally — multi-level structures "
+            "the player climbs through beat single flat runs.",
+        ]
         if volumes:
             vocab_lines.append(
                 "Volume tiles for volume(): "

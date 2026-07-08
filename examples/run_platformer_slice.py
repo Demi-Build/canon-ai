@@ -41,50 +41,119 @@ from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa
 
 # ---------------------------------------------------------------------------
 # Canned fake responses — deterministic, matched to prompt markers.
-# Layouts are hand-verified against the movement spec (jump 3 up / 4 across;
-# volumes are swimmable) and against the schema dims: l1 48x16, l2 56x16,
-# l3 64x18. Each exercises the 3a+3b feature set: volume pool, ledge tier,
-# checkpoint, variable dims. The {vol}/{haz} slots take the game's tile
-# names (parsed from the prompt's registry-driven vocabulary), so the SAME
-# responder plays any game the template can express — that's the point.
+# Layouts are GENERATED against the advertised grid (dims are schema-rolled
+# RANGES now — no fixed coords can fit every roll), verified by the same
+# validators real output faces. Rows are relative to the ground row, columns
+# to the right edge. Exercises the full op set incl. the design-variety ops:
+# pool, raised basin, pit, ledge TIER STACK with a carve notch, platform,
+# hazard strip, checkpoint. The {vol}/{haz} names come from the prompt's
+# registry-driven vocabulary, so the SAME responder plays any game.
 # ---------------------------------------------------------------------------
 
-_FAKE_LAYOUT_TEMPLATES = {
-    # Pools are CONTAINED (GameRules.water_containment): flanking walls
-    # form the basin lip — jump over, swim across, climb out.
-    "l1": (
-        "floor(0,47)\npool({vol},5,7)\nplatform(10,11,4)\nledge(16,21,9)\n"
-        "wall(29,12,13)\nwall(37,12,13)\nvolume({vol},30,36,12)\n"
-        "hazard_strip({haz},40,41)\ncheckpoint(25)\nspawn(2)\nexit(45)"
-    ),
-    "l2": (
-        "floor(0,20)\nplatform(22,11,2)\nfloor(25,55)\n"
-        "wall(29,11,13)\nwall(39,11,13)\nvolume({vol},30,38,11)\n"
-        "hazard_strip({haz},46,47)\nledge(48,51,11)\ncheckpoint(43)\n"
-        "spawn(2)\nexit(53)"
-    ),
-    "l3": (
-        "floor(0,10)\npit(11,13)\nfloor(14,30)\nhazard_strip({haz},20,22)\n"
-        "wall(23,14,15)\nwall(30,14,15)\nvolume({vol},24,29,14)\n"
-        "floor(35,63)\nplatform(32,13,2)\nplatform(37,14,2)\n"
-        "ledge(40,46,12)\nhazard_strip({haz},50,52)\n"
-        "wall(54,15,15)\nwall(61,15,15)\nvolume({vol},55,60,15)\n"
-        "checkpoint(36)\nspawn(3)\nexit(62)"
-    ),
-}
+
+def _fake_layout(
+    width: int, height: int, vol: str, haz: str, difficulty: int = 1
+) -> str:
+    g = height - 2  # ground row; players stand on g-1
+    right = width - 1
+    lines = [
+        f"floor(0,{right})",
+        # Sunken pool, flush with the ground (contained by its banks).
+        f"pool({vol},5,7)",
+    ]
+    if difficulty >= 2:
+        lines.append("pit(11,12)")
+    lines += [
+        # Tier stack with a carved notch — irregular multi-level shape.
+        f"ledge(15,21,{g - 3})",
+        f"ledge(17,22,{g - 6})",
+        f"carve(18,{g - 3},18,{g - 3})",
+        # Raised basin: walls form the lip, water fills two rows.
+        f"wall(25,{g - 2},{g - 1})",
+        f"volume({vol},26,30,{g - 2})",
+        f"wall(31,{g - 2},{g - 1})",
+        f"platform(34,{g - 3},3)",
+        f"hazard_strip({haz},{right - 6},{right - 5})",
+        f"checkpoint({right - 4})",
+        "spawn(2)",
+        f"exit({right})",
+    ]
+    return "\n".join(lines)
+
+
+#: Reference dims per level id (the OLD fixed schema dims) — what the
+#: direct-stamp unit tests render against. The live run rolls dims from
+#: the schema's difficulty bands and generates layouts to fit.
+_REFERENCE_DIMS = {"l1": (48, 16, 1), "l2": (56, 16, 2), "l3": (64, 18, 3)}
 
 #: Rendered for the pack's default game — what tests stamp directly.
 _FAKE_LAYOUTS = {
-    level_id: template.format(vol="water", haz="spike")
-    for level_id, template in _FAKE_LAYOUT_TEMPLATES.items()
+    level_id: _fake_layout(w, h, "water", "spike", d)
+    for level_id, (w, h, d) in _REFERENCE_DIMS.items()
 }
 
-#: Hand-verified spots per level: land (standable) and volume cells.
-_FAKE_SPOTS = {
-    "l1": {"land": [(14, 13), (18, 8), (43, 13)], "water": [(33, 12), (32, 13)]},
-    "l2": {"land": [(10, 13), (27, 13), (49, 10)], "water": [(34, 12), (36, 11)]},
-    "l3": {"land": [(17, 15), (41, 11), (48, 15)], "water": [(26, 14), (57, 15)]},
-}
+
+def _parse_summary_cells(summary: str) -> list[tuple[int, int]]:
+    """Invert prompts' cells-summary format ("y=13: x 2-9, 14; y=8: x 3")
+    back into cells — the canned responder places enemies the same way a
+    real model does: from the prompt, not from hand-tuned coordinates."""
+    cells: list[tuple[int, int]] = []
+    for part in summary.split(";"):
+        m = re.match(r"\s*y=(\d+): x (.+)", part.strip())
+        if not m:
+            continue
+        y = int(m.group(1))
+        for rng in m.group(2).split(","):
+            rng = rng.strip()
+            span = re.match(r"(\d+)-(\d+)$", rng)
+            if span:
+                cells.extend(
+                    (x, y)
+                    for x in range(int(span.group(1)), int(span.group(2)) + 1)
+                )
+            elif rng.isdigit():
+                cells.append((int(rng), y))
+    return cells
+
+
+def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
+    """Deterministic land/water placement spots parsed from the placement
+    prompt's standable/volume summaries, spread across the level and kept
+    clear of the spawn column."""
+    stand_m = re.search(r"y from top\): (.+)\n", msg)
+    vol_m = re.search(r"swimmers ONLY go here\): (.+)\n", msg)
+    spawn_m = re.search(r"Player spawn: \[(\d+), (\d+)\]", msg)
+    spawn_x = int(spawn_m.group(1)) if spawn_m else 0
+
+    land_cells = sorted(
+        c
+        for c in (_parse_summary_cells(stand_m.group(1)) if stand_m else [])
+        if abs(c[0] - spawn_x) >= 5
+    )
+    land: list[tuple[int, int]] = []
+    if land_cells:
+        seen_x: set[int] = set()
+        for idx in (len(land_cells) // 5, len(land_cells) // 2,
+                    (4 * len(land_cells)) // 5, 0, len(land_cells) - 1):
+            cell = land_cells[idx]
+            if cell[0] not in seen_x:
+                seen_x.add(cell[0])
+                land.append(cell)
+            if len(land) == 3:
+                break
+
+    water_cells: list[tuple[int, int]] = []
+    if vol_m and vol_m.group(1).strip() != "none":
+        for tile_part in vol_m.group(1).split(" | "):
+            _name, _, rest = tile_part.partition(": ")
+            water_cells.extend(_parse_summary_cells(rest))
+    water_cells = sorted(set(water_cells))
+    water = (
+        [water_cells[0], water_cells[len(water_cells) // 2]]
+        if water_cells
+        else []
+    )
+    return {"land": land, "water": water}
 
 _FAKE_DECOR = {
     "l1": [
@@ -151,11 +220,24 @@ def make_fake_responder():
                 "The deep vents: spike fields and crumbling footholds.",
             ]
             briefs = (briefs * ((n // 3) + 1))[:n]
+            # Deliberate framing exception on the finale only — the rest
+            # stay standard (scale is consistent within a game).
+            views = ["standard"] * (n - 1) + ["vista"] if n else []
             return json.dumps(
                 {
                     "theme": "ashen lava tubes",
                     "level_briefs": briefs,
+                    "level_views": views,
                     "roster_brief": "Ash-crusted vermin and ember constructs.",
+                    "effects": [
+                        {
+                            "name": "particles_falling",
+                            "params": {
+                                "density": 30, "speed": 40, "size": 2,
+                                "drift": 18, "color": "#d8cfc4",
+                            },
+                        }
+                    ],
                 }
             )
         if task == "enemy":
@@ -187,17 +269,23 @@ def make_fake_responder():
                 }
             )
         if task == "layout":
-            # The prompt advertises the game's registry vocabulary — pick
-            # the first volume/hazard name it offers, so the same canned
-            # layouts play emberfall (water/spike) or a lava world.
+            # The prompt advertises the game's registry vocabulary AND the
+            # rolled grid — parse both, so the same canned generator plays
+            # emberfall (water/spike), a lava world, and any rolled dims.
             vol_match = re.search(r"Volume tiles for volume\(\): (\w+)", msg)
             haz_match = re.search(r"Hazard tiles for hazard_strip\(\): (\w+)", msg)
-            template = _FAKE_LAYOUT_TEMPLATES.get(
-                level_id, _FAKE_LAYOUT_TEMPLATES["l1"]
+            grid_match = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            diff_match = re.search(r'"difficulty": (\d+)', msg)
+            width, height = (
+                (int(grid_match.group(1)), int(grid_match.group(2)))
+                if grid_match
+                else (48, 16)
             )
-            return template.format(
+            return _fake_layout(
+                width, height,
                 vol=vol_match.group(1) if vol_match else "water",
                 haz=haz_match.group(1) if haz_match else "spike",
+                difficulty=int(diff_match.group(1)) if diff_match else 1,
             )
         if task == "placement":
             roster_match = re.search(
@@ -211,7 +299,7 @@ def make_fake_responder():
             offered = re.findall(r"'(\w+)'", offer_match.group(1)) if offer_match else []
             order = [n for n in ("elite", "champion") if n in offered]
             order += sorted(set(offered) - set(order))
-            spots = _FAKE_SPOTS.get(level_id, _FAKE_SPOTS["l1"])
+            spots = _fake_spots(msg)
             land = list(spots["land"])
             water = list(spots["water"])
             placements = []
@@ -281,6 +369,41 @@ def main() -> None:
         "to the pack's).",
     )
     parser.add_argument(
+        "--image-backend", choices=["none", "fake", "fal", "local"],
+        default="none",
+        help="Tilesheet art source (default none = deterministic "
+        "placeholder squares). fal/local generate one texture per tile "
+        "seeded by style/<stage>/style.json — fal is PAID and only ever "
+        "used when this flag says so; fake exercises the diffusion path "
+        "deterministically at $0.",
+    )
+    parser.add_argument(
+        "--image-model", default=None,
+        help="Model id for the image backend (default: the backend's, "
+        "e.g. fal-ai/nano-banana).",
+    )
+    parser.add_argument(
+        "--music-backend", choices=["none", "fake", "lyria"],
+        default="none",
+        help="Stage music theme source (default none = silent). lyria is "
+        "PAID (GOOGLE_API_KEY) and only ever used when this flag says "
+        "so; fake exercises the audio path deterministically at $0.",
+    )
+    parser.add_argument(
+        "--sfx-backend", choices=["none", "fake", "elevenlabs"],
+        default="none",
+        help="Sound-effect source for the closed event set (jump/"
+        "checkpoint/death/win). elevenlabs is PAID (ELEVENLABS_API_KEY) "
+        "and only ever used when this flag says so.",
+    )
+    parser.add_argument(
+        "--graphics", default=None,
+        help="Path to a graphics.json spec — target resolution + art "
+        "style as per-game data (defaults to the pack's 32px crisp "
+        "pixel art). Examples proving the swap: "
+        "examples/graphics_specs/{snes_pixel,rendered_hd}.json.",
+    )
+    parser.add_argument(
         "--orchestrate", action="store_true",
         help="Run through the Phase 2 DAG orchestrator instead of the "
         "sequential pipeline: persists bible.json into the output tree "
@@ -314,6 +437,17 @@ def main() -> None:
     rules = load_rules(args.rules) if args.rules else load_rules()
     tiles = load_tiles(args.tiles) if args.tiles else load_tiles()
     variants = load_variants(args.variants) if args.variants else load_variants()
+    from examples.platformer_pack.audio_phases import (
+        build_music_producer,
+        build_sfx_producer,
+    )
+    from examples.platformer_pack.graphics import load_graphics
+    from examples.platformer_pack.tileset_art import build_image_producer
+
+    image_producer = build_image_producer(args.image_backend, args.image_model)
+    music_producer = build_music_producer(args.music_backend)
+    sfx_producer = build_sfx_producer(args.sfx_backend)
+    graphics = load_graphics(args.graphics) if args.graphics else load_graphics()
     if args.orchestrate:
         from canon.pipeline.orchestrator import detect_edits
         from examples.platformer_pack.dag import run_orchestrated
@@ -331,6 +465,8 @@ def main() -> None:
             ctx, persist_path=bible_path,
             num_levels=args.num_levels, num_enemies=args.num_enemies,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
+            image_producer=image_producer, graphics=graphics,
+            music_producer=music_producer, sfx_producer=sfx_producer,
         )
         print(
             f"\nOrchestrated: {len(report.done)} node(s) ran, "
@@ -346,6 +482,8 @@ def main() -> None:
         phases = compose_pipeline(
             num_levels=args.num_levels, num_enemies=args.num_enemies,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
+            image_producer=image_producer, graphics=graphics,
+            music_producer=music_producer, sfx_producer=sfx_producer,
         )
         run_pipeline(phases, ctx)
 

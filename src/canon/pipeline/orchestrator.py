@@ -54,6 +54,14 @@ class Node:
     recorded DONE — for cheap, deterministic derived outputs (review
     renders, the root manifest) that must stay fresh after any upstream
     regeneration without needing their own place in the stale cascade.
+
+    ``owns`` names Bible artifact IDs this node stamps beyond its own
+    node id. Per-step nodes don't need it (their node id IS the artifact
+    id), but a legacy phase node is keyed ``phase:<name>`` while the
+    entities it writes carry their own ids (``tileset:<stage>``) — the
+    stale cascade marks those entity ids, and ``owns`` is how the mark
+    reschedules the producing node. Owned ids marked STALE force a
+    re-run; on completion they are cleared to DONE.
     """
 
     node_id: str
@@ -62,6 +70,7 @@ class Node:
     produces: str = ""  # defaults to node_id
     gate: bool = False  # human gate (I4): pause point unless auto-approved
     always: bool = False  # re-run even when DONE (cheap derived outputs)
+    owns: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.produces:
@@ -124,10 +133,12 @@ def build_nodes(items: list[Any], ctx: Any) -> list[Node]:
             prev_ids = [n.node_id for n in expanded]
             prev_was_legacy = False
         else:
+            owns_hook = getattr(item, "owns", None)
             node = Node(
                 node_id=f"phase:{item.name}",
                 run=item.run,
                 requires=list(prev_ids),
+                owns=list(owns_hook(ctx)) if callable(owns_hook) else [],
             )
             nodes.append(node)
             prev_ids = [node.node_id]
@@ -217,13 +228,20 @@ def orchestrate(
 
     report = OrchestratorReport()
     status = metadata.node_status
+    pinned = pinned_ids(ctx.bible)
     rerun = {
         nid for nid, s in status.items() if s is ArtifactStatus.STALE
     }
     completed: set[str] = set()
     for nid, node in node_map.items():
         node_status = status.get(nid)
-        if node_status == ArtifactStatus.USER_EDITED:
+        if nid in pinned:
+            # Pinned content is deliberately protected — never scheduled,
+            # even ahead of `always` (always node ids aren't pinnable, but
+            # level-step nodes are node_id == artifact_id).
+            completed.add(nid)
+            report.skipped.append(nid)
+        elif node_status == ArtifactStatus.USER_EDITED:
             # The user's edit is authoritative — NEVER regenerate it
             # (§6.3); its output satisfies dependents as-is.
             completed.add(nid)
@@ -232,6 +250,7 @@ def orchestrate(
             node_status == ArtifactStatus.DONE
             and nid not in rerun
             and not node.always
+            and not any(aid in rerun for aid in node.owns)
         ):
             completed.add(nid)
             report.skipped.append(nid)
@@ -288,6 +307,9 @@ def orchestrate(
                     dead.add(nid)
                     logger.error("Node %s escalated: %s", nid, error)
                 else:
+                    for aid in node_map[nid].owns:
+                        if status.get(aid) is ArtifactStatus.STALE:
+                            status[aid] = ArtifactStatus.DONE
                     _commit(nid, ArtifactStatus.DONE)
                     completed.add(nid)
                     report.done.append(nid)
@@ -317,13 +339,40 @@ class EditReport:
     user_edited: list[str] = field(default_factory=list)
     stale: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    #: Pinned artifacts whose on-disk bytes changed: the edit is adopted
+    #: like any other, but reported separately so it's loud.
+    pinned_edited: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "user_edited": self.user_edited,
             "stale": self.stale,
             "missing": self.missing,
+            "pinned_edited": self.pinned_edited,
         }
+
+
+def pinned_ids(bible: Any) -> set[str]:
+    """The `canon pin` set — deliberately protected artifact ids. The
+    cascade halts at a pin, the scheduler skips pinned node ids, and the
+    art phase bodies skip pinned assets (status alone never gates a phase
+    body, so the guards live at both layers)."""
+    metadata = getattr(bible, "metadata", None)
+    return set(getattr(metadata, "pinned", None) or ())
+
+
+def pinnable_ids(bible: Any) -> set[str]:
+    """What `canon pin` accepts: the hash-tracked, file-backed ART
+    artifacts (tileset/enemy/backdrop/player). Level STEPS are excluded
+    even though they're hash-tracked: a pinned step under a regenerating
+    parent leaves the Bible claiming content its skipped node never
+    restored (the collision step rebuilds the whole Level entity) —
+    protecting level layers is USER_EDITED's job, not pin's."""
+    return {
+        aid
+        for aid, _rel, _stored, _owner, _attr in _iter_hashed_files(bible)
+        if not aid.startswith("level:")
+    }
 
 
 def _iter_hashed_files(bible: Any):
@@ -365,6 +414,44 @@ def _iter_hashed_files(bible: Any):
                 "tilesheet_hash",
             )
 
+    for enemy in getattr(bible, "enemy_definitions", {}).values():
+        if enemy.sprite_path and enemy.sprite_hash:
+            yield (
+                enemy.artifact_id or f"enemy:{enemy.enemy_id}",
+                enemy.sprite_path,
+                enemy.sprite_hash,
+                enemy,
+                "sprite_hash",
+            )
+
+    for backdrop in getattr(bible, "backdrops", {}).values():
+        aid = backdrop.artifact_id or f"backdrop:{backdrop.stage_id}"
+        for rel in backdrop.band_paths:
+            stored = backdrop.band_hashes.get(rel)
+            if stored:
+                # Dict-keyed hash field: "band_hashes:<path>" tells the
+                # adopt step which entry to re-stamp (multi-file artifact).
+                yield aid, rel, stored, backdrop, f"band_hashes:{rel}"
+
+    for audio in getattr(bible, "audio", {}).values():
+        aid = audio.artifact_id or f"audio:{audio.stage_id}"
+        if audio.music_path and audio.music_hash:
+            yield aid, audio.music_path, audio.music_hash, audio, "music_hash"
+        for rel in audio.sfx_paths.values():
+            stored = audio.sfx_hashes.get(rel)
+            if stored:
+                yield aid, rel, stored, audio, f"sfx_hashes:{rel}"
+
+    player = getattr(bible, "player", None)
+    if player is not None and player.sprite_path and player.sprite_hash:
+        yield (
+            player.artifact_id or "player",
+            player.sprite_path,
+            player.sprite_hash,
+            player,
+            "sprite_hash",
+        )
+
 
 def _dependency_edges(bible: Any) -> dict[str, set[str]]:
     """artifact_id -> parent artifact_ids, from entity ``parents`` and
@@ -376,10 +463,15 @@ def _dependency_edges(bible: Any) -> dict[str, set[str]]:
         *getattr(bible, "enemy_definitions", {}).values(),
         *getattr(bible, "boss_definitions", {}).values(),
         *getattr(bible, "tilesets", {}).values(),
+        *getattr(bible, "backdrops", {}).values(),
+        *getattr(bible, "audio", {}).values(),
     ]
     world = getattr(bible, "world", None)
     if world is not None:
         entities.append(world)
+    player = getattr(bible, "player", None)
+    if player is not None:
+        entities.append(player)
     for entity in entities:
         aid = getattr(entity, "artifact_id", "")
         parents = list(getattr(entity, "parents", []) or [])
@@ -394,15 +486,18 @@ def _dependency_edges(bible: Any) -> dict[str, set[str]]:
 @dataclass
 class RegenPlan:
     """What a regen request resolved to — marked ids re-run on the next
-    orchestration; user-edited descendants are protected (§6.3)."""
+    orchestration; user-edited descendants are protected (§6.3); pinned
+    artifacts halt the cascade entirely."""
 
     marked: list[str] = field(default_factory=list)
     kept_user_edited: list[str] = field(default_factory=list)
+    kept_pinned: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "marked": self.marked,
             "kept_user_edited": self.kept_user_edited,
+            "kept_pinned": self.kept_pinned,
         }
 
 
@@ -417,10 +512,14 @@ def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
     addressable. EXPLICIT targets always mark (asking to regen a
     user-edited artifact discards the edit — deliberate); CASCADED
     descendants keep user_edited status (edits are never destroyed as a
-    side effect)."""
+    side effect). PINNED artifacts are stronger: an explicit pinned
+    target is an error (unpin first — pin exists to protect paid art
+    from exactly this), and the cascade HALTS at a pin (its content
+    won't change, so nothing goes stale downstream because of it)."""
     if not isinstance(getattr(bible, "metadata", None), BibleMetadata):
         bible.metadata = BibleMetadata()
     metadata = bible.metadata
+    pinned = pinned_ids(bible)
     edges = _dependency_edges(bible)
     known: set[str] = set(metadata.node_status)
     for child, parents in edges.items():
@@ -443,6 +542,14 @@ def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
                 f"({sorted(getattr(bible, 'levels', {}))}) or an "
                 "artifact/node id from `canon status`."
             )
+    explicit_pinned = sorted(set(explicit) & pinned)
+    if explicit_pinned:
+        # Before any mutation, like the unknown-target error above.
+        raise KeyError(
+            f"regen target(s) {explicit_pinned} are PINNED — pinned "
+            "content is deliberately protected; `canon unpin` first if "
+            "you really want to re-roll it."
+        )
 
     children: dict[str, set[str]] = {}
     for child, parents in edges.items():
@@ -457,6 +564,12 @@ def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
             continue
         seen.add(current)
         is_explicit = current in explicit
+        if not is_explicit and current in pinned:
+            # Pin halts the cascade: the pinned content won't change, so
+            # its descendants can't be invalidated through this path
+            # (multi-parent children stay reachable via other paths).
+            plan.kept_pinned.append(current)
+            continue
         if (
             not is_explicit
             and metadata.node_status.get(current) == ArtifactStatus.USER_EDITED
@@ -469,6 +582,7 @@ def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
         queue.extend(children.get(current, ()))
     plan.marked.sort()
     plan.kept_user_edited.sort()
+    plan.kept_pinned.sort()
     if plan.marked:
         logger.info(
             "Regen: %d node(s) marked stale (%d user-edited kept): %s",
@@ -492,17 +606,32 @@ def detect_edits(bible: Any, output_dir: str | Path) -> EditReport:
     output_dir = Path(output_dir)
     report = EditReport()
     owners: dict[str, Any] = {}
+    pinned = pinned_ids(bible)
 
     for artifact_id, rel, stored, owner, hash_attr in _iter_hashed_files(bible):
         owners[artifact_id] = owner
         target = output_dir / rel
         if not target.exists():
-            report.missing.append(artifact_id)
+            # Multi-file artifacts (backdrop bands) yield one row per file
+            # under the same id — report the id once.
+            if artifact_id not in report.missing:
+                report.missing.append(artifact_id)
             continue
         actual = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
         if actual != stored:
-            report.user_edited.append(artifact_id)
-            setattr(owner, hash_attr, actual)  # adopt: edit is authoritative
+            if artifact_id not in report.user_edited:
+                report.user_edited.append(artifact_id)
+                if artifact_id in pinned:
+                    # The pin survives — the hand edit is adopted like any
+                    # other, but reported separately so it's loud.
+                    report.pinned_edited.append(artifact_id)
+            # Adopt: the edit is authoritative. "field:key" addresses one
+            # entry of a dict-keyed hash field (multi-file artifacts).
+            if ":" in hash_attr:
+                field_name, key = hash_attr.split(":", 1)
+                getattr(owner, field_name)[key] = actual
+            else:
+                setattr(owner, hash_attr, actual)
 
     if report.user_edited:
         edges = _dependency_edges(bible)
@@ -516,6 +645,11 @@ def detect_edits(bible: Any, output_dir: str | Path) -> EditReport:
         while queue:
             current = queue.popleft()
             for child in children.get(current, ()):
+                if child in pinned:
+                    # Cascade halts at a pin, same as mark_stale: the
+                    # pinned content won't be regenerated, so nothing
+                    # downstream goes stale through it.
+                    continue
                 if child not in stale and child not in report.user_edited:
                     stale.add(child)
                     queue.append(child)

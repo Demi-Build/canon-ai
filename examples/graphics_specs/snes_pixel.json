@@ -1,0 +1,9 @@
+{
+  "tile_px": 16,
+  "art_style": "16-bit SNES-era pixel art, limited palette, chunky dithering, bold dark outlines",
+  "render_filter": "crisp",
+  "gen_px": 512,
+  "posterize_levels": 12,
+  "view_cells": 20,
+  "actor_scale": 1.4
+}
