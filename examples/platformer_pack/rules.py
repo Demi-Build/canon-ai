@@ -35,6 +35,13 @@ v1 enforced policies:
 - ``variant_caps`` (3b): per-level at-most-N caps per enemy-variant name
   (variants.json vocabulary). Enforced at placement validation and offered
   in the placement prompt. A variant name absent from this map is uncapped.
+- ``checkpoint_enemy_reset`` (combat v1): killed enemies come back (alive,
+  at their placement) when the player dies and respawns at a checkpoint.
+  Enforced in both play surfaces' respawn paths.
+- ``spawn_grace`` (combat v1): "until_move" — after level start or a
+  respawn the player takes no damage and blinks, and chaser-archetype
+  enemies hold still, until the player's first movement input; "off" —
+  no grace. Enforced in both play surfaces (damage gate + chaser AI gate).
 """
 
 from __future__ import annotations
@@ -58,6 +65,8 @@ class GameRules(BaseModel):
     )
     platform_drop_through: bool = True
     variant_caps: dict[str, int] = {"elite": 1, "champion": 1}
+    checkpoint_enemy_reset: bool = True
+    spawn_grace: Literal["until_move", "off"] = "until_move"
 
 
 def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:

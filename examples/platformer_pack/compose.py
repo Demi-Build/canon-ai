@@ -19,6 +19,7 @@ from examples.platformer_pack.art_phases import (
     SpriteArtPhase,
     TilesetArtPhase,
 )
+from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.layers import BackgroundPhase, TileAssignmentPhase
 from examples.platformer_pack.level import (
@@ -85,12 +86,14 @@ class SliceManifestPhase:
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        combat: CombatSpec = DEFAULT_COMBAT,
     ) -> None:
         self.movement = movement
         self.rules = rules
         self.tiles = tiles
         self.variants = variants
         self.graphics = graphics
+        self.combat = combat
 
     def run(self, ctx: Any) -> None:
         stage_id = ctx.artifacts["stage_id"]
@@ -110,6 +113,11 @@ class SliceManifestPhase:
             # carriage. Tile params also ride on tileset slots; the
             # registry here is the reviewer-facing copy.
             "rules": self.rules.model_dump(),
+            # Combat tuning (combat v1) — numbers only; combat POLICY
+            # toggles live in rules. Same one-source contract: the
+            # placement validator enforced these, the play surfaces obey
+            # them.
+            "combat": self.combat.model_dump(),
             "tiles": [t.model_dump(mode="json") for t in self.tiles.tiles],
             # The palette the tilesheet was actually painted with (style
             # agent output, or placeholder fallback) — from the Tileset
@@ -161,6 +169,7 @@ def compose_pipeline(
     graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     music_producer: Any = None,
     sfx_producer: Any = None,
+    combat: CombatSpec = DEFAULT_COMBAT,
 ) -> list:
     # Order enforces invariant I5: collision before every other layer;
     # hazards (stamped with collision) before entities; decoration last.
@@ -179,7 +188,7 @@ def compose_pipeline(
         ),
         TileAssignmentPhase(),
         BackgroundPhase(),
-        PlacementPhase(rules=rules, tiles=tiles, variants=variants),
+        PlacementPhase(rules=rules, tiles=tiles, variants=variants, combat=combat),
         DecoratorPhase(),
         # Art AT THE END (user rule): paid generation only after every
         # gameplay layer above validated; renders below see final art.
@@ -187,10 +196,10 @@ def compose_pipeline(
         SpriteArtPhase(producer=image_producer, graphics=graphics),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
-        RenderPhase(variants=variants),
+        RenderPhase(variants=variants, graphics=graphics),
         SliceManifestPhase(
             movement=movement, rules=rules, tiles=tiles, variants=variants,
-            graphics=graphics,
+            graphics=graphics, combat=combat,
         ),
     ]
     if engine == "godot":

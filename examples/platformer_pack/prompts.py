@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 
 from canon.llm.request import LLMRequest
+from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.effects import describe_vocabulary as _effects_vocabulary
 from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
@@ -228,6 +229,7 @@ class PlatformerPrompts:
         ops = [
             "floor(x1,x2)", "gap(x1,x2)", "pit(x1,x2)", "platform(x,y,len)",
             "ledge(x1,x2,y)", "wall(x,y1,y2)", "carve(x1,y1,x2,y2)",
+            "stairs_up(x1,x2)", "stairs_down(x1,x2)", "pyramid(x1,x2)",
             "checkpoint(x)", "spawn(x)", "exit(x)",
         ]
         if hazards:
@@ -245,6 +247,10 @@ class PlatformerPrompts:
             "Tiers: stack 2-3 ledge(...) strips of DIFFERENT lengths, "
             "3-4 rows apart, offset horizontally — multi-level structures "
             "the player climbs through beat single flat runs.",
+            "Stepped slopes: stairs_up(x1,x2) climbs one block per column "
+            "(stairs_down descends, pyramid(x1,x2) rises then falls) — "
+            "stamped ON existing ground floor; every step is a jumpable "
+            "1-riser. Use them to ramp up to ledges or break up flat runs.",
         ]
         if volumes:
             vocab_lines.append(
@@ -332,6 +338,7 @@ class PlatformerPrompts:
         volume_summary: str = "none",
         variants: VariantSet = DEFAULT_VARIANTS,
         rules: GameRules = DEFAULT_RULES,
+        combat: CombatSpec = DEFAULT_COMBAT,
         previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
@@ -370,7 +377,8 @@ class PlatformerPrompts:
                 "### TASK: placement\n"
                 f"### LEVEL: {level_id}\n"
                 f"Brief: {brief}\n"
-                f"Enemy roster (id, archetype, behavior): {json.dumps(roster)}\n"
+                f"Enemy roster (id, archetype, size, behavior): "
+                f"{json.dumps(roster)}\n"
                 f"Standable cells (x, y are grid coords, y from top): "
                 f"{standable_summary}\n"
                 f"Volume cells by tile (swimmers ONLY go here): {volume_summary}\n"
@@ -379,8 +387,13 @@ class PlatformerPrompts:
                 "them out; put slower enemies on patrol routes and ranged/"
                 "sentry types guarding key jumps. Swimmer-archetype enemies "
                 "MUST be placed in volume cells; every other archetype MUST "
-                "be on standable land. Keep every enemy at least 4 columns "
-                f"away from the player spawn. {variant_offer}"
+                "be on standable land. Sizes are in cells: a size-2.0 body "
+                "occupies TWO columns (x and x+1 both standable) and two "
+                "rows of clearance; size 1.5 needs one column but two rows "
+                "of headroom — put big enemies on wide open ground. Keep "
+                f"every enemy at least {combat.spawn_safety_columns + 1} "
+                "columns away from the player spawn. "
+                f"{variant_offer}"
                 "Return a JSON object:\n"
                 '{"placements": [{"enemy_id": str, "x": int, "y": int, '
                 '"variant": str (optional)}, ...]}'

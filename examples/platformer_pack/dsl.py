@@ -12,6 +12,12 @@ Grammar (one op per line or semicolon-separated)::
     platform(x, y, len)  one-way platform at row y, cols x..x+len-1
     ledge(x1, x2, y)     solid floor segment at arbitrary row y (a tier)
     wall(x, y1, y2)      solid wall column
+    stairs_up(x1, x2)    stepped slope on the ground: column x1 is one
+                         solid block tall, each column one taller (slopes
+                         v1 — stacked flat solids, 1-riser jumpable steps;
+                         NO new collision category)
+    stairs_down(x1, x2)  the mirror: tallest at x1, descending right
+    pyramid(x1, x2)      rises to the middle, falls after — a stepped hill
     checkpoint(x)        mid-level respawn point, standing on ground (3b)
     spawn(x)             player start, standing on ground at column x
     exit(x)              level exit, standing on ground at column x
@@ -35,6 +41,17 @@ it is ``H-3``. Ops apply in order; later ops overwrite earlier cells. The
 parser is strict: unknown ops, bad arity, or bad args raise ``DslError``
 naming the offending line — the retry-with-feedback loop turns that into
 LLM feedback.
+
+Point MARKERS (spawn/checkpoint/exit) are validated against the FINAL
+grid, like the hazard records: a marker declared before the floor it
+stands on is fine as long as the finished level supports it (a real
+model burned two of three l3 attempts on ``spawn(2)`` written one line
+above ``floor(0,63)``). All marker problems are reported together on
+``DslError.problems`` — one attempt surfaces every marker failure, not
+just the first. A ``volume`` poured ON the ground floor row is snapped
+one row up in code when the span above is open (the validator message
+already computed that fix; computable fixes are tool work, not LLM
+round-trips) and recorded on ``StampResult.repairs``.
 """
 
 from __future__ import annotations
@@ -58,6 +75,9 @@ _SIGNATURES: dict[str, str] = {
     "platform": "iii",
     "ledge": "iii",
     "wall": "iii",
+    "stairs_up": "ii",
+    "stairs_down": "ii",
+    "pyramid": "ii",
     "spike": "ii",
     "carve": "iiii",
     "water": "iii",
@@ -71,7 +91,16 @@ _SIGNATURES: dict[str, str] = {
 
 
 class DslError(ValueError):
-    """A DSL string failed to parse or stamp. Message names the line."""
+    """A DSL string failed to parse or stamp. Message names the line.
+
+    ``problems`` carries the individual problem strings when several are
+    found in one pass (final-grid marker checks) — retry feedback can
+    then list them all instead of serializing discovery across attempts.
+    """
+
+    def __init__(self, message: str, problems: list[str] | None = None):
+        super().__init__(message)
+        self.problems: list[str] = problems or [message]
 
 
 @dataclass
@@ -83,6 +112,9 @@ class StampResult:
     exit: tuple[int, int] | None = None
     hazards: list[SparseMaskEntry] = field(default_factory=list)
     triggers: list[SparseMaskEntry] = field(default_factory=list)
+    #: Deterministic in-code repairs applied during the stamp (volume
+    #: surface snapped off the ground row, ...) — loud, for the log.
+    repairs: list[str] = field(default_factory=list)
 
 
 def parse_dsl(text: str) -> list[tuple[str, list]]:
@@ -214,6 +246,47 @@ def stamp(
             raise DslError(
                 f"{op}: surface row {y_surface} outside 1..{height - 2}."
             )
+        # Pour aimed AT the ground floor row over solid floor: the fix is
+        # arithmetic (the old error message literally computed it — "use
+        # surface row N-1"), so when the row above is open air the tool
+        # applies it instead of burning an LLM attempt. When that row is
+        # blocked, following the old recipe would ALSO have failed (the
+        # third real l3 run poured 24-30 under its own spike strip at
+        # 28-30) — so the error names the located conflict instead of
+        # reciting a recipe that cannot work. Mixed floor/gap spans fall
+        # through to the basin checks below.
+        if y_surface == ground_row and all(
+            int(grid[y_surface, x]) == floor_id for x in range(x1, x2 + 1)
+        ):
+            blockers = [
+                x
+                for x in range(x1, x2 + 1)
+                if int(grid[y_surface - 1, x]) != empty_id
+            ]
+            if not blockers:
+                y_surface -= 1
+                result.repairs.append(
+                    f"{op}({tile.name},{x1},{x2},{y_surface + 1}): surface "
+                    f"was the ground floor row — snapped to open row "
+                    f"{y_surface}; the pool now sits on top of the floor."
+                )
+            else:
+                named: dict[str, list[int]] = {}
+                for x in blockers:
+                    occupant = tiles.by_id.get(int(grid[y_surface - 1, x]))
+                    occ = occupant.name if occupant else "?"
+                    named.setdefault(occ, []).append(x)
+                where = "; ".join(
+                    f"{occ} at column(s) {', '.join(map(str, xs))}"
+                    for occ, xs in named.items()
+                )
+                raise DslError(
+                    f"{op}: row {y_surface} IS the ground floor row — "
+                    f"pools sit ON TOP of the floor, at surface row "
+                    f"{y_surface - 1} — but that row is not open air over "
+                    f"columns {x1}-{x2}: {where}. Move the pool span or "
+                    "clear those cells; they cannot share the surface."
+                )
         for x in range(x1, x2 + 1):
             # Fill EMPTY cells from the surface down until solid ground.
             # A volume over a gap/pit would drain — demand a basin.
@@ -264,9 +337,9 @@ def stamp(
                 )
 
     def _floor_ranges() -> str:
-        """Compact 'a-b, c, d-e' of ground-floor columns at this point in
-        the stamp — markers failing blind sent a real model probing
-        columns 2, 3, 4... into fallback; tell it where floor IS."""
+        """Compact 'a-b, c, d-e' of ground-floor columns — markers
+        failing blind sent a real model probing columns 2, 3, 4... into
+        fallback; tell it where floor IS."""
         xs = [x for x in range(width) if int(grid[ground_row, x]) == floor_id]
         if not xs:
             return ""
@@ -278,22 +351,27 @@ def stamp(
                     start = cur
         return ", ".join(ranges)
 
-    def _standing_marker(name: str, x: int) -> tuple[int, int]:
-        _check_x(name, x)
-        if grid[ground_row, x] != floor_id:
-            ranges = _floor_ranges()
-            where = (
-                f"ground floor currently exists at columns {ranges} — "
-                f"put {name}() on one of those, or lay floor under "
-                f"column {x} first"
-                if ranges
-                else f"no ground floor exists yet — start with "
-                f"floor(0,{width - 1}) and carve"
-            )
-            raise DslError(
-                f"{name}: column {x} has no floor under it — {where}."
-            )
-        return (x, standing_row)
+    def _marker_problem(name: str, x: int) -> str | None:
+        """Floor-support problem for a point marker, against the FINAL
+        grid (markers are order-independent; the l3 real run burned two
+        attempts on spawn declared one line above its floor)."""
+        if grid[ground_row, x] == floor_id:
+            return None
+        ranges = _floor_ranges()
+        where = (
+            f"ground floor exists at columns {ranges} — "
+            f"put {name}() on one of those, or lay floor under "
+            f"column {x} first"
+            if ranges
+            else f"no ground floor exists yet — start with "
+            f"floor(0,{width - 1}) and carve"
+        )
+        return f"{name}: column {x} has no floor under it — {where}."
+
+    # Point markers record columns during the op walk and validate at the
+    # end, against the FINAL grid (only duplicates are op-order facts).
+    spawn_col: int | None = None
+    checkpoint_cols: list[int] = []
 
     for name, args in ops:
         if name == "floor":
@@ -349,6 +427,34 @@ def stamp(
             if y1 > y2:
                 y1, y2 = y2, y1
             grid[max(y1, 0) : min(y2, height - 1) + 1, x] = wall_id
+        elif name in ("stairs_up", "stairs_down", "pyramid"):
+            # Slopes v1: STEPPED slopes — stacked flat solids on the
+            # ground, one riser per column (jumpable with the existing
+            # physics; smooth slopes are a v2+ collision category).
+            x1, x2 = args
+            if x1 > x2:
+                x1, x2 = x2, x1
+            _check_x(name, x1, x2)
+            span = x2 - x1 + 1
+            # Keep at least two air rows above the tallest stack so a
+            # slope can never seal the level shut.
+            h_cap = max(1, ground_row - 2)
+            for i in range(span):
+                if name == "stairs_up":
+                    h = i + 1
+                elif name == "stairs_down":
+                    h = span - i
+                else:  # pyramid: rise to the middle, fall after
+                    h = min(i, span - 1 - i) + 1
+                h = min(h, h_cap)
+                x = x1 + i
+                if grid[ground_row, x] != floor_id:
+                    raise DslError(
+                        f"{name}: column {x} has no ground floor under "
+                        f"it — steps stack ON the ground; lay "
+                        f"floor({x1},{x2}) first or move the slope."
+                    )
+                grid[ground_row - h : ground_row, x] = floor_id
         elif name == "volume":
             tile_name, x1, x2, y_surface = args
             tile = _resolve(tiles, name, tile_name, "volume")
@@ -395,24 +501,19 @@ def stamp(
             _stamp_hazard_strip(name, tile, x1, x2)
         elif name == "checkpoint":
             (x,) = args
-            marker = _standing_marker(name, x)
-            if any(
-                t.x == marker[0] and t.type == "checkpoint"
-                for t in result.triggers
-            ):
+            _check_x(name, x)
+            if x in checkpoint_cols:
                 raise DslError(
                     f"checkpoint: column {x} declared more than once."
                 )
-            result.triggers.append(
-                SparseMaskEntry(x=marker[0], y=marker[1], type="checkpoint")
-            )
+            checkpoint_cols.append(x)
         elif name in ("spawn", "exit"):
             (x,) = args
             if name == "spawn":
-                marker = _standing_marker(name, x)
-                if result.spawn is not None:
+                _check_x(name, x)
+                if spawn_col is not None:
                     raise DslError("spawn: declared more than once.")
-                result.spawn = marker
+                spawn_col = x
             else:
                 # exit(x)'s x is ADVISORY: the exit relocates to the
                 # rightmost floored column after all ops (below) — levels
@@ -423,37 +524,58 @@ def stamp(
                 _check_x(name, x)
                 result.exit = (x, standing_row)
 
-    if result.spawn is None:
-        raise DslError("missing spawn(x) — every level needs exactly one.")
-    if result.exit is None:
-        raise DslError("missing exit(x) — every level needs exactly one.")
+    # ---- Final-grid post-pass: records mirror the FINISHED level. ----
+    # All problems found here report TOGETHER (DslError.problems) — the
+    # l3 real run serialized discovery one error per attempt into
+    # fallback: fix the spawn complaint, die on the volume one it hid.
+    problems: list[str] = []
+    if spawn_col is None:
+        problems.append("missing spawn(x) — every level needs exactly one.")
+    elif (issue := _marker_problem("spawn", spawn_col)) is not None:
+        problems.append(issue)
+    for x in checkpoint_cols:
+        if (issue := _marker_problem("checkpoint", x)) is not None:
+            problems.append(issue)
     # Ops apply in order and a later carve can clear a stamped hazard
     # strip — records must mirror the FINAL grid, not the op history.
     hazard_ids = {t.id for t in hazard_tiles}
     result.hazards = [
         h for h in result.hazards if int(grid[h.y, h.x]) in hazard_ids
     ]
-    # Relocate the exit to the rightmost column with ground floor and an
-    # open standing cell — consumers treat that whole COLUMN, bottom to
-    # top, as the exit zone (no exit graphic; you leave to the right).
-    exit_x = next(
-        (
-            x
-            for x in range(width - 1, -1, -1)
-            if grid[ground_row, x] == floor_id and grid[standing_row, x] == 0
-        ),
-        None,
-    )
-    if exit_x is None:
-        ranges = _floor_ranges()
-        raise DslError(
-            "exit: no column has open ground floor to exit onto — "
-            + (
-                f"floor exists at columns {ranges} but every standing "
-                "cell is occupied; clear one near the right edge."
-                if ranges
-                else f"start with floor(0,{width - 1}) and carve."
-            )
+    if result.exit is None:
+        problems.append("missing exit(x) — every level needs exactly one.")
+    else:
+        # Relocate the exit to the rightmost column with ground floor and
+        # an open standing cell — consumers treat that whole COLUMN,
+        # bottom to top, as the exit zone (no exit graphic; you leave to
+        # the right).
+        exit_x = next(
+            (
+                x
+                for x in range(width - 1, -1, -1)
+                if grid[ground_row, x] == floor_id
+                and grid[standing_row, x] == 0
+            ),
+            None,
         )
-    result.exit = (exit_x, standing_row)
+        if exit_x is None:
+            ranges = _floor_ranges()
+            problems.append(
+                "exit: no column has open ground floor to exit onto — "
+                + (
+                    f"floor exists at columns {ranges} but every standing "
+                    "cell is occupied; clear one near the right edge."
+                    if ranges
+                    else f"start with floor(0,{width - 1}) and carve."
+                )
+            )
+        else:
+            result.exit = (exit_x, standing_row)
+    if problems:
+        raise DslError(" ".join(problems), problems)
+    result.spawn = (spawn_col, standing_row)
+    result.triggers.extend(
+        SparseMaskEntry(x=x, y=standing_row, type="checkpoint")
+        for x in checkpoint_cols
+    )
     return result

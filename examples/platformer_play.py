@@ -11,9 +11,15 @@ lives. Do not polish it.
         python examples/platformer_play.py <data_dir> [level_id]
 
 Controls: arrows/A-D move, space/up jumps or swims, R respawns, Esc quits.
-Touch a hazard or fall off: respawn (at the last checkpoint you crossed).
-Linger in a damaging volume (lava): respawn. Reach the green exit: level
-complete.
+Combat v1: integer HEARTS (manifest "combat" block) — enemy contact costs
+stats.damage x variant mults, hazard tiles cost their params.damage,
+damaging volumes drain hearts continuously; land on an enemy's head to
+stomp it (hp x mults / stomp_damage stomps) and bounce. Zero hearts:
+respawn at the last checkpoint, hearts refilled, killed enemies restored
+(GameRules.checkpoint_enemy_reset). After any (re)spawn you blink,
+untouchable, and chasers hold still until your first move
+(GameRules.spawn_grace). Fall off: same respawn. Reach the exit column:
+level complete.
 """
 
 from __future__ import annotations
@@ -24,9 +30,6 @@ from pathlib import Path
 
 SCALE = 32
 FPS = 60
-#: Damage a player can soak in a damaging volume before respawning —
-#: crude stand-in for HP so lava reads "quick dips only" (throwaway).
-DAMAGE_BUDGET = 3.0
 
 
 def _load(data_dir: Path, level_id: str):
@@ -97,13 +100,26 @@ def main() -> None:
 
     BLOCKING = _types_with("solid")
     ONE_WAY = _types_with("one_way")
-    HAZARD = _types_with("hazard")
+    #: tile id → hazard params ("damage" in hearts, default 1)
+    HAZARDS = {
+        int(s["tile_type"]): dict(s.get("params") or {})
+        for s in tileset["slots"]
+        if s.get("collision") == "hazard"
+    }
     #: tile id → volume params (speed_factor/gravity/impulse/damage_per_second)
     VOLUMES = {
         int(s["tile_type"]): dict(s.get("params") or {})
         for s in tileset["slots"]
         if s.get("collision") == "volume"
     }
+
+    # Combat tuning from the manifest (combat.json → "combat" block);
+    # defaults mirror examples/platformer_pack/combat.py.
+    combat = manifest.get("combat", {})
+    MAX_HEARTS = int(combat.get("player_max_hearts", 3))
+    STOMP_DAMAGE = int(combat.get("stomp_damage", 6))
+    STOMP_BOUNCE = float(combat.get("stomp_bounce_factor", 0.7))
+    IFRAMES_S = float(combat.get("hurt_iframes_s", 1.0))
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
@@ -123,6 +139,8 @@ def main() -> None:
     rules = manifest.get("rules", {})
     water_policy = rules.get("enemy_water_policy", "swimmers_only")
     drop_through = bool(rules.get("platform_drop_through", True))
+    enemy_reset = bool(rules.get("checkpoint_enemy_reset", True))
+    spawn_grace = str(rules.get("spawn_grace", "until_move")) == "until_move"
     #: Variant vocabulary from the manifest — consumers never hardcode
     #: what "elite" or "champion" means.
     variant_defs = {v["name"]: v for v in manifest.get("variants", [])}
@@ -137,7 +155,28 @@ def main() -> None:
             self.variant = variant_defs.get(str(placement.get("variant", "")))
             speed_mult = self.variant.get("speed_mult", 1.0) if self.variant else 1.0
             self.speed = float(self.spec["stats"].get("speed", 0)) * speed_mult
-            self.size = float(self.variant.get("size", 1.0)) if self.variant else 1.0
+            # EFFECTIVE size everywhere: definition.size x variant.size
+            # (combat.py contract). The body grows UP from its anchor
+            # cell: feet at y+1, top at y+1-size.
+            self.size = float(self.spec.get("size", 1.0)) * (
+                float(self.variant.get("size", 1.0)) if self.variant else 1.0
+            )
+            # Dead stats live: hp x mults soaked by stomps, damage x
+            # mults dealt in hearts (combat.py arithmetic, mirrored).
+            mults = self.variant.get("stat_mults", {}) if self.variant else {}
+            self.max_hp = float(self.spec["stats"].get("hp", 1)) * float(
+                mults.get("hp", 1.0)
+            )
+            self.hp = self.max_hp
+            self.damage_hearts = max(
+                1,
+                round(
+                    float(self.spec["stats"].get("damage", 1))
+                    * float(mults.get("damage", 1.0))
+                ),
+            )
+            self.alive = True
+            self.hurt_t = 0.0  # white flash after a surviving stomp
             visual = self.variant.get("visual", "outline") if self.variant else ""
             self.outlined = "outline" in visual
             self.color = hex_rgb(self.spec["stats"].get("placeholder_color", "#ff00ff"))
@@ -145,6 +184,21 @@ def main() -> None:
             if self.variant:
                 behavior.update(self.variant.get("behavior", {}))
             self.behavior = behavior
+
+        def reset(self) -> None:
+            """Checkpoint-respawn restore: killed enemies return, at
+            their placement, full hp (GameRules.checkpoint_enemy_reset)."""
+            self.x, self.direction = self.home, 1.0
+            self.hp, self.alive, self.hurt_t = self.max_hp, True, 0.0
+
+        def stomp(self) -> bool:
+            """One stomp of damage; True if it killed."""
+            self.hp -= STOMP_DAMAGE
+            if self.hp <= 0:
+                self.alive = False
+                return True
+            self.hurt_t = 0.25
+            return False
 
         def _can_occupy(self, x: float) -> bool:
             """Terrain constraint for the NEXT step (GameRules-aware):
@@ -158,8 +212,9 @@ def main() -> None:
                 return False
             return below in BLOCKING or below in ONE_WAY  # no cliff-walking
 
-        def update(self, dt: float, player_x: float) -> None:
+        def update(self, dt: float, player_x: float, grace: bool) -> None:
             archetype = self.spec.get("archetype", "sentry")
+            self.hurt_t = max(0.0, self.hurt_t - dt)
             if archetype in ("patroller", "swimmer") and self.speed > 0:
                 new_x = self.x + self.direction * self.speed * dt
                 if (
@@ -170,6 +225,10 @@ def main() -> None:
                 else:
                     self.x = new_x
             elif archetype == "chaser" and self.speed > 0:
+                # Spawn grace (GameRules.spawn_grace): chasers hold still
+                # until the player's first move after a (re)spawn.
+                if grace:
+                    return
                 if abs(player_x - self.x) <= self.behavior.get("aggro_range", 6):
                     new_x = self.x + (1.0 if player_x > self.x else -1.0) * self.speed * dt
                     if self._can_occupy(new_x):  # halts at volume/cliff edges
@@ -267,7 +326,11 @@ def main() -> None:
     vy = 0.0
     on_ground = False
     won = False
-    damage_soaked = 0.0
+    hearts = MAX_HEARTS
+    iframes = 0.0  # post-hit invulnerability countdown
+    damage_soaked = 0.0  # fractional volume drain toward the next heart
+    moved = False  # first input after (re)spawn ends the spawn grace
+    blink_t = 0.0  # deterministic blink clock (grace + i-frames)
     live_enemies = [Enemy(p) for p in placements]
 
     def tile_at(cx: float, cy: float) -> int:
@@ -306,10 +369,42 @@ def main() -> None:
         return None
 
     def respawn() -> None:
-        nonlocal px, py, vy, damage_soaked
+        nonlocal px, py, vy, damage_soaked, hearts, iframes, moved
         px, py = float(respawn_point["x"]), float(respawn_point["y"])
         vy, damage_soaked = 0.0, 0.0
+        hearts, iframes, moved = MAX_HEARTS, 0.0, False
+        if enemy_reset:
+            # Killed enemies come back on a checkpoint respawn — dying
+            # never leaves a half-cleared level (GameRules kind).
+            for other in live_enemies:
+                other.reset()
         play_sfx("death")
+
+    def hurt(cost: int) -> None:
+        """One heart pool for contact and hazard hits — spawn grace and
+        i-frames gate them (volume drain has its own path below)."""
+        nonlocal hearts, iframes
+        if iframes > 0.0 or (spawn_grace and not moved):
+            return
+        hearts -= max(1, int(cost))
+        iframes = IFRAMES_S
+        if hearts <= 0:
+            respawn()
+
+    def drain(amount: float) -> None:
+        """Continuous volume damage: accumulate fractions, convert each
+        whole point into one heart — ignores i-frames (lava keeps
+        hurting) but respects spawn grace."""
+        nonlocal damage_soaked, hearts
+        if spawn_grace and not moved:
+            return
+        damage_soaked += amount
+        while damage_soaked >= 1.0:
+            damage_soaked -= 1.0
+            hearts -= 1
+            if hearts <= 0:
+                respawn()
+                return
 
     run_speed = float(movement["run_speed"])
     gravity = float(movement["gravity"])
@@ -332,6 +427,7 @@ def main() -> None:
                     respawn()
                     won = False
                 elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
+                    moved = True  # a jump ends the spawn grace
                     down_held = (
                         pygame.key.get_pressed()[pygame.K_DOWN]
                         or pygame.key.get_pressed()[pygame.K_s]
@@ -359,6 +455,11 @@ def main() -> None:
         dx = (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
+        if dx:
+            moved = True  # walking ends the spawn grace
+        grace = spawn_grace and not moved
+        iframes = max(0.0, iframes - dt)
+        blink_t += dt
         speed = run_speed * (
             float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
         )
@@ -381,23 +482,46 @@ def main() -> None:
         else:
             py, on_ground = new_y, False
 
-        # Damaging volumes (swimmable lava): drain a small damage budget,
-        # then respawn — reset when back on safe ground.
+        # Damaging volumes (swimmable lava): drain hearts continuously —
+        # every accumulated point costs one heart; the fraction resets on
+        # safe ground. (The old DAMAGE_BUDGET stand-in is gone: one heart
+        # pool for everything.)
         if volume is not None:
-            damage_soaked += float(volume.get("damage_per_second", 0.0)) * dt
-            if damage_soaked >= DAMAGE_BUDGET:
-                respawn()
+            drain(float(volume.get("damage_per_second", 0.0)) * dt)
         else:
             damage_soaked = 0.0
 
         if py > height + 2:
             respawn()
-        if tile_at(px + BODY_L, py) in HAZARD or tile_at(px + BODY_R, py) in HAZARD:
-            respawn()
+        for corner in (px + BODY_L, px + BODY_R):
+            hazard = HAZARDS.get(tile_at(corner, py))
+            if hazard is not None:
+                hurt(int(hazard.get("damage", 1)))
+                break
         for enemy in live_enemies:
-            enemy.update(dt, px)
-            if abs(enemy.x - px) < 0.7 and abs(enemy.y - py) < 0.7:
-                respawn()
+            enemy.update(dt, px, grace)
+            if not enemy.alive:
+                continue
+            # Size-aware touch AABB: the body is `size` cells square,
+            # bottom-anchored — feet at y+1, top at y+1-size, centered
+            # over its occupied columns (combat.py occupancy).
+            cols = max(1, min(2, int(enemy.size)))
+            e_cx = enemy.x + cols / 2.0
+            e_top = enemy.y + 1.0 - enemy.size
+            e_bottom = enemy.y + 1.0
+            overlap_x = abs((px + 0.5) - e_cx) < 0.35 + enemy.size / 2.0
+            overlap_y = py < e_bottom and py + 1.0 > e_top
+            if not (overlap_x and overlap_y):
+                continue
+            feet = py + 1.0
+            if vy > 0 and feet <= e_top + 0.35:
+                # STOMP: falling onto the head band — damage the enemy,
+                # bounce off it. No i-frames spent; stomping is safe.
+                if enemy.stomp():
+                    play_sfx("jump")  # bounce impulse; no stomp SFX in v1
+                vy = -jump_v * STOMP_BOUNCE
+            else:
+                hurt(enemy.damage_hearts)
         # Crossing a checkpoint moves the respawn point (3b triggers).
         for checkpoint in checkpoints:
             if (
@@ -437,15 +561,24 @@ def main() -> None:
                 0 if checkpoint["active"] else 3,
             )
         for enemy in live_enemies:
-            half_extra = (enemy.size - 1.0) * SCALE / 2.0
+            if not enemy.alive:
+                continue
+            # Bottom-anchored, column-centered: a sized body grows UP
+            # from its anchor cell (matches the touch AABB and the
+            # placement footprint — never into the floor).
+            cols = max(1, min(2, int(enemy.size)))
+            side = (SCALE - 4) * enemy.size
+            center_x = (enemy.x + cols / 2.0) * SCALE
             rect = (
-                enemy.x * SCALE + 2 - half_extra,
-                enemy.y * SCALE + 2 - half_extra,
-                (SCALE - 4) * enemy.size,
-                (SCALE - 4) * enemy.size,
+                center_x - side / 2.0,
+                (enemy.y + 1.0) * SCALE - 2 - side,
+                side,
+                side,
             )
             sprite = enemy_sprites.get(enemy.spec.get("enemy_id", ""))
-            if sprite is not None:
+            if enemy.hurt_t > 0 and int(enemy.hurt_t * 20) % 2 == 0:
+                pygame.draw.rect(screen, (255, 255, 255), rect)  # stomp flash
+            elif sprite is not None:
                 image = sprite
                 if enemy.size != 1.0:
                     image = pygame.transform.smoothscale(
@@ -461,20 +594,24 @@ def main() -> None:
                 pygame.draw.rect(
                     screen, (255, 255, 255),
                     (
-                        enemy.x * SCALE - half_extra,
-                        enemy.y * SCALE - half_extra,
+                        center_x - (SCALE * enemy.size) / 2.0,
+                        (enemy.y + 1.0) * SCALE - SCALE * enemy.size,
                         SCALE * enemy.size,
                         SCALE * enemy.size,
                     ),
                     2,
                 )
-        if player_sprite is not None:
-            screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))
-        else:
-            pygame.draw.rect(
-                screen, (240, 240, 240),
-                (px * SCALE + 4, py * SCALE + 4, SCALE - 8, SCALE - 8),
-            )
+        # Spawn grace / i-frames: the player BLINKS (intermittently
+        # invisible) while untouchable; first move ends the grace.
+        blinking = (grace or iframes > 0) and int(blink_t * 8) % 2 == 0
+        if not blinking:
+            if player_sprite is not None:
+                screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))
+            else:
+                pygame.draw.rect(
+                    screen, (240, 240, 240),
+                    (px * SCALE + 4, py * SCALE + 4, SCALE - 8, SCALE - 8),
+                )
         # Foreground decor — drawn AFTER the player: in front, per §6.2.
         for decor in level.get("foreground", []):
             cx = decor["x"] * SCALE + SCALE // 2
@@ -496,10 +633,17 @@ def main() -> None:
                     screen, effect["color"],
                     (int(dot[0]), int(dot[1])), effect["size"],
                 )
+        # Hearts HUD (screen-space, top-left) — the one damage currency.
+        for i in range(MAX_HEARTS):
+            heart_rect = (16 + i * 24, 10, 18, 18)
+            if i < hearts:
+                pygame.draw.rect(screen, (214, 61, 74), heart_rect)
+            else:
+                pygame.draw.rect(screen, (110, 48, 56), heart_rect, 2)
         if won:
             screen.blit(
                 font.render("LEVEL COMPLETE — R to reset", True, (64, 255, 112)),
-                (16, 12),
+                (16, 36),
             )
         pygame.display.flip()
 

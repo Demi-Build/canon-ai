@@ -219,6 +219,13 @@ class EnemyDefinition(ArtifactMeta):
     enemy_id: str
     name: str = ""
     archetype: str = ""  # closed set via EnemySchema
+    #: Body scale in CELLS — schema-rolled from a discrete set (v4:
+    #: {1.0, 1.5, 2.0}); typed here because placement validation, touch
+    #: boxes, and render scale all read it (combat v1). The EFFECTIVE
+    #: size everywhere is ``definition.size * variant.size`` (the variant
+    #: multiplier rides on the placement). Code tolerates any positive
+    #: float so hand-edited definitions stay loadable.
+    size: float = 1.0
     stats: dict[str, Any] = Field(default_factory=dict)
     behavior: dict[str, Any] = Field(default_factory=dict)
     rig: RigManifest | None = None

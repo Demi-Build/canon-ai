@@ -26,6 +26,7 @@ from canon.pipeline.retry import default_token_escalation, retry_with_feedback
 from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
+from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.dsl import DslError, StampResult, parse_dsl, stamp
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
@@ -138,7 +139,10 @@ def stamp_level_collision(
                 content, width, height, movement, rules=rules, tiles=tiles
             )
         except DslError as exc:
-            return False, [str(exc)]
+            # Final-grid marker checks report every problem at once —
+            # feed them back as separate items, not one blob (the l3
+            # trace showed one-error-per-attempt serializing discovery).
+            return False, list(exc.problems)
         if problems:
             return False, problems
         accepted["dsl"], accepted["bridges"] = repaired, bridges
@@ -206,6 +210,12 @@ def stamp_level_collision(
             level_id, len(snaps), ", ".join(snaps),
         )
     result: StampResult = stamp(dsl_text, width, height, tiles=tiles)
+    for note in result.repairs:
+        logger.info(
+            "Layout %s: stamp repair — %s (agent design kept; the fix "
+            "was arithmetic).",
+            level_id, note,
+        )
 
     level_dir = f"level/{stage_id}/{level_id}"
     collision_hash = ctx.adapter.write_numpy(
@@ -277,16 +287,25 @@ def place_level_entities(
     rules: GameRules = DEFAULT_RULES,
     tiles: TileRegistry = DEFAULT_TILES,
     variants: VariantSet = DEFAULT_VARIANTS,
+    combat: CombatSpec = DEFAULT_COMBAT,
     phase_name: str = "plat:placement",
 ) -> None:
     """Entity Agent → validated placements → entities.json + Level.entities."""
     import numpy as np
 
     roster = [
-        {"id": e.enemy_id, "archetype": e.archetype, "behavior": e.behavior}
+        {
+            "id": e.enemy_id,
+            "archetype": e.archetype,
+            "size": float(getattr(e, "size", 1.0) or 1.0),
+            "behavior": e.behavior,
+        }
         for e in ctx.bible.enemy_definitions.values()
     ]
-    archetypes = {e["id"]: e["archetype"] for e in roster}
+    enemy_defs = {
+        e["id"]: {"archetype": e["archetype"], "size": e["size"]}
+        for e in roster
+    }
     level_id = level.level_id
     with np.load(ctx.adapter.resolve_path(level.collision)) as data:
         grid = data["collision"]
@@ -303,7 +322,7 @@ def place_level_entities(
         request = ctx.prompts.placement_generation(
             level_id, brief, roster, summary, max_enemies,
             spawn=spawn, volume_summary=volume_summary,
-            variants=variants, rules=rules,
+            variants=variants, rules=rules, combat=combat,
             previous=last_attempt["content"], feedback=feedback,
         )
         if max_tokens is not None:
@@ -313,16 +332,18 @@ def place_level_entities(
         return content
 
     last_problems: list[str] = []
+    repairs_holder: dict[str, list[str]] = {"repairs": []}
 
     def validate(content: str) -> tuple[bool, list[str]]:
         obj = extract_json_object(content)
         if obj is None or not isinstance(obj.get("placements"), list):
             return False, ['Return {"placements": [...]} as bare JSON.']
-        accepted, problems = check_placements(
-            grid, obj["placements"], spawn, archetypes,
-            rules=rules, tiles=tiles, variants=variants,
+        accepted, problems, repairs = check_placements(
+            grid, obj["placements"], spawn, enemy_defs,
+            rules=rules, tiles=tiles, variants=variants, combat=combat,
         )
         accepted_holder["placements"] = accepted
+        repairs_holder["repairs"] = repairs
         last_problems[:] = problems
         # Kick back while anything is invalid; the final fallback
         # accepts whatever subset survived validation.
@@ -338,6 +359,12 @@ def place_level_entities(
         label=f"{phase_name}:{level_id}",
     )
     accepted = accepted_holder["placements"][:max_enemies]
+    for note in repairs_holder["repairs"]:
+        logger.info(
+            "Placement %s: repair — %s (agent design kept; the column "
+            "was arithmetic).",
+            level_id, note,
+        )
     if last_problems:
         warn(
             ctx,
@@ -372,9 +399,15 @@ def place_level_entities(
             for p in accepted
         ],
     )
+    # Placement validation reads each definition's SIZE (footprints), so
+    # entities descends from every roster definition — an enemy regen
+    # must cascade here or a grown body silently invalidates placements.
     level.step_parents["entities"] = [
         make_artifact_id("level", level.stage_id, level_id, "collision"),
         make_artifact_id("level", level.stage_id, level_id, "hazards"),
+        *sorted(
+            make_artifact_id("enemy", e["id"]) for e in roster
+        ),
     ]
     logger.info(
         "Placement %s: %d enemies — %s",
@@ -579,11 +612,13 @@ class PlacementPhase:
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        combat: CombatSpec = DEFAULT_COMBAT,
     ) -> None:
         self.max_enemies = max_enemies_per_level
         self.rules = rules
         self.tiles = tiles
         self.variants = variants
+        self.combat = combat
 
     def run(self, ctx: Any) -> None:
         stage_id = ctx.artifacts["stage_id"]
@@ -593,7 +628,7 @@ class PlacementPhase:
                 ctx, ctx.bible.levels[level_id],
                 max_enemies=self.max_enemies, rules=self.rules,
                 tiles=self.tiles, variants=self.variants,
-                phase_name=self.name,
+                combat=self.combat, phase_name=self.name,
             )
         _stamp_metadata(ctx, self.name)
 

@@ -16,6 +16,8 @@ import logging
 from typing import Any
 
 from canon.bible.platformer import EnemyDefinition, Level, Tileset
+from examples.platformer_pack.combat import effective_size, occupancy
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.phases import _stamp_metadata
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
@@ -127,22 +129,25 @@ def render_level(
         )
         x, y = placement.pos
         variant = variants.by_name.get(str(placement.overrides.get("variant", "")))
-        # Variant visuals resolve from the vocabulary (§6.1 overrides):
-        # "scale" grows the body past the cell, "outline" frames it white.
-        grow = 2 if variant and "scale" in variant.visual else 0
+        # EFFECTIVE size (definition.size x variant.size) — the review
+        # render must show the same body the validator footprinted and
+        # the play surfaces collide: bottom-anchored on the anchor cell,
+        # centered over the occupied columns. Hitbox-true (no overdraw).
+        eff = effective_size(
+            float(getattr(enemy, "size", 1.0) or 1.0) if enemy else 1.0,
+            variant.size if variant else 1.0,
+        )
+        cols, _rows = occupancy(eff)
+        side = eff * SCALE - 2
+        cx = (x + cols / 2.0) * SCALE
+        left, bottom = cx - side / 2.0, (y + 1) * SCALE - 1
         draw.rectangle(
-            (
-                x * SCALE + 1 - grow, y * SCALE + 1 - grow,
-                (x + 1) * SCALE - 2 + grow, (y + 1) * SCALE - 2 + grow,
-            ),
+            (left + 1, bottom - side + 1, left + side - 1, bottom - 1),
             fill=color,
         )
         if variant and "outline" in variant.visual:
             draw.rectangle(
-                (
-                    x * SCALE - grow, y * SCALE - grow,
-                    (x + 1) * SCALE - 1 + grow, (y + 1) * SCALE - 1 + grow,
-                ),
+                (left, bottom - side, left + side, bottom),
                 outline="#ffffff",
                 width=2,
             )
@@ -178,7 +183,9 @@ def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
         draw.text(
             (pad * 2 + swatch, y + 3),
             f"{enemy.name}  [{enemy.archetype}]  "
-            f"hp={enemy.stats.get('hp')} spd={enemy.stats.get('speed')}  {behavior}",
+            f"size={getattr(enemy, 'size', 1.0):g} "
+            f"hp={enemy.stats.get('hp')} dmg={enemy.stats.get('damage')} "
+            f"spd={enemy.stats.get('speed')}  {behavior}",
             fill=(230, 230, 230),
         )
         y += row_h
@@ -204,12 +211,15 @@ def render_level_skinned(
     enemy_sprites: dict[str, Any],
     player_sprite: Any,
     variants: VariantSet = DEFAULT_VARIANTS,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
 ) -> bytes:
     """The 'what it looks like' render: real tile regions, sprites, and
     parallax scenery composited flat (camera-less). This is the skinned
     half of the block-vs-skinned pair the VLM fidelity loop will judge —
     on the placeholder sheet it degrades to flat squares, so the fake
-    path exercises it byte-identically."""
+    path exercises it byte-identically. Actors draw at their EFFECTIVE
+    size with the same actor_scale overdraw the Godot consumer applies —
+    a review image that shrinks a 2.0 body to one cell is lying."""
     from PIL import Image, ImageDraw
 
     height, width = terrain.shape
@@ -251,32 +261,47 @@ def render_level_skinned(
             if tile is not None:
                 img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
 
-    # Actors: sprites when the art track produced them, rects otherwise.
+    # Actors: sprites when the art track produced them, rects otherwise —
+    # bottom-anchored at effective size; sprites get the actor_scale
+    # overdraw (mirrors main.gd's _actor_visual + vis_off math).
     for placement in level.entities:
         enemy_id = placement.ref.split(":", 1)[1]
         enemy = enemies.get(enemy_id)
         x, y = placement.pos
+        variant = variants.by_name.get(str(placement.overrides.get("variant", "")))
+        eff = effective_size(
+            float(getattr(enemy, "size", 1.0) or 1.0) if enemy else 1.0,
+            variant.size if variant else 1.0,
+        )
+        cols, _rows = occupancy(eff)
+        cx = (x + cols / 2.0) * px
+        feet = (y + 1) * px - 2
         sprite = enemy_sprites.get(enemy_id)
         if sprite is not None:
+            vis = max(1, round((px - 4) * eff * graphics.actor_scale))
+            scaled = sprite.resize((vis, vis))
             img.paste(
-                sprite.resize((px, px)), (x * px, y * px),
-                sprite.resize((px, px)),
+                scaled, (round(cx - vis / 2.0), feet - vis), scaled
             )
         else:
             color = _hex_to_rgb(
                 (enemy.stats.get("placeholder_color") if enemy else None)
                 or "#ff00ff"
             )
+            side = (px - 2) * eff
             draw.rectangle(
-                (x * px + 1, y * px + 1, (x + 1) * px - 2, (y + 1) * px - 2),
+                (cx - side / 2.0, feet - side, cx + side / 2.0, feet),
                 fill=color,
             )
     if level.spawn is not None:
         sx, sy = level.spawn
         if player_sprite is not None:
+            vis = max(1, round((px - 8) * graphics.actor_scale))
+            scaled = player_sprite.resize((vis, vis))
             img.paste(
-                player_sprite.resize((px, px)), (sx * px, sy * px),
-                player_sprite.resize((px, px)),
+                scaled,
+                (round((sx + 0.5) * px - vis / 2.0), (sy + 1) * px - 4 - vis),
+                scaled,
             )
         else:
             draw.rectangle(
@@ -303,7 +328,10 @@ def _load_sprite(ctx: Any, rel: str) -> Any:
 
 
 def render_level_review(
-    ctx: Any, level: Level, variants: VariantSet = DEFAULT_VARIANTS
+    ctx: Any,
+    level: Level,
+    variants: VariantSet = DEFAULT_VARIANTS,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
 ) -> None:
     """One level's review PNGs (block + skinned) — shared by RenderPhase
     and the DAG nodes."""
@@ -342,6 +370,7 @@ def render_level_review(
         terrain, background, level, ctx.bible.enemy_definitions, tileset,
         sheet, bands, enemy_sprites,
         _load_sprite(ctx, "sprite/player/base.png"), variants=variants,
+        graphics=graphics,
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}_skinned.png", skinned
@@ -357,12 +386,19 @@ def write_review_legend(ctx: Any) -> None:
 class RenderPhase:
     name = "plat:render"
 
-    def __init__(self, variants: VariantSet = DEFAULT_VARIANTS) -> None:
+    def __init__(
+        self,
+        variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
         self.variants = variants
+        self.graphics = graphics
 
     def run(self, ctx: Any) -> None:
         for level in ctx.bible.levels.values():
-            render_level_review(ctx, level, variants=self.variants)
+            render_level_review(
+                ctx, level, variants=self.variants, graphics=self.graphics
+            )
         write_review_legend(ctx)
         logger.info(
             "RenderPhase wrote %d level renders + legend to review/.",

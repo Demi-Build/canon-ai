@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from canon.pipeline.orchestrator import Node, OrchestratorReport, orchestrate
+from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.godot_export import GodotExportPhase
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.layers import (
@@ -109,6 +110,7 @@ class LevelStepsDagPhase:
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        combat: CombatSpec = DEFAULT_COMBAT,
         max_enemies_per_level: int = 4,
         max_decor: int = 6,
     ) -> None:
@@ -119,6 +121,7 @@ class LevelStepsDagPhase:
         self.tiles = tiles
         self.variants = variants
         self.graphics = graphics
+        self.combat = combat
         self.max_enemies = max_enemies_per_level
         self.max_decor = max_decor
 
@@ -201,9 +204,17 @@ class LevelStepsDagPhase:
                         lid, place_level_entities,
                         max_enemies=self.max_enemies, rules=self.rules,
                         tiles=self.tiles, variants=self.variants,
-                        phase_name="plat:placement",
+                        combat=self.combat, phase_name="plat:placement",
                     ),
-                    requires=[aid(lid, "collision"), aid(lid, "hazards")],
+                    # Placement reads each definition's SIZE (footprint
+                    # validation) — an enemy re-roll must schedule before
+                    # and cascade into entities, or a grown body silently
+                    # invalidates the stored placements.
+                    requires=[
+                        aid(lid, "collision"),
+                        aid(lid, "hazards"),
+                        "phase:plat:enemies",
+                    ],
                 )
             )
         for lid in level_ids:
@@ -235,8 +246,13 @@ class RenderDagPhase:
 
     name = "plat:render"
 
-    def __init__(self, variants: VariantSet = DEFAULT_VARIANTS) -> None:
+    def __init__(
+        self,
+        variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
         self.variants = variants
+        self.graphics = graphics
 
     def expand(self, ctx: Any) -> list[Node]:
         stage = _stage(ctx)
@@ -247,7 +263,8 @@ class RenderDagPhase:
         def render_body(level_id: str):
             def run(c: Any) -> None:
                 render_level_review(
-                    c, c.bible.levels[level_id], variants=self.variants
+                    c, c.bible.levels[level_id], variants=self.variants,
+                    graphics=self.graphics,
                 )
 
             return run
@@ -287,12 +304,13 @@ class ManifestDagPhase:
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        combat: CombatSpec = DEFAULT_COMBAT,
     ) -> None:
         from examples.platformer_pack.compose import SliceManifestPhase
 
         self._phase = SliceManifestPhase(
             movement=movement, rules=rules, tiles=tiles, variants=variants,
-            graphics=graphics,
+            graphics=graphics, combat=combat,
         )
 
     def expand(self, ctx: Any) -> list[Node]:
@@ -364,6 +382,7 @@ def compose_dag_pipeline(
     graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     music_producer: Any = None,
     sfx_producer: Any = None,
+    combat: CombatSpec = DEFAULT_COMBAT,
 ) -> list:
     """The full orchestrated pipeline. Per-level nodes expand only when
     the Bible already has a stage plan (see module docstring)."""
@@ -378,7 +397,7 @@ def compose_dag_pipeline(
         *macro_phases(num_levels, num_enemies, tiles=tiles, graphics=graphics),
         LevelStepsDagPhase(
             width=width, height=height, movement=movement, rules=rules,
-            tiles=tiles, variants=variants, graphics=graphics,
+            tiles=tiles, variants=variants, graphics=graphics, combat=combat,
         ),
         # Art AT THE END: legacy barrier edges make these depend on every
         # level node above and gate the renders below — paid generation
@@ -387,10 +406,10 @@ def compose_dag_pipeline(
         SpriteArtPhase(producer=image_producer, graphics=graphics),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
-        RenderDagPhase(variants=variants),
+        RenderDagPhase(variants=variants, graphics=graphics),
         ManifestDagPhase(
             movement=movement, rules=rules, tiles=tiles, variants=variants,
-            graphics=graphics,
+            graphics=graphics, combat=combat,
         ),
     ]
     if engine == "godot":
@@ -462,15 +481,18 @@ def cli_phases_factory(ctx: Any) -> list:
         build_music_producer,
         build_sfx_producer,
     )
-    from examples.platformer_pack.graphics import load_graphics
-    from examples.platformer_pack.tileset_art import build_image_producer
 
     # CANON_PLAT_IMAGE_BACKEND: "", "fake", "fal", or "local" — same
     # explicit opt-in as the runner's --image-backend; empty stays on the
     # deterministic placeholder sheet. CANON_PLAT_MUSIC_BACKEND /
     # CANON_PLAT_SFX_BACKEND mirror --music-backend/--sfx-backend (empty =
     # silent). CANON_PLAT_GRAPHICS: path to a graphics.json (the runner's
-    # --graphics; default = pack spec).
+    # --graphics; default = pack spec). CANON_PLAT_COMBAT: path to a
+    # combat.json (the runner's --combat; default = pack spec).
+    from examples.platformer_pack.combat import load_combat
+    from examples.platformer_pack.graphics import load_graphics
+    from examples.platformer_pack.tileset_art import build_image_producer
+
     producer = build_image_producer(
         os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
         os.environ.get("CANON_PLAT_IMAGE_MODEL") or None,
@@ -479,9 +501,11 @@ def cli_phases_factory(ctx: Any) -> list:
     sfx = build_sfx_producer(os.environ.get("CANON_PLAT_SFX_BACKEND", ""))
     graphics_path = os.environ.get("CANON_PLAT_GRAPHICS")
     graphics = load_graphics(graphics_path) if graphics_path else DEFAULT_GRAPHICS
+    combat_path = os.environ.get("CANON_PLAT_COMBAT")
+    combat = load_combat(combat_path) if combat_path else DEFAULT_COMBAT
     return compose_dag_pipeline(
         image_producer=producer, graphics=graphics,
-        music_producer=music, sfx_producer=sfx,
+        music_producer=music, sfx_producer=sfx, combat=combat,
     )
 
 

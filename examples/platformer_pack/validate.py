@@ -18,6 +18,12 @@ from __future__ import annotations
 from collections import deque
 
 from canon.bible.platformer import SparseMaskEntry
+from examples.platformer_pack.combat import (
+    DEFAULT_COMBAT,
+    CombatSpec,
+    effective_size,
+    occupancy,
+)
 from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
@@ -481,82 +487,202 @@ def auto_bridge(
         added.append(op)
 
 
+#: How far a spawn-crowding placement may be column-nudged to the nearest
+#: valid cell — WHERE an enemy roughly goes is design; the exact clear
+#: column is arithmetic (the snap_checkpoints precedent).
+MAX_PLACEMENT_NUDGE = 8
+
+
 def check_placements(
     grid,
     placements: list[dict],
     spawn: tuple[int, int],
-    archetypes: dict[str, str],
+    enemies: dict[str, dict],
     rules: GameRules = DEFAULT_RULES,
     tiles: TileRegistry = DEFAULT_TILES,
     variants: VariantSet = DEFAULT_VARIANTS,
-) -> tuple[list[dict], list[str]]:
-    """Split proposed placements into (accepted, problem strings).
+    combat: CombatSpec = DEFAULT_COMBAT,
+) -> tuple[list[dict], list[str], list[str]]:
+    """Split proposed placements into (accepted, problems, repairs).
 
+    ``enemies`` maps enemy id → ``{"archetype": str, "size": float}``.
     Rules: known enemy id; the game's ``enemy_water_policy`` decides who
-    may occupy volume cells; not within 3 columns of spawn on the spawn
-    row (no spawn-camping). ``variant`` names must come from the game's
-    variant vocabulary and respect ``GameRules.variant_caps`` (per level).
-    A legacy boolean ``elite`` maps to ``variant: "elite"``.
+    may occupy volume cells; the FULL footprint of the effective size
+    (definition size × variant size — ``combat.occupancy``: two supported
+    columns at 2.0, ``ceil(size)`` rows of clearance) must fit, with
+    failures naming the located cell; ``variant`` names must come from
+    the game's variant vocabulary and respect ``GameRules.variant_caps``
+    (per level). A legacy boolean ``elite`` maps to ``variant: "elite"``.
+
+    Spawn safety (no enemy within ``combat.spawn_safety_columns`` of the
+    spawn column on the spawn row) is a CODE REPAIR, never LLM feedback:
+    violators are column-nudged to the nearest cell that fits their whole
+    body outside the radius (up to ``MAX_PLACEMENT_NUDGE``), recorded in
+    ``repairs``; only an un-nudgeable placement kicks back.
     """
     stand = standable_cells(grid, tiles)
     volume = volume_cells(grid, tiles)
+    height, width = grid.shape
+    empty_id = tiles.empty_id
     accepted: list[dict] = []
     problems: list[str] = []
+    repairs: list[str] = []
     variant_counts: dict[str, int] = {}
+
+    def _cell_name(cx: int, cy: int) -> str:
+        tile = tiles.by_id.get(int(grid[cy, cx]))
+        return tile.name.upper() if tile else str(int(grid[cy, cx]))
+
+    def _footprint_problem(
+        eid: str, x: int, y: int, archetype: str, eff: float
+    ) -> str | None:
+        """None if a body of effective size ``eff`` fits anchored at
+        (x, y) — anchor row cells per column, clearance rows above.
+        Messages name the LOCATED failing cell."""
+        cols, rows = occupancy(eff)
+        cell = (x, y)
+        is_swimmer = archetype == "swimmer"
+        policy = rules.enemy_water_policy
+        big = f" Its size-{eff:g} body spans columns {x}-{x + cols - 1}" \
+              f" and {rows} row(s) up." if (cols, rows) != (1, 1) else ""
+        for cx in range(x, x + cols):
+            if not (0 <= cx < width and 0 <= y < height):
+                return (
+                    f"{eid} at {cell} (size {eff:g}) does not fit: column "
+                    f"{cx} is outside the {width}x{grid.shape[0]} level."
+                )
+            base = (cx, y)
+            if policy == "forbidden" and base in volume:
+                return (
+                    f"{eid} at {cell} is in water and this game forbids "
+                    "enemies in water — place it on land." + big
+                )
+            if policy == "swimmers_only" and is_swimmer:
+                if base not in volume:
+                    where = (
+                        ""
+                        if base == cell
+                        else f" (cell ({cx}, {y}) of its body)"
+                    )
+                    return (
+                        f"{eid} is a swimmer and {cell} is not a water "
+                        f"cell{where} — swimmers must be placed inside "
+                        "water, with room for their whole body." + big
+                    )
+            elif policy in ("swimmers_only", "forbidden"):
+                if base not in stand:
+                    hint = (
+                        " (that's a water cell — only swimmers go in water)"
+                        if base in volume
+                        else ""
+                    )
+                    where = (
+                        ""
+                        if base == cell
+                        else f" — its size needs column {cx} standable too,"
+                        f" and ({cx}, {y}) is {_cell_name(cx, y)}"
+                    )
+                    return (
+                        f"{eid} at {cell} is not a standable cell{hint}"
+                        f"{where} — land enemies need solid ground below "
+                        "and a free cell to occupy." + big
+                    )
+            elif base not in stand and base not in volume:
+                return (
+                    f"{eid} at {cell} is neither standable nor in water."
+                    + big
+                )
+            # Clearance rows above the anchor row, this column.
+            for cy in range(y - 1, y - rows, -1):
+                if cy < 0:
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) needs {rows} rows "
+                        f"of clearance and column {cx} runs off the top of "
+                        "the level — place it lower."
+                    )
+                val = int(grid[cy, cx])
+                if policy == "amphibious":
+                    clear = val == empty_id or (cx, cy) in volume
+                elif is_swimmer and policy == "swimmers_only":
+                    clear = (cx, cy) in volume
+                else:
+                    clear = val == empty_id
+                if not clear:
+                    need = (
+                        "water"
+                        if is_swimmer and policy == "swimmers_only"
+                        else "open air"
+                    )
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) needs {need} for "
+                        f"{rows} rows, but cell ({cx}, {cy}) is "
+                        f"{_cell_name(cx, cy)} — that located cell blocks "
+                        "its body; move it to more open ground." + big
+                    )
+        return None
+
     for p in placements:
         eid, x, y = p.get("enemy_id"), p.get("x"), p.get("y")
-        if eid not in archetypes:
+        if eid not in enemies:
             problems.append(
-                f"unknown enemy_id {eid!r}; roster: {sorted(archetypes)!r}."
+                f"unknown enemy_id {eid!r}; roster: {sorted(enemies)!r}."
             )
             continue
         if not isinstance(x, int) or not isinstance(y, int):
             problems.append(f"{eid} placement needs integer x and y; got {p!r}.")
             continue
         cell = (x, y)
-        is_swimmer = archetypes[eid] == "swimmer"
-        if rules.enemy_water_policy == "forbidden" and cell in volume:
-            problems.append(
-                f"{eid} at {cell} is in water and this game forbids enemies "
-                "in water — place it on land."
-            )
-            continue
-        if rules.enemy_water_policy == "swimmers_only":
-            if is_swimmer and cell not in volume:
-                problems.append(
-                    f"{eid} is a swimmer and {cell} is not a water cell — "
-                    "swimmers must be placed inside water."
-                )
-                continue
-            if not is_swimmer and cell not in stand:
-                hint = (
-                    " (that's a water cell — only swimmers go in water)"
-                    if cell in volume
-                    else ""
-                )
-                problems.append(
-                    f"{eid} at {cell} is not a standable cell{hint} — land "
-                    "enemies need solid ground below and a free cell to occupy."
-                )
-                continue
-        elif cell not in stand and cell not in volume:
-            problems.append(
-                f"{eid} at {cell} is neither standable nor in water."
-            )
-            continue
-        if y == spawn[1] and abs(x - spawn[0]) <= 3:
-            problems.append(f"{eid} at {cell} is too close to spawn {spawn}.")
-            continue
+        archetype = str(enemies[eid].get("archetype", ""))
         variant = str(p.get("variant") or "")
         if not variant and p.get("elite"):
             variant = "elite"  # pre-3b spelling rides through
-        if variant:
-            if variant not in variants.by_name:
+        if variant and variant not in variants.by_name:
+            problems.append(
+                f"{eid} at {cell} names unknown variant {variant!r}; "
+                f"this game's variants: {sorted(variants.by_name)!r}."
+            )
+            continue
+        eff = effective_size(
+            float(enemies[eid].get("size", 1.0) or 1.0),
+            variants.by_name[variant].size if variant else 1.0,
+        )
+        issue = _footprint_problem(eid, x, y, archetype, eff)
+        if issue is not None:
+            problems.append(issue)
+            continue
+        radius = combat.spawn_safety_columns
+        if y == spawn[1] and abs(x - spawn[0]) <= radius:
+            # Column nudge outward on the side the agent chose, falling
+            # back to the other side — the first column where the WHOLE
+            # body fits outside the radius wins.
+            direction = 1 if x >= spawn[0] else -1
+            nudged = next(
+                (
+                    nx
+                    for d in range(1, MAX_PLACEMENT_NUDGE + 1)
+                    for nx in (x + direction * d, x - direction * d)
+                    if 0 <= nx < width
+                    and abs(nx - spawn[0]) > radius
+                    and _footprint_problem(eid, nx, y, archetype, eff)
+                    is None
+                ),
+                None,
+            )
+            if nudged is None:
                 problems.append(
-                    f"{eid} at {cell} names unknown variant {variant!r}; "
-                    f"this game's variants: {sorted(variants.by_name)!r}."
+                    f"{eid} at {cell} is within {radius} columns of the "
+                    f"player spawn {spawn} and no clear column within "
+                    f"{MAX_PLACEMENT_NUDGE} fits its size-{eff:g} body — "
+                    "place it further from spawn."
                 )
                 continue
+            repairs.append(
+                f"{eid}: ({x}, {y}) -> ({nudged}, {y}) — spawn-safety "
+                f"nudge (enemies keep {radius} columns clear of spawn; "
+                "the spot was the agent's, the column is arithmetic)."
+            )
+            x = nudged
+        if variant:
             cap = rules.variant_caps.get(variant)
             if cap is not None and variant_counts.get(variant, 0) >= cap:
                 problems.append(
@@ -569,4 +695,4 @@ def check_placements(
         accepted.append(
             {"enemy_id": eid, "x": x, "y": y, "variant": variant}
         )
-    return accepted, problems
+    return accepted, problems, repairs

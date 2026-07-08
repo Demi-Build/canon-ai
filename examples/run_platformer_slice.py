@@ -64,6 +64,9 @@ def _fake_layout(
     if difficulty >= 2:
         lines.append("pit(11,12)")
     lines += [
+        # Stepped slope (slopes v1) ramping toward the tier stack —
+        # 1-riser stairs the flat physics climbs with ordinary jumps.
+        "stairs_up(13,14)",
         # Tier stack with a carved notch — irregular multi-level shape.
         f"ledge(15,21,{g - 3})",
         f"ledge(17,22,{g - 6})",
@@ -119,7 +122,10 @@ def _parse_summary_cells(summary: str) -> list[tuple[int, int]]:
 def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
     """Deterministic land/water placement spots parsed from the placement
     prompt's standable/volume summaries, spread across the level and kept
-    clear of the spawn column."""
+    clear of the spawn column. Water spots come DEEPEST-FIRST (a sized
+    swimmer needs rows of water for its whole body — what the prompt now
+    teaches); the placement loop hands ground-row spots to big-bodied
+    land enemies for the same reason."""
     stand_m = re.search(r"y from top\): (.+)\n", msg)
     vol_m = re.search(r"swimmers ONLY go here\): (.+)\n", msg)
     spawn_m = re.search(r"Player spawn: \[(\d+), (\d+)\]", msg)
@@ -147,12 +153,22 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
         for tile_part in vol_m.group(1).split(" | "):
             _name, _, rest = tile_part.partition(": ")
             water_cells.extend(_parse_summary_cells(rest))
-    water_cells = sorted(set(water_cells))
-    water = (
-        [water_cells[0], water_cells[len(water_cells) // 2]]
-        if water_cells
-        else []
-    )
+    water_set = set(water_cells)
+
+    def _depth(cell: tuple[int, int]) -> int:
+        x, y = cell
+        d = 1
+        while (x, y - d) in water_set:
+            d += 1
+        return d
+
+    deep_first = sorted(water_set, key=lambda c: (-_depth(c), c))
+    water: list[tuple[int, int]] = []
+    for cell in deep_first:
+        if all(cell[0] != w[0] for w in water):
+            water.append(cell)
+        if len(water) == 2:
+            break
     return {"land": land, "water": water}
 
 _FAKE_DECOR = {
@@ -289,7 +305,7 @@ def make_fake_responder():
             )
         if task == "placement":
             roster_match = re.search(
-                r"roster \(id, archetype, behavior\): (\[.*?\])\n", msg
+                r"roster \(id, archetype, size, behavior\): (\[.*?\])\n", msg
             )
             roster = json.loads(roster_match.group(1)) if roster_match else []
             # Variant vocabulary comes from the prompt (data-driven): mark
@@ -303,13 +319,20 @@ def make_fake_responder():
             land = list(spots["land"])
             water = list(spots["water"])
             placements = []
-            # Archetype-aware: swimmers into volume spots, everyone else on
-            # land; earliest placements take the variant vocabulary.
+            # Archetype-aware: swimmers into volume spots (deepest
+            # first), everyone else on land — big bodies take the
+            # ground-row spot (open air above), like the prompt teaches;
+            # earliest placements take the variant vocabulary.
             for entry in roster:
                 pool = water if entry["archetype"] == "swimmer" else land
                 if not pool:
                     continue
-                x, y = pool.pop(0)
+                if pool is land and float(entry.get("size", 1.0)) > 1.0:
+                    spot = max(pool, key=lambda c: (c[1], -c[0]))
+                    pool.remove(spot)
+                    x, y = spot
+                else:
+                    x, y = pool.pop(0)
                 placement = {"enemy_id": entry["id"], "x": x, "y": y}
                 if len(placements) < len(order):
                     placement["variant"] = order[len(placements)]
@@ -367,6 +390,13 @@ def main() -> None:
         "--variants", default=None,
         help="Path to a variants.json enemy-variant vocabulary (defaults "
         "to the pack's).",
+    )
+    parser.add_argument(
+        "--combat", default=None,
+        help="Path to a combat.json tuning file — hearts, stomp damage, "
+        "bounce, i-frames, spawn-safety radius as per-game data "
+        "(defaults to the pack's). Combat POLICY toggles (checkpoint "
+        "enemy reset, spawn grace) live in game_rules.json.",
     )
     parser.add_argument(
         "--image-backend", choices=["none", "fake", "fal", "local"],
@@ -430,6 +460,7 @@ def main() -> None:
         prompts=PlatformerPrompts(),
         adapter=adapter,
     )
+    from examples.platformer_pack.combat import load_combat
     from examples.platformer_pack.rules import load_rules
     from examples.platformer_pack.tiles import load_tiles
     from examples.platformer_pack.variants import load_variants
@@ -437,6 +468,7 @@ def main() -> None:
     rules = load_rules(args.rules) if args.rules else load_rules()
     tiles = load_tiles(args.tiles) if args.tiles else load_tiles()
     variants = load_variants(args.variants) if args.variants else load_variants()
+    combat = load_combat(args.combat) if args.combat else load_combat()
     from examples.platformer_pack.audio_phases import (
         build_music_producer,
         build_sfx_producer,
@@ -467,6 +499,7 @@ def main() -> None:
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,
+            combat=combat,
         )
         print(
             f"\nOrchestrated: {len(report.done)} node(s) ran, "
@@ -484,6 +517,7 @@ def main() -> None:
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,
+            combat=combat,
         )
         run_pipeline(phases, ctx)
 

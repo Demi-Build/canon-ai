@@ -361,6 +361,10 @@ class EnemyGeneratorPhase:
                 enemy_id=enemy_id,
                 name=str(data["name"]),
                 archetype=str(skeleton["archetype"]),
+                # Typed, not a stat: placement footprints, touch boxes,
+                # and render scale key off it (schema v4 rolls the
+                # discrete tier; pre-v4 bibles default to 1.0).
+                size=float(skeleton.get("size", 1.0)),
                 stats={
                     "hp": skeleton["hp"],
                     "damage": skeleton["damage"],
@@ -381,8 +385,9 @@ class EnemyGeneratorPhase:
             ctx.bible.enemy_definitions[enemy_id] = enemy
             stage.enemy_refs.append(enemy.artifact_id)
             logger.info(
-                "Enemy %d/%d: %r (%s) — hp=%s dmg=%s spd=%s %s color=%s: %s",
-                i + 1, self.count, enemy.name, enemy.archetype,
+                "Enemy %d/%d: %r (%s, size %.1f) — hp=%s dmg=%s spd=%s %s "
+                "color=%s: %s",
+                i + 1, self.count, enemy.name, enemy.archetype, enemy.size,
                 enemy.stats["hp"], enemy.stats["damage"], enemy.stats["speed"],
                 " ".join(f"{k}={v}" for k, v in enemy.behavior.items()),
                 enemy.stats["placeholder_color"], enemy.stats["flavor"],

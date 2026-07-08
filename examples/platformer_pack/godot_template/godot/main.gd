@@ -3,19 +3,27 @@
 # Everything on screen resolves from the generated databases, mirroring the
 # review renderer and the (throwaway) pygame harness:
 #   - movement physics   <- manifest.json  (PlayerMovementSpec)
+#   - combat tuning      <- manifest.json  "combat" block (combat.json):
+#                           hearts, stomp damage/bounce, i-frames — the
+#                           arithmetic mirrors examples/platformer_pack/
+#                           combat.py (keep in sync); combat POLICIES
+#                           (checkpoint enemy reset, spawn grace) are
+#                           GameRules keys
 #   - tile appearance    <- TERRAIN layer (slot indices) + tilesheet regions
 #   - tile physics       <- tileset slot categories + params (E.3 / 3b) —
 #                           volumes carry speed_factor/gravity/impulse/
-#                           damage_per_second; no hardcoded tile IDs anywhere
+#                           damage_per_second, hazards carry damage (hearts);
+#                           no hardcoded tile IDs anywhere
 #   - level geometry     <- level/<stage>/<id>/collision.grid.json
 #   - checkpoints        <- level.json triggers layer (respawn point moves)
 #   - background         <- background layer bands
-#   - enemy color/stats  <- enemy/<id>.json; variant markers/mults from
-#                           placements + the manifest's variant vocabulary
+#   - enemy color/stats  <- enemy/<id>.json (size, hp, damage now LIVE);
+#                           variant markers/mults from placements + the
+#                           manifest's variant vocabulary
 #   - decor              <- foreground layer, drawn IN FRONT of the player
 # When real art replaces the placeholder tilesheet, this script does not
 # change. Controls: arrows/A-D move, Space/W/Up jump or swim, R restart,
-# Esc quit.
+# Esc quit. Stomp: land on an enemy's head to damage it and bounce.
 extends Node2D
 
 const CELL := 32.0
@@ -25,9 +33,11 @@ const BODY_R := 0.85
 # (per-game data). Defaults match the spec model's defaults.
 var view_w_cells := 20.0
 var actor_scale := 1.4
-# Damage a player can soak in a damaging volume (lava) before respawning —
-# crude stand-in for HP, mirrored in the pygame harness.
-const DAMAGE_BUDGET := 3.0
+# Combat tuning (manifest "combat" block; defaults mirror combat.py).
+var max_hearts := 3
+var stomp_damage := 6
+var stomp_bounce := 0.7
+var iframes_s := 1.0
 
 var manifest: Dictionary
 var movement: Dictionary
@@ -69,7 +79,12 @@ var player_pos := Vector2.ZERO
 var player_vy := 0.0
 var on_ground := false
 var won := false
-var damage_soaked := 0.0
+var hearts := 3
+var iframes := 0.0  # post-hit invulnerability countdown
+var damage_soaked := 0.0  # fractional volume drain toward the next heart
+var moved := false  # first input after (re)spawn ends the spawn grace
+var blink_t := 0.0  # deterministic blink clock (grace + i-frames)
+var hearts_root: Control = null
 
 var world_root: Node2D
 var decor_root: Node2D
@@ -96,10 +111,20 @@ func _ready() -> void:
 	var gfx: Dictionary = manifest.get("graphics", {})
 	view_w_cells = float(gfx.get("view_cells", 20))
 	actor_scale = float(gfx.get("actor_scale", 1.4))
+	var combat: Dictionary = manifest.get("combat", {})
+	max_hearts = int(combat.get("player_max_hearts", 3))
+	stomp_damage = int(combat.get("stomp_damage", 6))
+	stomp_bounce = float(combat.get("stomp_bounce_factor", 0.7))
+	iframes_s = float(combat.get("hurt_iframes_s", 1.0))
 	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
 	stage_effects = stage.get("effects", [])
 	_setup_audio(manifest.get("audio", {}))
 	status = $UI/Status
+	# Hearts HUD on the UI CanvasLayer (screen-space — a world node would
+	# scale and drift under camera zoom), below the status line.
+	hearts_root = Control.new()
+	hearts_root.position = Vector2(16, 44)
+	$UI.add_child(hearts_root)
 	camera = Camera2D.new()
 	add_child(camera)
 	camera.make_current()
@@ -155,7 +180,8 @@ func _load_tileset() -> void:
 			"one_way":
 				one_way[tile_type] = true
 			"hazard":
-				hazard[tile_type] = true
+				# Params carry "damage" in HEARTS (default 1 in _hurt).
+				hazard[tile_type] = slot.get("params", {})
 			"volume":
 				volumes[tile_type] = slot.get("params", {})
 
@@ -380,21 +406,24 @@ func _spawn_enemies(placements: Array) -> void:
 		# Variant meaning resolves from the manifest vocabulary — the
 		# placement only carries the NAME (§6.1 overrides).
 		var variant: Dictionary = variant_defs.get(str(p.get("variant", "")), {})
-		var size := float(variant.get("size", 1.0))
+		# EFFECTIVE size everywhere: definition.size x variant.size —
+		# the body grows UP from its anchor cell (feet at y+1, top at
+		# y+1-size), centered over its occupied columns (combat.py).
+		var size := float(spec.get("size", 1.0)) * float(variant.get("size", 1.0))
+		var cols := maxi(1, mini(2, int(size)))
+		var side := (CELL - 4.0) * size
 		var rect := _actor_visual(
 			str(spec.get("sprite_path", "")),
 			Color(str(spec["stats"].get("placeholder_color", "#ff00ff"))),
-			Vector2(CELL - 4, CELL - 4) * size,
+			Vector2(side, side),
 		)
-		# Visual offset from the placement cell: rects sit inside it;
-		# overdrawn sprites are x-centered on it with feet on its floor.
-		var half_extra := (size - 1.0) * CELL / 2.0
-		var vis_off := Vector2(2 - half_extra, 2 - half_extra)
+		# Bottom-anchored visual offset from the anchor cell: feet on the
+		# anchor cell's floor, x-centered over the occupied columns —
+		# a sized body must never sink into the ground it stands on.
+		var vis_off := Vector2(cols * CELL / 2.0 - side / 2.0, CELL - 2.0 - side)
 		if rect is Sprite2D:
-			var vis := (CELL - 4.0) * size * actor_scale
-			vis_off = Vector2(
-				(CELL - vis) / 2.0, CELL - 2.0 + half_extra - vis
-			)
+			var vis := side * actor_scale
+			vis_off = Vector2(cols * CELL / 2.0 - vis / 2.0, CELL - 2.0 - vis)
 		var frame: Node2D = null
 		var frame_off := Vector2.ZERO
 		if "outline" in str(variant.get("visual", "")):
@@ -402,19 +431,35 @@ func _spawn_enemies(placements: Array) -> void:
 				frame = _silhouette_frame(rect)
 			else:
 				frame = _outline_frame(Vector2(CELL, CELL) * size)
-				frame_off = Vector2(-2, -2)
+				frame_off = Vector2(
+					side / 2.0 - CELL * size / 2.0, side + 2.0 - CELL * size
+				)
 			world_root.add_child(frame)
 		world_root.add_child(rect)
 		var behavior: Dictionary = (spec["behavior"] as Dictionary).duplicate()
 		for key in variant.get("behavior", {}):
 			behavior[key] = variant["behavior"][key]
+		# Dead stats live (combat v1): hp x mults soaked by stomps,
+		# damage x mults dealt in hearts — combat.py arithmetic.
+		var mults: Dictionary = variant.get("stat_mults", {})
+		var max_hp := float(spec["stats"].get("hp", 1)) * float(mults.get("hp", 1.0))
 		enemies.append({
 			"spec": spec,
 			"behavior": behavior,
 			"speed": float(spec["stats"].get("speed", 0))
 				* float(variant.get("speed_mult", 1.0)),
+			"size": size,
+			"max_hp": max_hp,
+			"hp": max_hp,
+			"damage_hearts": maxi(1, roundi(
+				float(spec["stats"].get("damage", 1))
+				* float(mults.get("damage", 1.0))
+			)),
+			"alive": true,
+			"hurt_t": 0.0,
 			"vis_off": vis_off,
 			"pos": Vector2(p["x"], p["y"]),
+			"home": Vector2(p["x"], p["y"]),
 			"home_x": float(p["x"]),
 			"dir": 1.0,
 			"node": rect,
@@ -576,7 +621,75 @@ func _respawn() -> void:
 	player_pos = respawn_point
 	player_vy = 0.0
 	damage_soaked = 0.0
+	hearts = max_hearts
+	iframes = 0.0
+	moved = false  # spawn grace re-engages until the first input
+	if bool(rules.get("checkpoint_enemy_reset", true)):
+		# Killed enemies come back on a checkpoint respawn — dying never
+		# leaves a half-cleared level (GameRules kind).
+		for enemy in enemies:
+			enemy["pos"] = enemy["home"]
+			enemy["dir"] = 1.0
+			enemy["hp"] = enemy["max_hp"]
+			enemy["alive"] = true
+			enemy["hurt_t"] = 0.0
+			enemy["node"].visible = true
+			if enemy["frame"] != null:
+				enemy["frame"].visible = true
+	_refresh_hearts()
 	_play_sfx("death")
+
+
+func _hurt(cost: int) -> void:
+	# One heart pool for contact and hazard hits — spawn grace and
+	# i-frames gate them (volume drain has its own path below).
+	if iframes > 0.0 or (_spawn_grace() and not moved):
+		return
+	hearts -= maxi(1, cost)
+	iframes = iframes_s
+	_refresh_hearts()
+	if hearts <= 0:
+		_respawn()
+
+
+func _drain(amount: float) -> void:
+	# Continuous volume damage: accumulate fractions, convert each whole
+	# point into one heart — ignores i-frames (lava keeps hurting) but
+	# respects spawn grace.
+	if _spawn_grace() and not moved:
+		return
+	damage_soaked += amount
+	while damage_soaked >= 1.0:
+		damage_soaked -= 1.0
+		hearts -= 1
+		_refresh_hearts()
+		if hearts <= 0:
+			_respawn()
+			return
+
+
+func _spawn_grace() -> bool:
+	return str(rules.get("spawn_grace", "until_move")) == "until_move"
+
+
+func _refresh_hearts() -> void:
+	# Screen-space hearts HUD — filled for current, hollow for lost.
+	if hearts_root == null:
+		return
+	for child in hearts_root.get_children():
+		child.queue_free()
+	for i in range(max_hearts):
+		if i < hearts:
+			var filled := ColorRect.new()
+			filled.color = Color8(214, 61, 74)
+			filled.position = Vector2(i * 24, 0)
+			filled.size = Vector2(18, 18)
+			hearts_root.add_child(filled)
+		else:
+			var hollow := _outline_frame(Vector2(18, 18))
+			hollow.modulate = Color8(110, 48, 56)
+			hollow.position = Vector2(i * 24, 0)
+			hearts_root.add_child(hollow)
 
 
 func _tile(x: float, y: float) -> int:
@@ -645,6 +758,11 @@ func _process(delta: float) -> void:
 		dx += 1.0
 	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		dx -= 1.0
+	if dx != 0.0:
+		moved = true  # walking ends the spawn grace
+	var grace: bool = _spawn_grace() and not moved
+	iframes = maxf(0.0, iframes - delta)
+	blink_t += delta
 	var speed := float(movement["run_speed"])
 	if volume != null:
 		speed *= float(volume.get("speed_factor", 0.55))
@@ -660,6 +778,8 @@ func _process(delta: float) -> void:
 	)
 	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
 	if jump_pressed:
+		moved = true  # a jump ends the spawn grace
+		grace = _spawn_grace() and not moved
 		if volume != null:
 			# Submerged: small swim stroke. At the surface (open air
 			# above): a full jump — the reachability validator models
@@ -703,22 +823,22 @@ func _process(delta: float) -> void:
 		player_pos.y = new_y
 		on_ground = false
 
-	# Damaging volumes (swimmable lava): drain the damage budget, then
-	# respawn — the budget resets out of the volume.
+	# Damaging volumes (swimmable lava): drain hearts continuously —
+	# every accumulated point costs one heart; the fraction resets on
+	# safe ground. (The old DAMAGE_BUDGET stand-in is gone: one heart
+	# pool for everything.)
 	if volume != null:
-		damage_soaked += float(volume.get("damage_per_second", 0.0)) * delta
-		if damage_soaked >= DAMAGE_BUDGET:
-			_respawn()
+		_drain(float(volume.get("damage_per_second", 0.0)) * delta)
 	else:
 		damage_soaked = 0.0
 
 	if player_pos.y > grid_h + 2.0:
 		_respawn()
-	if (
-		hazard.has(_tile(player_pos.x + BODY_L, player_pos.y))
-		or hazard.has(_tile(player_pos.x + BODY_R, player_pos.y))
-	):
-		_respawn()
+	for corner in [player_pos.x + BODY_L, player_pos.x + BODY_R]:
+		var hazard_tile := _tile(corner, player_pos.y)
+		if hazard.has(hazard_tile):
+			_hurt(int((hazard[hazard_tile] as Dictionary).get("damage", 1)))
+			break
 
 	# --- checkpoints: crossing one moves the respawn point (3b) ---
 	for checkpoint in checkpoints:
@@ -733,10 +853,13 @@ func _process(delta: float) -> void:
 
 	# --- enemies: execute their database behavior params ---
 	for enemy in enemies:
+		if not enemy["alive"]:
+			continue
 		var espeed := float(enemy["speed"])
 		var behavior: Dictionary = enemy["behavior"]
 		var archetype := str(enemy["spec"].get("archetype", "sentry"))
 		var pos: Vector2 = enemy["pos"]
+		enemy["hurt_t"] = maxf(0.0, float(enemy["hurt_t"]) - delta)
 		if (archetype == "patroller" or archetype == "swimmer") and espeed > 0.0:
 			var next_x: float = pos.x + enemy["dir"] * espeed * delta
 			if (
@@ -746,7 +869,9 @@ func _process(delta: float) -> void:
 				enemy["dir"] = enemy["dir"] * -1.0
 			else:
 				pos.x = next_x
-		elif archetype == "chaser" and espeed > 0.0:
+		elif archetype == "chaser" and espeed > 0.0 and not grace:
+			# Spawn grace (GameRules.spawn_grace): chasers hold still
+			# until the player's first move after a (re)spawn.
 			if absf(player_pos.x - pos.x) <= float(behavior.get("aggro_range", 6)):
 				var next_x: float = pos.x + signf(player_pos.x - pos.x) * espeed * delta
 				if _enemy_can_occupy(archetype, next_x, pos.y):
@@ -755,19 +880,55 @@ func _process(delta: float) -> void:
 		enemy["node"].position = pos * CELL + enemy["vis_off"]
 		if enemy["node"] is Sprite2D:
 			enemy["node"].flip_h = enemy["dir"] < 0.0
+		# Stomp flash: a surviving stomp blinks the body briefly.
+		enemy["node"].visible = not (
+			float(enemy["hurt_t"]) > 0.0 and int(enemy["hurt_t"] * 20.0) % 2 == 0
+		)
 		if enemy["frame"] != null:
 			# Silhouette frames track the body exactly; border frames sit
-			# 2px out around the rect (their stored offset).
+			# offset around the rect (their stored offset).
 			enemy["frame"].position = enemy["node"].position + enemy["frame_off"]
 			if enemy["node"] is Sprite2D:
 				for copy in enemy["frame"].get_children():
 					copy.flip_h = enemy["dir"] < 0.0
-		if pos.distance_to(player_pos) < 0.7:
-			_respawn()
+		# Size-aware touch AABB (combat.py occupancy): the body is `size`
+		# cells square, bottom-anchored — feet at y+1, top at y+1-size,
+		# centered over its occupied columns.
+		var esize := float(enemy["size"])
+		var cols := maxi(1, mini(2, int(esize)))
+		var e_cx: float = pos.x + cols / 2.0
+		var e_top: float = pos.y + 1.0 - esize
+		var e_bottom: float = pos.y + 1.0
+		var overlap_x: bool = absf((player_pos.x + 0.5) - e_cx) < 0.35 + esize / 2.0
+		var overlap_y: bool = player_pos.y < e_bottom and player_pos.y + 1.0 > e_top
+		if not (overlap_x and overlap_y):
+			continue
+		if player_vy > 0.0 and player_pos.y + 1.0 <= e_top + 0.35:
+			# STOMP: falling onto the head band — damage the enemy,
+			# bounce off it. No i-frames spent; stomping is safe.
+			enemy["hp"] = float(enemy["hp"]) - stomp_damage
+			if float(enemy["hp"]) <= 0.0:
+				enemy["alive"] = false
+				enemy["node"].visible = false
+				if enemy["frame"] != null:
+					enemy["frame"].visible = false
+				_play_sfx("jump")  # bounce impulse; no stomp SFX in v1
+			else:
+				enemy["hurt_t"] = 0.25
+			var gravity_b := float(movement["gravity"])
+			var jump_v := sqrt(2.0 * gravity_b * (float(movement["jump_height"]) + 0.4))
+			player_vy = -jump_v * stomp_bounce
+		else:
+			_hurt(int(enemy["damage_hearts"]))
 
 	player_node.position = player_pos * CELL + player_vis_off
 	if player_node is Sprite2D and dx != 0.0:
 		player_node.flip_h = dx < 0.0
+	# Spawn grace / i-frames: the player BLINKS (intermittently invisible)
+	# while untouchable; the first move ends the grace.
+	player_node.visible = not (
+		(grace or iframes > 0.0) and int(blink_t * 8.0) % 2 == 0
+	)
 	camera.position = Vector2(
 		(player_pos.x + 0.5) * CELL, (player_pos.y + 0.5) * CELL
 	)
