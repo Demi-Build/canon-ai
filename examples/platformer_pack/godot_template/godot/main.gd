@@ -4,11 +4,11 @@
 # review renderer and the (throwaway) pygame harness:
 #   - movement physics   <- manifest.json  (PlayerMovementSpec)
 #   - combat tuning      <- manifest.json  "combat" block (combat.json):
-#                           hearts, stomp damage/bounce, i-frames — the
-#                           arithmetic mirrors examples/platformer_pack/
-#                           combat.py (keep in sync); combat POLICIES
-#                           (checkpoint enemy reset, spawn grace) are
-#                           GameRules keys
+#                           hearts, stomp damage/bounce, i-frames, spawn
+#                           shield seconds — the arithmetic mirrors
+#                           examples/platformer_pack/combat.py (keep in
+#                           sync); combat POLICIES (checkpoint enemy
+#                           reset, spawn grace) are GameRules keys
 #   - tile appearance    <- TERRAIN layer (slot indices) + tilesheet regions
 #   - tile physics       <- tileset slot categories + params (E.3 / 3b) —
 #                           volumes carry speed_factor/gravity/impulse/
@@ -38,6 +38,7 @@ var max_hearts := 3
 var stomp_damage := 6
 var stomp_bounce := 0.7
 var iframes_s := 1.0
+var spawn_grace_s := 4.0
 
 var manifest: Dictionary
 var movement: Dictionary
@@ -83,7 +84,11 @@ var hearts := 3
 var iframes := 0.0  # post-hit invulnerability countdown
 var damage_soaked := 0.0  # fractional volume drain toward the next heart
 var moved := false  # first input after (re)spawn ends the spawn grace
-var blink_t := 0.0  # deterministic blink clock (grace + i-frames)
+# Spawn SHIELD: full invincibility for a few seconds AFTER that first
+# input — enemies may legitimately camp a checkpoint; this window keeps
+# respawning next to one fair.
+var spawn_shield := 0.0
+var blink_t := 0.0  # deterministic blink clock (grace + shield + i-frames)
 var hearts_root: Control = null
 
 var world_root: Node2D
@@ -116,6 +121,7 @@ func _ready() -> void:
 	stomp_damage = int(combat.get("stomp_damage", 6))
 	stomp_bounce = float(combat.get("stomp_bounce_factor", 0.7))
 	iframes_s = float(combat.get("hurt_iframes_s", 1.0))
+	spawn_grace_s = float(combat.get("spawn_grace_s", 4.0))
 	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
 	stage_effects = stage.get("effects", [])
 	_setup_audio(manifest.get("audio", {}))
@@ -623,6 +629,7 @@ func _respawn() -> void:
 	damage_soaked = 0.0
 	hearts = max_hearts
 	iframes = 0.0
+	spawn_shield = 0.0
 	moved = false  # spawn grace re-engages until the first input
 	if bool(rules.get("checkpoint_enemy_reset", true)):
 		# Killed enemies come back on a checkpoint respawn — dying never
@@ -640,10 +647,20 @@ func _respawn() -> void:
 	_play_sfx("death")
 
 
+func _note_move() -> void:
+	# First input after a (re)spawn: the pre-move grace ends and the
+	# timed spawn SHIELD starts — the player can act (and be chased)
+	# but cannot be hurt until it runs out.
+	if not moved:
+		moved = true
+		if _spawn_grace():
+			spawn_shield = spawn_grace_s
+
+
 func _hurt(cost: int) -> void:
-	# One heart pool for contact and hazard hits — spawn grace and
-	# i-frames gate them (volume drain has its own path below).
-	if iframes > 0.0 or (_spawn_grace() and not moved):
+	# One heart pool for contact and hazard hits — spawn grace, the
+	# spawn shield, and i-frames gate them (volume drain is below).
+	if iframes > 0.0 or spawn_shield > 0.0 or (_spawn_grace() and not moved):
 		return
 	hearts -= maxi(1, cost)
 	iframes = iframes_s
@@ -654,9 +671,9 @@ func _hurt(cost: int) -> void:
 
 func _drain(amount: float) -> void:
 	# Continuous volume damage: accumulate fractions, convert each whole
-	# point into one heart — ignores i-frames (lava keeps hurting) but
-	# respects spawn grace.
-	if _spawn_grace() and not moved:
+	# point into one heart — ignores hurt i-frames (lava keeps hurting)
+	# but respects spawn grace AND the spawn shield.
+	if spawn_shield > 0.0 or (_spawn_grace() and not moved):
 		return
 	damage_soaked += amount
 	while damage_soaked >= 1.0:
@@ -759,9 +776,10 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		dx -= 1.0
 	if dx != 0.0:
-		moved = true  # walking ends the spawn grace
+		_note_move()  # walking ends the grace, starts the shield
 	var grace: bool = _spawn_grace() and not moved
 	iframes = maxf(0.0, iframes - delta)
+	spawn_shield = maxf(0.0, spawn_shield - delta)
 	blink_t += delta
 	var speed := float(movement["run_speed"])
 	if volume != null:
@@ -778,7 +796,7 @@ func _process(delta: float) -> void:
 	)
 	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
 	if jump_pressed:
-		moved = true  # a jump ends the spawn grace
+		_note_move()  # a jump ends the grace, starts the shield
 		grace = _spawn_grace() and not moved
 		if volume != null:
 			# Submerged: small swim stroke. At the surface (open air
@@ -924,10 +942,11 @@ func _process(delta: float) -> void:
 	player_node.position = player_pos * CELL + player_vis_off
 	if player_node is Sprite2D and dx != 0.0:
 		player_node.flip_h = dx < 0.0
-	# Spawn grace / i-frames: the player BLINKS (intermittently invisible)
-	# while untouchable; the first move ends the grace.
+	# Spawn grace / shield / i-frames: the player BLINKS (intermittently
+	# invisible) the whole time they are untouchable.
 	player_node.visible = not (
-		(grace or iframes > 0.0) and int(blink_t * 8.0) % 2 == 0
+		(grace or spawn_shield > 0.0 or iframes > 0.0)
+		and int(blink_t * 8.0) % 2 == 0
 	)
 	camera.position = Vector2(
 		(player_pos.x + 0.5) * CELL, (player_pos.y + 0.5) * CELL

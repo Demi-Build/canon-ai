@@ -4,5 +4,6 @@
   "stomp_damage": 6,
   "stomp_bounce_factor": 0.7,
   "hurt_iframes_s": 1.0,
+  "spawn_grace_s": 4.0,
   "spawn_safety_columns": 3
 }

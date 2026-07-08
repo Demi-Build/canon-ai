@@ -531,9 +531,12 @@ def main() -> None:
     print(f"\nSlice generated at {output_dir}/")
     print(f"  Review PNGs:  {output_dir}/review/")
     if args.engine == "godot":
+        # A paste-able command (absolute path) — no leaving the canon
+        # dir, no hunting for project.godot in a file dialog.
+        print(f"  Godot:        godot --path {output_dir.resolve()}")
         print(
-            f"  Godot:        open {output_dir}/project.godot in "
-            "Godot 4.3+ and press Play"
+            f"                (one level: PLAT_LEVEL=l2 godot --path "
+            f"{output_dir.resolve()})"
         )
     print(
         "  Pygame:       uv run --extra platformer --extra play "

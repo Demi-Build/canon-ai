@@ -40,8 +40,12 @@ v1 enforced policies:
   Enforced in both play surfaces' respawn paths.
 - ``spawn_grace`` (combat v1): "until_move" — after level start or a
   respawn the player takes no damage and blinks, and chaser-archetype
-  enemies hold still, until the player's first movement input; "off" —
-  no grace. Enforced in both play surfaces (damage gate + chaser AI gate).
+  enemies hold still, until the player's first movement input; that
+  first input then starts a full-invincibility SHIELD window
+  (``CombatSpec.spawn_grace_s`` — the number lives in combat.json) so
+  respawning beside a checkpoint-camping enemy stays fair; "off" — no
+  grace at all. Enforced in both play surfaces (damage gates + chaser
+  AI gate).
 """
 
 from __future__ import annotations

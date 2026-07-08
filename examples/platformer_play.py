@@ -18,8 +18,10 @@ stomp it (hp x mults / stomp_damage stomps) and bounce. Zero hearts:
 respawn at the last checkpoint, hearts refilled, killed enemies restored
 (GameRules.checkpoint_enemy_reset). After any (re)spawn you blink,
 untouchable, and chasers hold still until your first move
-(GameRules.spawn_grace). Fall off: same respawn. Reach the exit column:
-level complete.
+(GameRules.spawn_grace); that first move starts a timed spawn SHIELD
+(combat spawn_grace_s) so a checkpoint-camping enemy can't hit you the
+instant you act. Fall off: same respawn. Reach the exit column: level
+complete.
 """
 
 from __future__ import annotations
@@ -120,6 +122,7 @@ def main() -> None:
     STOMP_DAMAGE = int(combat.get("stomp_damage", 6))
     STOMP_BOUNCE = float(combat.get("stomp_bounce_factor", 0.7))
     IFRAMES_S = float(combat.get("hurt_iframes_s", 1.0))
+    SPAWN_GRACE_S = float(combat.get("spawn_grace_s", 4.0))
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
@@ -330,7 +333,11 @@ def main() -> None:
     iframes = 0.0  # post-hit invulnerability countdown
     damage_soaked = 0.0  # fractional volume drain toward the next heart
     moved = False  # first input after (re)spawn ends the spawn grace
-    blink_t = 0.0  # deterministic blink clock (grace + i-frames)
+    # Spawn SHIELD: full invincibility for a few seconds AFTER that
+    # first input — enemies may legitimately camp a checkpoint; this
+    # window is what keeps respawning next to one fair.
+    spawn_shield = 0.0
+    blink_t = 0.0  # deterministic blink clock (grace + shield + i-frames)
     live_enemies = [Enemy(p) for p in placements]
 
     def tile_at(cx: float, cy: float) -> int:
@@ -370,9 +377,10 @@ def main() -> None:
 
     def respawn() -> None:
         nonlocal px, py, vy, damage_soaked, hearts, iframes, moved
+        nonlocal spawn_shield
         px, py = float(respawn_point["x"]), float(respawn_point["y"])
         vy, damage_soaked = 0.0, 0.0
-        hearts, iframes, moved = MAX_HEARTS, 0.0, False
+        hearts, iframes, moved, spawn_shield = MAX_HEARTS, 0.0, False, 0.0
         if enemy_reset:
             # Killed enemies come back on a checkpoint respawn — dying
             # never leaves a half-cleared level (GameRules kind).
@@ -380,11 +388,22 @@ def main() -> None:
                 other.reset()
         play_sfx("death")
 
+    def note_move() -> None:
+        """First input after a (re)spawn: the pre-move grace ends and
+        the timed spawn SHIELD starts — the player can act (and be
+        chased) but cannot be hurt until it runs out."""
+        nonlocal moved, spawn_shield
+        if not moved:
+            moved = True
+            if spawn_grace:
+                spawn_shield = SPAWN_GRACE_S
+
     def hurt(cost: int) -> None:
-        """One heart pool for contact and hazard hits — spawn grace and
-        i-frames gate them (volume drain has its own path below)."""
+        """One heart pool for contact and hazard hits — spawn grace,
+        the spawn shield, and i-frames gate them (volume drain has its
+        own path below)."""
         nonlocal hearts, iframes
-        if iframes > 0.0 or (spawn_grace and not moved):
+        if iframes > 0.0 or spawn_shield > 0.0 or (spawn_grace and not moved):
             return
         hearts -= max(1, int(cost))
         iframes = IFRAMES_S
@@ -393,10 +412,11 @@ def main() -> None:
 
     def drain(amount: float) -> None:
         """Continuous volume damage: accumulate fractions, convert each
-        whole point into one heart — ignores i-frames (lava keeps
-        hurting) but respects spawn grace."""
+        whole point into one heart — ignores hurt i-frames (lava keeps
+        hurting) but respects spawn grace AND the spawn shield (full
+        invincibility while it lasts)."""
         nonlocal damage_soaked, hearts
-        if spawn_grace and not moved:
+        if spawn_shield > 0.0 or (spawn_grace and not moved):
             return
         damage_soaked += amount
         while damage_soaked >= 1.0:
@@ -427,7 +447,7 @@ def main() -> None:
                     respawn()
                     won = False
                 elif event.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
-                    moved = True  # a jump ends the spawn grace
+                    note_move()  # a jump ends the grace, starts the shield
                     down_held = (
                         pygame.key.get_pressed()[pygame.K_DOWN]
                         or pygame.key.get_pressed()[pygame.K_s]
@@ -456,9 +476,10 @@ def main() -> None:
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
         if dx:
-            moved = True  # walking ends the spawn grace
+            note_move()  # walking ends the grace, starts the shield
         grace = spawn_grace and not moved
         iframes = max(0.0, iframes - dt)
+        spawn_shield = max(0.0, spawn_shield - dt)
         blink_t += dt
         speed = run_speed * (
             float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
@@ -601,9 +622,11 @@ def main() -> None:
                     ),
                     2,
                 )
-        # Spawn grace / i-frames: the player BLINKS (intermittently
-        # invisible) while untouchable; first move ends the grace.
-        blinking = (grace or iframes > 0) and int(blink_t * 8) % 2 == 0
+        # Spawn grace / shield / i-frames: the player BLINKS
+        # (intermittently invisible) the whole time they are untouchable.
+        blinking = (
+            grace or spawn_shield > 0 or iframes > 0
+        ) and int(blink_t * 8) % 2 == 0
         if not blinking:
             if player_sprite is not None:
                 screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))

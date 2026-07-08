@@ -55,6 +55,13 @@ class CombatSpec(BaseModel):
     #: Post-hit invulnerability, seconds. Volume drain ignores it
     #: (continuous hazard); contact and hazard hits grant it.
     hurt_iframes_s: float = Field(default=1.0, ge=0.0)
+    #: Spawn SHIELD: how long the player stays untouchable AFTER the
+    #: first input that ends the spawn grace. Enemies may roam across a
+    #: checkpoint (that is normal gameplay) — this window is what makes
+    #: respawning next to a camping chaser fair. Full invincibility:
+    #: contact, hazards, and volume drain. Active only while the
+    #: ``GameRules.spawn_grace`` policy is "until_move".
+    spawn_grace_s: float = Field(default=4.0, ge=0.0)
     #: No enemy within this many columns of the spawn column (on the
     #: spawn row). Violations are TOOL-repaired by a column nudge at
     #: placement validation — never an LLM round-trip.
