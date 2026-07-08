@@ -62,9 +62,10 @@ class TestCombatSpec:
         assert spec.spawn_safety_columns == 3
         assert spec.stomp_bounce_factor == pytest.approx(0.7)
         assert spec.hurt_iframes_s == pytest.approx(1.0)
-        # Post-move spawn SHIELD (play-test round 1: respawning next to
-        # a checkpoint-camping hound was an instant unavoidable hit).
-        assert spec.spawn_grace_s == pytest.approx(4.0)
+        # Post-move spawn SHIELD (play-test rounds 1+2: respawning next
+        # to a checkpoint-camping hound was an instant unavoidable hit;
+        # 4s of shield then felt like god mode — 1s covers the escape).
+        assert spec.spawn_grace_s == pytest.approx(1.0)
 
     def test_unknown_keys_ride_inert(self, tmp_path: Path) -> None:
         path = tmp_path / "combat.json"

@@ -58,10 +58,11 @@ class CombatSpec(BaseModel):
     #: Spawn SHIELD: how long the player stays untouchable AFTER the
     #: first input that ends the spawn grace. Enemies may roam across a
     #: checkpoint (that is normal gameplay) — this window is what makes
-    #: respawning next to a camping chaser fair. Full invincibility:
-    #: contact, hazards, and volume drain. Active only while the
-    #: ``GameRules.spawn_grace`` policy is "until_move".
-    spawn_grace_s: float = Field(default=4.0, ge=0.0)
+    #: respawning next to a camping chaser fair: full invincibility
+    #: until you move, then ONE more second (playtest round 2: 4s felt
+    #: like god mode). Covers contact, hazards, and volume drain.
+    #: Active only while ``GameRules.spawn_grace`` is "until_move".
+    spawn_grace_s: float = Field(default=1.0, ge=0.0)
     #: No enemy within this many columns of the spawn column (on the
     #: spawn row). Violations are TOOL-repaired by a column nudge at
     #: placement validation — never an LLM round-trip.

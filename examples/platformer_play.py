@@ -122,7 +122,7 @@ def main() -> None:
     STOMP_DAMAGE = int(combat.get("stomp_damage", 6))
     STOMP_BOUNCE = float(combat.get("stomp_bounce_factor", 0.7))
     IFRAMES_S = float(combat.get("hurt_iframes_s", 1.0))
-    SPAWN_GRACE_S = float(combat.get("spawn_grace_s", 4.0))
+    SPAWN_GRACE_S = float(combat.get("spawn_grace_s", 1.0))
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}

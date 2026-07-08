@@ -112,7 +112,7 @@ combat arithmetic) are hardened code with tests.
   "stomp_damage": 6,
   "stomp_bounce_factor": 0.7,
   "hurt_iframes_s": 1.0,
-  "spawn_grace_s": 4.0,
+  "spawn_grace_s": 1.0,
   "spawn_safety_columns": 3
 }
 ```
@@ -122,8 +122,9 @@ combat arithmetic) are hardened code with tests.
   `ceil(hp × variant_mults / stomp_damage)` stomps
 - `stomp_bounce_factor` — bounce after a stomp, × jump velocity
 - `hurt_iframes_s` — post-hit invulnerability window
-- `spawn_grace_s` — full invincibility for this long AFTER your first
-  move ends the spawn grace (fair respawns next to a camping enemy)
+- `spawn_grace_s` — you spawn fully invincible until your first move;
+  this is the ONE extra second of shield after it (fair respawns next
+  to a camping enemy, no god mode)
 - `spawn_safety_columns` — no enemy this close to spawn at placement
   time; violators are column-nudged by the tool, never kicked to the LLM
 

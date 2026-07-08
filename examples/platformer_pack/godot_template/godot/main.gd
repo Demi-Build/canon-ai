@@ -38,7 +38,7 @@ var max_hearts := 3
 var stomp_damage := 6
 var stomp_bounce := 0.7
 var iframes_s := 1.0
-var spawn_grace_s := 4.0
+var spawn_grace_s := 1.0
 
 var manifest: Dictionary
 var movement: Dictionary
@@ -121,7 +121,7 @@ func _ready() -> void:
 	stomp_damage = int(combat.get("stomp_damage", 6))
 	stomp_bounce = float(combat.get("stomp_bounce_factor", 0.7))
 	iframes_s = float(combat.get("hurt_iframes_s", 1.0))
-	spawn_grace_s = float(combat.get("spawn_grace_s", 4.0))
+	spawn_grace_s = float(combat.get("spawn_grace_s", 1.0))
 	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
 	stage_effects = stage.get("effects", [])
 	_setup_audio(manifest.get("audio", {}))
