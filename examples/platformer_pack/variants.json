@@ -12,6 +12,13 @@
       "speed_mult": 0.8,
       "size": 1.3,
       "visual": "outline_scale"
+    },
+    {
+      "name": "relentless",
+      "stat_mults": { "hp": 1.5 },
+      "speed_mult": 1.05,
+      "visual": "outline",
+      "behavior": { "aggro_range": 99, "leash_range": 999 }
     }
   ]
 }

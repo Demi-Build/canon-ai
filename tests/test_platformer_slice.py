@@ -89,6 +89,22 @@ class TestDsl:
         with pytest.raises(DslError, match=match):
             stamp(text, W, H)
 
+    def test_pool_conflict_names_the_occupying_tiles(self) -> None:
+        """The sunlit-run l3 class: the program lays floor, then its own
+        wall/gap overwrite/remove it, then pool() overlaps the damage.
+        'lay floor there first' was unfollowable — the error must name
+        what actually occupies each bad ground-row column."""
+        text = (
+            "floor(0,47)\ngap(18,21)\nwall(17,10,14)\n"
+            "pool(water,17,22)\nspawn(2)\nexit(45)"
+        )
+        with pytest.raises(DslError) as excinfo:
+            stamp(text, W, H)
+        message = str(excinfo.value)
+        assert "17 (wall)" in message
+        assert "18 (empty)" in message and "21 (empty)" in message
+        assert "removed or overwrote the floor" in message
+
     def test_parse_accepts_semicolons_and_comments(self) -> None:
         ops = parse_dsl("# a comment\nfloor(0,10); spawn(2)\nexit(8)")
         assert [op for op, _ in ops] == ["floor", "spawn", "exit"]
@@ -99,7 +115,8 @@ class TestDsl:
             width, height = LEVEL_DIMS[level_id]
             result = stamp(dsl_text, width, height)
             problems = check_level(
-                result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
+                result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+                free_volume=result.free_volume,
             )
             assert not problems, f"{level_id}: {problems}"
 
@@ -292,6 +309,34 @@ class TestValidators:
         result = stamp("floor(0,47)\npit(44,47)\nspawn(2)\nexit(20)", W, H)
         assert result.exit == (43, 13)
 
+    def test_snap_spawn_moves_to_valid_ground(self) -> None:
+        """The first multi-stage run lost THREE levels to fallback whose
+        final attempts failed ONLY on spawn placement — the exact column
+        is arithmetic, same contract as checkpoint snapping. Both
+        observed classes snap: no-floor-under-spawn (raised left edge)
+        and standing-cell-covered (terrain stamped over the spawn)."""
+        from examples.platformer_pack.validate import snap_spawn
+
+        # No ground floor at column 2 (the real l3 attempt-1 message).
+        text, moves = snap_spawn(
+            "floor(10,47)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert moves == ["spawn(2) -> spawn(10)"]
+        result = stamp(text, W, H)
+        assert result.spawn == (10, H - 3)
+
+        # Terrain covers the spawn's standing cell (the real l2 message).
+        covered = f"floor(0,47)\nledge(0,6,{H - 3})\nspawn(2)\nexit(45)"
+        text, moves = snap_spawn(covered, W, H)
+        assert moves == ["spawn(2) -> spawn(7)"]
+        assert stamp(text, W, H).spawn == (7, H - 3)
+
+        # A valid spawn is untouched; the exit column is never chosen.
+        text, moves = snap_spawn("floor(0,47)\nspawn(2)\nexit(45)", W, H)
+        assert moves == []
+        text, moves = snap_spawn("floor(44,47)\nspawn(45)\nexit(45)", W, H)
+        assert "spawn(45)" not in text and moves
+
     def test_snap_checkpoints_moves_to_valid_ground(self) -> None:
         """Checkpoint columns are a lookup, not a design decision — the
         second real run's l3 burned all three attempts on them while the
@@ -424,8 +469,9 @@ class TestValidators:
     ) -> None:
         """Repair, not re-roll: the retry prompt must contain the rejected
         DSL next to the diagnosis, so the model patches one design.
-        (A DESIGN failure — covered spawn. Reachability breaks no longer
-        reach the model at all; the bridge tool repairs those.)"""
+        (A DESIGN failure — a pool poured over its own gap. Covered
+        spawns and reachability breaks no longer reach the model at all;
+        the snap/bridge tools repair those.)"""
         good = make_fake_responder()
         layout_calls: list[str] = []
         failed_once = {"done": False}
@@ -437,12 +483,13 @@ class TestValidators:
                 layout_calls.append(msg)
                 if not failed_once["done"]:
                     failed_once["done"] = True
-                    # Cover the spawn standing row with a platform, sized
-                    # to whatever grid the prompt advertises.
+                    # Pour a pool over a gap the same program cut — the
+                    # sunlit run's un-repairable design failure class.
                     m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
-                    width, height = int(m.group(1)), int(m.group(2))
+                    width = int(m.group(1))
                     sent["bad_dsl"] = (
-                        f"floor(0,{width - 1})\nplatform(0,{height - 3},6)\n"
+                        f"floor(0,{width - 1})\ngap(10,13)\n"
+                        f"pool(water,10,13)\n"
                         f"spawn(2)\nexit({width - 3})"
                     )
                     return sent["bad_dsl"]
@@ -456,7 +503,7 @@ class TestValidators:
         assert "rejected because" in retries[0]
         assert "changing as little as possible" in retries[0]
         # And the diagnosis rides along with the rejected output.
-        assert "covered by a PLATFORM" in retries[0]
+        assert "cannot sink in" in retries[0]
 
     def test_placement_retry_prompt_carries_previous_attempt(
         self, tmp_path: Path
@@ -933,14 +980,14 @@ class TestEndToEnd:
                 for p in level.entities
                 if p.overrides.get("variant")
             ]
-            assert sorted(named) == ["champion", "elite"]
+            assert sorted(named) == ["champion", "elite", "relentless"]
             # entities.json carries the variant field for consumers.
             entities_doc = json.loads(
                 (run / f"level/{level.stage_id}/{level.level_id}/entities.json")
                 .read_text()
             )
             assert [e["variant"] for e in entities_doc if e["variant"]] == [
-                "elite", "champion",
+                "elite", "champion", "relentless",
             ]
         # Foreground decor landed inline + in its layer file.
         for level in levels.values():
@@ -961,7 +1008,9 @@ class TestEndToEnd:
         assert [t["name"] for t in manifest["tiles"]] == [
             "empty", "floor", "platform", "wall", "spike", "water",
         ]
-        assert [v["name"] for v in manifest["variants"]] == ["elite", "champion"]
+        assert [v["name"] for v in manifest["variants"]] == [
+            "elite", "champion", "relentless",
+        ]
 
     def test_water_reachability_model(self) -> None:
         """A pool wider than jump_width is crossable by swimming; the same
@@ -1161,7 +1210,7 @@ class TestEndToEnd:
         text = caplog.text
         assert "WorldPhase produced world" in text
         assert "StagePhase planned stage" in text
-        assert "EnemyGeneratorPhase produced 4 definitions" in text
+        assert "EnemyGeneratorPhase produced a 4-creature world pool" in text
         assert re.search(r"Layout l1 \(difficulty 1, \d+x\d+\)", text)
         assert re.search(r"Layout l3 \(difficulty 3, \d+x\d+\)", text)
         assert "Placement l1: " in text
@@ -1328,7 +1377,9 @@ class TestGenericOps:
         assert accepted and not problems
 
     def test_pool_needs_ground_floor(self) -> None:
-        with pytest.raises(DslError, match="no ground floor to sink into"):
+        # The error names the occupying tile per bad column (here: never
+        # floored at all, so 'empty') — located, not just prohibitive.
+        with pytest.raises(DslError, match=r"20 \(empty\).*cannot sink in"):
             stamp("floor(0,10)\npool(water,20,25)\nspawn(2)\nexit(8)", W, H)
 
     def test_no_basin_message_teaches_pool_op(self) -> None:
@@ -1556,8 +1607,80 @@ class TestSteppedSlopes:
             problems = check_level(
                 result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
                 triggers=result.triggers,
+                free_volume=result.free_volume,
             )
             assert not problems, (level_id, problems)
+
+    def test_water_wall_fills_down_to_terrain_and_skips_containment(self) -> None:
+        """Water as a FEATURE (playtest direction): a free-standing wall
+        of water the player swims up — deliberately exempt from the
+        basin/containment rule."""
+        result = stamp(
+            "floor(0,47)\nwater_wall(10,11,6)\nspawn(2)\nexit(45)", W, H,
+        )
+        # Filled from row 6 down to the floor (ground row H-2), 2 wide.
+        assert int(result.grid[6, 10]) == TileType.WATER
+        assert int(result.grid[H - 3, 11]) == TileType.WATER
+        assert int(result.grid[5, 10]) == TileType.EMPTY
+        assert (10, 6) in result.free_volume
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+        )
+        assert not problems
+        # Without the exemption the same grid would (correctly) spill —
+        # proving the rule still guards ordinary pools.
+        assert check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
+        )
+
+    def test_water_wall_over_a_pit_runs_out_the_bottom(self) -> None:
+        """A spout: over a bottomless gap the wall reaches the bottom
+        edge — sinking past it is a fall death, the deliberate hazard the
+        user asked for. (Over a pit() the spikes at the bottom stop the
+        fill — also a legitimate spout floor.)"""
+        result = stamp(
+            "floor(0,47)\ngap(10,11)\nwater_wall(10,11,8)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert int(result.grid[H - 1, 10]) == TileType.WATER  # bottom edge
+
+    def test_water_wall_is_climbable_by_reachability(self) -> None:
+        """Swim up the wall, leap out at the top — the existing volume
+        reachability rules make water walls vertical paths for free."""
+        from examples.platformer_pack.validate import reachable_cells
+
+        # A high ledge reachable ONLY through the adjacent water wall.
+        text = (
+            "floor(0,47)\nledge(13,16,6)\nwater_wall(10,11,5)\n"
+            "spawn(2)\nexit(45)"
+        )
+        result = stamp(text, W, H)
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+            triggers=result.triggers,
+        )
+        assert not problems
+        reached = reachable_cells(result.grid, result.spawn, DEFAULT_MOVEMENT)
+        assert (14, 5) in reached  # standing on the ledge, via the water
+
+    def test_water_block_floats_and_rejects_occupied_cells(self) -> None:
+        result = stamp(
+            "floor(0,47)\nwater_block(20,4,22,5)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert int(result.grid[4, 21]) == TileType.WATER
+        assert (21, 4) in result.free_volume
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+        )
+        assert not problems
+        with pytest.raises(DslError, match="must be open air"):
+            stamp(
+                f"floor(0,47)\nwater_block(20,{H - 2},22,{H - 2})\n"
+                "spawn(2)\nexit(45)", W, H,
+            )
 
     def test_unreachable_checkpoint_flagged(self) -> None:
         """check_level validates checkpoints like spawn/exit — standable
@@ -1683,7 +1806,7 @@ class TestStyleGuide:
         # it from the too-close wall (#5b4d5e → ground lifted to #776459).
         assert tileset.palette["ground"] == "#776459"
         manifest = json.loads((run / "manifest.json").read_text())
-        assert manifest["palette"] == tileset.palette
+        assert manifest["palettes"]["ashen_depths"] == tileset.palette
         style_doc = json.loads(
             (run / "style/ashen_depths/style.json").read_text()
         )
@@ -1764,9 +1887,9 @@ class TestStyleGuide:
         from examples.platformer_pack.style import check_palette
         from examples.platformer_pack.tiles import DEFAULT_TILES
 
-        assert check_palette(manifest["palette"], DEFAULT_TILES) == []
-        assert manifest["palette"]["water"] != "#1a4a6b"  # repaired
-        assert manifest["palette"]["danger"] == "#e84210"  # untouched
+        assert check_palette(manifest["palettes"]["ashen_depths"], DEFAULT_TILES) == []
+        assert manifest["palettes"]["ashen_depths"]["water"] != "#1a4a6b"  # repaired
+        assert manifest["palettes"]["ashen_depths"]["danger"] == "#e84210"  # untouched
 
     def test_style_prompt_carries_constraints(self, tmp_path: Path) -> None:
         """I1: the agent reads its constraints in the prompt."""
@@ -1818,9 +1941,9 @@ class TestLavaWorld:
         assert "lava" in [t["name"] for t in manifest["tiles"]]
         # The style agent styles THIS game's roles too (basalt ground,
         # lava pool) — data-driven end to end.
-        assert manifest["palette"]["lava"] == "#e8722c"
+        assert manifest["palettes"]["ashen_depths"]["lava"] == "#e8722c"
         # Canned #5a4f5c, lifted by the separation tool (wall too close).
-        assert manifest["palette"]["basalt"] == "#6e6470"
+        assert manifest["palettes"]["ashen_depths"]["basalt"] == "#6e6470"
 
         # The volume in the collision grid IS lava, damaging by data.
         tileset = ctx.bible.tilesets["ashen_depths"]

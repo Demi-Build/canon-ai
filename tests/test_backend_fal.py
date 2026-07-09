@@ -104,9 +104,24 @@ class TestFalImageBackendGenerate:
             arguments={
                 "prompt": "a red dragon",
                 "image_size": {"width": 512, "height": 256},
+                # nano-banana ignores image_size; the aspect enum is its
+                # only size control (2:1 request → nearest wide ratio).
+                "aspect_ratio": "16:9",
             },
         )
         assert result == FAKE_PNG_BYTES
+
+    def test_non_nano_banana_models_skip_aspect_ratio(self) -> None:
+        backend = FalImageBackend(model="fal-ai/flux/dev")
+        urlopen_mock = _make_urlopen_mock(FAKE_PNG_BYTES)
+
+        with (
+            patch.object(backend._fal, "subscribe", return_value=FAL_RESPONSE_IMAGES) as mock_sub,
+            patch("urllib.request.urlopen", return_value=urlopen_mock),
+        ):
+            backend.generate("a red dragon", 512, 256)
+
+        assert "aspect_ratio" not in mock_sub.call_args.kwargs["arguments"]
 
     def test_generate_alternate_image_dict_shape(self) -> None:
         backend = FalImageBackend()
@@ -131,6 +146,67 @@ class TestFalImageBackendGenerate:
             result = backend.generate("a forest", 128, 128)
 
         assert result == FAKE_PNG_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Size-contract enforcement — models are advisory, code owns the contract
+# ---------------------------------------------------------------------------
+
+
+def _real_png(width: int, height: int) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (10, 120, 40)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class TestSizeContract:
+    def test_closest_aspect_ratio_mapping(self) -> None:
+        from canon.backends.image_fal import closest_aspect_ratio
+
+        assert closest_aspect_ratio(512, 512) == "1:1"
+        assert closest_aspect_ratio(512, 256) == "16:9"  # 2:1 → nearest wide
+        assert closest_aspect_ratio(2100, 900) == "21:9"
+        assert closest_aspect_ratio(256, 512) == "9:16"
+
+    def test_square_return_is_cropped_to_requested_band(self) -> None:
+        """The white-bar bug: a 1024x1024 return for a 512x256 band
+        request must come back exactly 512x256 (center strip)."""
+        import io
+
+        from PIL import Image
+
+        out = FalImageBackend._conform_size(_real_png(1024, 1024), 512, 256)
+        assert Image.open(io.BytesIO(out)).size == (512, 256)
+
+    def test_matching_size_passes_through_untouched(self) -> None:
+        data = _real_png(512, 256)
+        assert FalImageBackend._conform_size(data, 512, 256) is data
+
+    def test_undecodable_bytes_pass_through(self) -> None:
+        """Garbage payloads defer to the consumer's loud per-asset
+        fallback instead of dying inside the backend."""
+        assert (
+            FalImageBackend._conform_size(FAKE_PNG_BYTES, 512, 256)
+            is FAKE_PNG_BYTES
+        )
+
+    def test_generate_conforms_oversized_return(self) -> None:
+        import io
+
+        from PIL import Image
+
+        backend = FalImageBackend()
+        urlopen_mock = _make_urlopen_mock(_real_png(1024, 1024))
+        with (
+            patch.object(backend._fal, "subscribe", return_value=FAL_RESPONSE_IMAGES),
+            patch("urllib.request.urlopen", return_value=urlopen_mock),
+        ):
+            result = backend.generate("a scenery band", 512, 256)
+        assert Image.open(io.BytesIO(result)).size == (512, 256)
 
 
 # ---------------------------------------------------------------------------

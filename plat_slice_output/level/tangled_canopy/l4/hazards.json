@@ -1,0 +1,80 @@
+[
+  {
+    "x": 28,
+    "y": 16,
+    "type": "pit_spike",
+    "params": {}
+  },
+  {
+    "x": 29,
+    "y": 16,
+    "type": "pit_spike",
+    "params": {}
+  },
+  {
+    "x": 30,
+    "y": 16,
+    "type": "pit_spike",
+    "params": {}
+  },
+  {
+    "x": 12,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 13,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 14,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 15,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 16,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 46,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 47,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 48,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 49,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 50,
+    "y": 14,
+    "type": "floor_spike",
+    "params": {}
+  }
+]

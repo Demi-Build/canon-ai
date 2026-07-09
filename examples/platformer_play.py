@@ -34,11 +34,22 @@ SCALE = 32
 FPS = 60
 
 
+def _stage_for(manifest: dict, level_id: str) -> str:
+    """The biome stage owning ``level_id`` (manifest v2 "stages")."""
+    for stage_entry in manifest.get("stages", []):
+        if level_id in stage_entry.get("levels", []):
+            return str(stage_entry["stage_id"])
+    raise SystemExit(
+        f"level {level_id!r} not in this world — levels: "
+        f"{manifest.get('levels')}"
+    )
+
+
 def _load(data_dir: Path, level_id: str):
     import numpy as np
 
     manifest = json.loads((data_dir / "manifest.json").read_text())
-    stage_id = manifest["stage_id"]
+    stage_id = _stage_for(manifest, level_id)
     level_dir = data_dir / "level" / stage_id / level_id
     level = json.loads((level_dir / "level.json").read_text())
     with np.load(level_dir / "collision.npz") as data:
@@ -154,7 +165,9 @@ def main() -> None:
             self.x = float(placement["x"])
             self.y = float(placement["y"])
             self.home = float(placement["x"])
+            self.home_y = float(placement["y"])
             self.direction = 1.0
+            self.dir_y = 1.0  # float-style swimmers drift diagonally
             self.variant = variant_defs.get(str(placement.get("variant", "")))
             speed_mult = self.variant.get("speed_mult", 1.0) if self.variant else 1.0
             self.speed = float(self.spec["stats"].get("speed", 0)) * speed_mult
@@ -187,11 +200,15 @@ def main() -> None:
             if self.variant:
                 behavior.update(self.variant.get("behavior", {}))
             self.behavior = behavior
+            # Swimmer sub-behavior (ecology): "surface" rides the water's
+            # top row, "float" drifts diagonally, ""/"within" = classic.
+            self.swim_style = str(behavior.get("swim_style", "") or "")
 
         def reset(self) -> None:
             """Checkpoint-respawn restore: killed enemies return, at
             their placement, full hp (GameRules.checkpoint_enemy_reset)."""
-            self.x, self.direction = self.home, 1.0
+            self.x, self.y = self.home, self.home_y
+            self.direction, self.dir_y = 1.0, 1.0
             self.hp, self.alive, self.hurt_t = self.max_hp, True, 0.0
 
         def stomp(self) -> bool:
@@ -203,14 +220,26 @@ def main() -> None:
             self.hurt_t = 0.25
             return False
 
-        def _can_occupy(self, x: float) -> bool:
+        def _can_occupy(self, x: float, y: float | None = None) -> bool:
             """Terrain constraint for the NEXT step (GameRules-aware):
-            swimmers stay in their volume; land enemies keep solid footing
-            and — under swimmers_only/forbidden — never enter a volume."""
-            cell = tile_at(x, self.y)
-            below = tile_at(x, self.y + 1)
+            swimmers stay in their volume (surface-riders on its TOP
+            row); land enemies keep solid footing and — under
+            swimmers_only/forbidden — never enter a volume. NO enemy
+            walks into a hazard or clips through a solid — monsters
+            respect the level (behavior doctrine; jumpers are v2)."""
+            y = self.y if y is None else y
+            cell = tile_at(x, y)
+            below = tile_at(x, y + 1)
+            if cell in HAZARDS:
+                return False  # nobody strolls into spikes
             if self.spec.get("archetype") == "swimmer":
-                return cell in VOLUMES
+                if cell not in VOLUMES:
+                    return False
+                if self.swim_style == "surface":
+                    return tile_at(x, y - 1) not in VOLUMES
+                return True
+            if cell in BLOCKING or cell in ONE_WAY:
+                return False  # no clipping through terrain
             if cell in VOLUMES and water_policy != "amphibious":
                 return False
             return below in BLOCKING or below in ONE_WAY  # no cliff-walking
@@ -218,7 +247,29 @@ def main() -> None:
         def update(self, dt: float, player_x: float, grace: bool) -> None:
             archetype = self.spec.get("archetype", "sentry")
             self.hurt_t = max(0.0, self.hurt_t - dt)
-            if archetype in ("patroller", "swimmer") and self.speed > 0:
+            if (
+                archetype == "swimmer"
+                and self.swim_style == "float"
+                and self.speed > 0
+            ):
+                # Floating swimmer: diagonal drift, each axis bouncing
+                # off the water's boundary independently (main.gd mirrors
+                # this — mechanics parity).
+                step = self.speed * 0.7 * dt
+                new_x = self.x + self.direction * step
+                if (
+                    abs(new_x - self.home) >= self.behavior.get("patrol_range", 4)
+                    or not self._can_occupy(new_x)
+                ):
+                    self.direction *= -1.0
+                else:
+                    self.x = new_x
+                new_y = self.y + self.dir_y * step
+                if tile_at(self.x, new_y) not in VOLUMES:
+                    self.dir_y *= -1.0
+                else:
+                    self.y = new_y
+            elif archetype in ("patroller", "swimmer") and self.speed > 0:
                 new_x = self.x + self.direction * self.speed * dt
                 if (
                     abs(new_x - self.home) >= self.behavior.get("patrol_range", 4)
@@ -232,9 +283,28 @@ def main() -> None:
                 # until the player's first move after a (re)spawn.
                 if grace:
                     return
-                if abs(player_x - self.x) <= self.behavior.get("aggro_range", 6):
-                    new_x = self.x + (1.0 if player_x > self.x else -1.0) * self.speed * dt
+                # Leashed pursuit (behavior doctrine): chase only while
+                # the player is in aggro AND home is within leash_range;
+                # otherwise walk BACK to the home track. Only the
+                # 'relentless' variant (behavior override) chases
+                # forever. main.gd mirrors this — mechanics parity.
+                leash = float(self.behavior.get("leash_range", 0) or 0)
+                aggro = float(self.behavior.get("aggro_range", 6))
+                chasing = (
+                    abs(player_x - self.x) <= aggro
+                    and (leash <= 0 or abs(self.x - self.home) < leash)
+                )
+                if chasing:
+                    new_x = self.x + (
+                        1.0 if player_x > self.x else -1.0
+                    ) * self.speed * dt
                     if self._can_occupy(new_x):  # halts at volume/cliff edges
+                        self.x = new_x
+                elif abs(self.x - self.home) > 0.1:
+                    new_x = self.x + (
+                        1.0 if self.home > self.x else -1.0
+                    ) * self.speed * dt
+                    if self._can_occupy(new_x):
                         self.x = new_x
             # sentry: stationary by definition
 
@@ -252,7 +322,10 @@ def main() -> None:
     # quick pre-art surface, and music confirmation is one of its jobs.
     sounds: dict = {}
     try:
-        audio = manifest.get("audio") or {}
+        # Audio is per-stage (levels in a biome share the theme).
+        audio = (manifest.get("audio") or {}).get(
+            _stage_for(manifest, level_id), {}
+        )
         pygame.mixer.init()
         if audio.get("music"):
             pygame.mixer.music.load(str(data_dir / audio["music"]))
@@ -277,12 +350,25 @@ def main() -> None:
             pygame.image.load(str(path)).convert_alpha(), size
         )
 
-    stage_id = manifest["stage_id"]
+    stage_id = _stage_for(manifest, level_id)
     player_sprite = _sprite("sprite/player/base.png", (SCALE - 8, SCALE - 8))
     enemy_sprites = {
         eid: _sprite(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4))
         for eid, spec in enemies.items()
     }
+    # Gameplay props (manifest "props", keyed per biome stage): sprite
+    # when the art track made one, drawn placeholder shape otherwise.
+    prop_paths = manifest.get("props", {}).get(stage_id, {})
+    checkpoint_sprite = _sprite(
+        prop_paths.get("checkpoint", ""),
+        (int(SCALE * 1.5), int(SCALE * 1.5)),
+    )
+    exit_sprite = _sprite(prop_paths.get("exit", ""), (SCALE * 2, SCALE * 2))
+    checkpoint_grey = None
+    if checkpoint_sprite is not None:
+        # Unclaimed flags render desaturated — claimed ones full color.
+        checkpoint_grey = checkpoint_sprite.copy()
+        checkpoint_grey.fill((150, 150, 160), special_flags=pygame.BLEND_RGB_MULT)
     backdrop_bands = []
     backdrop_manifest = data_dir / "backdrop" / stage_id / "manifest.json"
     if backdrop_manifest.exists():
@@ -571,15 +657,52 @@ def main() -> None:
                         tile_colors.get(t, (255, 0, 255)),
                         (x * SCALE, y * SCALE, SCALE, SCALE),
                     )
-        # No exit graphic — the exit zone is the rightmost floored column.
+        # Exit GOAL object on the exit cell (the level visibly ends here;
+        # the exit zone is still the whole column) — sprite or a drawn
+        # green doorway. Mirrors main.gd's props.
+        exit_foot = ((exit_["x"] + 0.5) * SCALE, (exit_["y"] + 1) * SCALE)
+        if exit_sprite is not None:
+            screen.blit(
+                exit_sprite,
+                (exit_foot[0] - SCALE, exit_foot[1] - SCALE * 2),
+            )
+        else:
+            door = pygame.Rect(0, 0, int(SCALE * 1.1), int(SCALE * 1.8))
+            door.midbottom = (int(exit_foot[0]), int(exit_foot[1]))
+            glow = pygame.Surface(door.size, pygame.SRCALPHA)
+            glow.fill((64, 255, 112, 90))
+            screen.blit(glow, door.topleft)
+            pygame.draw.rect(screen, (64, 255, 112), door, 2)
+        # Checkpoint FLAGS: grey until claimed, colored after — sprite
+        # (desaturated copy) or a drawn pole + pennant.
         for checkpoint in checkpoints:
-            pygame.draw.rect(
-                screen, (255, 210, 74),
-                (
-                    checkpoint["x"] * SCALE + 4, checkpoint["y"] * SCALE + 4,
-                    SCALE - 8, SCALE - 8,
-                ),
-                0 if checkpoint["active"] else 3,
+            foot = (
+                (checkpoint["x"] + 0.5) * SCALE,
+                (checkpoint["y"] + 1) * SCALE,
+            )
+            if checkpoint_sprite is not None:
+                image = (
+                    checkpoint_sprite if checkpoint["active"] else checkpoint_grey
+                )
+                screen.blit(
+                    image,
+                    (foot[0] - SCALE * 0.75, foot[1] - SCALE * 1.5),
+                )
+                continue
+            color = (
+                (255, 210, 74) if checkpoint["active"] else (140, 140, 153)
+            )
+            pygame.draw.line(
+                screen, (107, 87, 71),
+                (foot[0], foot[1]), (foot[0], foot[1] - SCALE * 1.5), 2,
+            )
+            pygame.draw.polygon(
+                screen, color,
+                [
+                    (foot[0], foot[1] - SCALE * 1.5),
+                    (foot[0] + SCALE * 0.55, foot[1] - SCALE * 1.28),
+                    (foot[0], foot[1] - SCALE * 1.06),
+                ],
             )
         for enemy in live_enemies:
             if not enemy.alive:

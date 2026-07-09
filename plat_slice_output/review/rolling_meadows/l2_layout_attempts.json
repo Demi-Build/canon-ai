@@ -1,0 +1,34 @@
+{
+  "level_id": "l2",
+  "stage_id": "rolling_meadows",
+  "grid_width": 58,
+  "grid_height": 17,
+  "difficulty": 2,
+  "fallback": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "failed_validation",
+      "reasons": [
+        "volume: column 17 at surface row 13 is occupied by wall \u2014 the surface row must be open air. Pick an open surface row above the terrain."
+      ],
+      "content": "floor(0,57)\ngap(18,20)\nstairs_up(0,8)\nstairs_down(50,57)\npyramid(28,36)\nledge(3,12,12)\nledge(22,30,9)\nledge(38,48,6)\ncarve(3,11,6,12)\ncarve(9,11,12,12)\ncarve(22,8,25,9)\ncarve(27,8,30,9)\ncarve(38,5,41,6)\ncarve(45,5,48,6)\nplatform(14,10,4)\nplatform(32,7,4)\nplatform(50,4,4)\nwall(17,13,15)\nvolume(water,13,17,13)\nwall(18,13,15)\nhazard_strip(spike,21,22)\nhazard_strip(spike,37,38)\ncheckpoint(29)\nspawn(2)\nexit(54)"
+    },
+    {
+      "attempt": 2,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn at (2, 14) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "content": "floor(0,57)\ngap(18,20)\nstairs_up(0,8)\nstairs_down(50,57)\npyramid(28,36)\nledge(3,12,12)\nledge(22,30,9)\nledge(38,48,6)\ncarve(3,11,6,12)\ncarve(9,11,12,12)\ncarve(22,8,25,9)\ncarve(27,8,30,9)\ncarve(38,5,41,6)\ncarve(45,5,48,6)\nplatform(14,10,4)\nplatform(32,7,4)\nplatform(50,4,4)\nwall(12,13,15)\nvolume(water,13,17,13)\nwall(18,13,15)\nhazard_strip(spike,21,22)\nhazard_strip(spike,37,38)\ncheckpoint(29)\nspawn(2)\nexit(54)"
+    },
+    {
+      "attempt": 3,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn at (5, 14) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "content": "floor(0,57)\ngap(18,20)\nstairs_up(0,8)\nstairs_down(50,57)\npyramid(28,36)\nledge(3,12,12)\nledge(22,30,9)\nledge(38,48,6)\ncarve(3,11,6,12)\ncarve(9,11,12,12)\ncarve(22,8,25,9)\ncarve(27,8,30,9)\ncarve(38,5,41,6)\ncarve(45,5,48,6)\nplatform(14,10,4)\nplatform(32,7,4)\nplatform(50,4,4)\nwall(12,13,15)\nvolume(water,13,17,13)\nwall(18,13,15)\nhazard_strip(spike,21,22)\nhazard_strip(spike,37,38)\ncheckpoint(29)\nspawn(5)\nexit(54)"
+    }
+  ]
+}

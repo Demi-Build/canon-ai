@@ -89,6 +89,7 @@ _NAMESPACE_ARITY: dict[str, int] = {
     "tileset": 1,
     "backdrop": 1,
     "audio": 1,
+    "props": 1,
     "item": 1,
     "level": 3,
 }

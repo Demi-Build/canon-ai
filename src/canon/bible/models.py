@@ -36,6 +36,7 @@ from canon.bible.platformer import (  # noqa: E402
     PlayerDefinition,
     Stage,
     StageAudio,
+    StageProps,
     Tileset,
     World,
 )
@@ -417,6 +418,7 @@ class Bible(BaseModel):
     tilesets: dict[str, Tileset] = Field(default_factory=dict)
     backdrops: dict[str, Backdrop] = Field(default_factory=dict)
     audio: dict[str, StageAudio] = Field(default_factory=dict)
+    props: dict[str, StageProps] = Field(default_factory=dict)
     player: PlayerDefinition | None = None
 
     # ------------------------------------------------------------------ #

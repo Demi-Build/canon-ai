@@ -132,6 +132,35 @@ class MusicBackend(Protocol):
 
 
 @runtime_checkable
+class VLMBackend(Protocol):
+    """Protocol for vision-language judge adapters.
+
+    A VLM backend *judges* existing images against a prompt and returns a
+    text (typically JSON) verdict — it never generates assets, so there is
+    no ``generate_and_save`` / async fan-out surface here. Callers own
+    prompt construction, response parsing, and retry.
+
+    Example::
+
+        backend = AnthropicVLMBackend()
+        verdict = backend.judge("Do these two renders match?", [png_a, png_b])
+    """
+
+    def judge(self, prompt: str, images: list[bytes], max_tokens: int = 1024) -> str:
+        """Judge the given PNG images against the prompt.
+
+        Args:
+            prompt: The full judgment instructions (criteria + response format).
+            images: PNG-encoded images, in the order the prompt references them.
+            max_tokens: Response budget.
+
+        Returns:
+            The model's text response as a plain string.
+        """
+        ...
+
+
+@runtime_checkable
 class SFXBackend(Protocol):
     """Protocol for SFX-generation provider adapters (ElevenLabs, etc.).
 

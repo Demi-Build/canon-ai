@@ -84,8 +84,8 @@ class TestAudioPhase:
             assert stored == actual, rel
 
         manifest = json.loads((run / "manifest.json").read_text())
-        assert manifest["audio"]["music"] == audio.music_path
-        assert set(manifest["audio"]["sfx"]) == {e[0] for e in SFX_EVENTS}
+        assert manifest["audio"][STAGE]["music"] == audio.music_path
+        assert set(manifest["audio"][STAGE]["sfx"]) == {e[0] for e in SFX_EVENTS}
         # The StageAudio manifest is on disk for reviewers.
         doc = json.loads((run / "audio" / STAGE / "manifest.json").read_text())
         assert doc["stage_id"] == STAGE
@@ -97,7 +97,7 @@ class TestAudioPhase:
         assert not (run / "music").exists()
         assert not (run / "sfx").exists()
         manifest = json.loads((run / "manifest.json").read_text())
-        assert manifest["audio"] == {"music": None, "sfx": {}}
+        assert manifest["audio"] == {STAGE: {"music": None, "sfx": {}}}
 
     def test_fake_audio_deterministic(self, tmp_path: Path) -> None:
         a, b = tmp_path / "a", tmp_path / "b"

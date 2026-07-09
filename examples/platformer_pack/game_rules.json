@@ -3,7 +3,8 @@
   "water_containment": "contained",
   "enemy_water_policy": "swimmers_only",
   "platform_drop_through": true,
-  "variant_caps": { "elite": 1, "champion": 1 },
+  "variant_caps": { "elite": 1, "champion": 1, "relentless": 1 },
   "checkpoint_enemy_reset": true,
-  "spawn_grace": "until_move"
+  "spawn_grace": "until_move",
+  "rarity_caps": { "rare": 1, "uncommon": 2 }
 }

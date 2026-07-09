@@ -1,0 +1,229 @@
+{
+  "artifact_id": "",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "level:tangled_canopy/l4/layout",
+    "tileset:tangled_canopy"
+  ],
+  "level_id": "l4",
+  "stage_id": "tangled_canopy",
+  "grid_width": 60,
+  "grid_height": 17,
+  "pixels_per_cell": null,
+  "view_cells": null,
+  "brief": "A winding horizontal run through tangled root corridors and oversized mushroom caps, with spike pits hidden beneath deceptively mossy platforms and nimble dart-beetles weaving unpredictably between low branches.",
+  "layout_fallback": false,
+  "spawn": [
+    2,
+    14
+  ],
+  "exit": [
+    59,
+    14
+  ],
+  "collision": "level/tangled_canopy/l4/collision.npz",
+  "collision_hash": "sha256:34df596d91db6ded7d54eb1a7d544233e8e76e30982b9ee89158b7a7eb567817",
+  "terrain": "level/tangled_canopy/l4/terrain.npz",
+  "terrain_hash": "sha256:120bf0d5d2a841b34ec4c05199f380221a33bef75599b19bda42b32fc1d34203",
+  "background": "level/tangled_canopy/l4/background.npz",
+  "background_hash": "sha256:7aba8f03d979c1dd72f1babf1214547d1136ac42d7e3905f6c6a3e109c3f0126",
+  "hazards": [
+    {
+      "x": 28,
+      "y": 16,
+      "type": "pit_spike",
+      "params": {}
+    },
+    {
+      "x": 29,
+      "y": 16,
+      "type": "pit_spike",
+      "params": {}
+    },
+    {
+      "x": 30,
+      "y": 16,
+      "type": "pit_spike",
+      "params": {}
+    },
+    {
+      "x": 12,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 13,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 14,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 15,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 16,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 46,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 47,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 48,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 49,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    },
+    {
+      "x": 50,
+      "y": 14,
+      "type": "floor_spike",
+      "params": {}
+    }
+  ],
+  "triggers": [
+    {
+      "x": 38,
+      "y": 14,
+      "type": "checkpoint",
+      "params": {}
+    }
+  ],
+  "foreground": [
+    {
+      "x": 4,
+      "y": 1,
+      "type": "stalactite",
+      "params": {}
+    },
+    {
+      "x": 18,
+      "y": 16,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 27,
+      "y": 2,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 41,
+      "y": 15,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 53,
+      "y": 1,
+      "type": "stalactite",
+      "params": {}
+    },
+    {
+      "x": 35,
+      "y": 3,
+      "type": "vine",
+      "params": {}
+    }
+  ],
+  "hazards_hash": "sha256:073ffd092976f300c87adce631b783f4e6e8c10113d3488440e77c20ab684f7d",
+  "triggers_hash": "sha256:ba8d5df282d828e6c28e48159c1061a79c7d54d5a4b7983728954ca3dd435c4b",
+  "foreground_hash": "sha256:5c0c2bc5c794e2068cb57c674331a9afe996f8f3766aee1bfd09bde1facdbaaf",
+  "entities_hash": "sha256:c2c0d2e83e56bba85fdb1cbf2237e4831449b4f3bc0443c59ca6078f01aeea51",
+  "entities": [
+    {
+      "ref": "enemy:pebble_trudger",
+      "pos": [
+        10,
+        14
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:tumble_snout",
+      "pos": [
+        36,
+        14
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:boing_bug",
+      "pos": [
+        44,
+        12
+      ],
+      "overrides": {}
+    }
+  ],
+  "step_parents": {
+    "collision": [
+      "level:tangled_canopy/l4/layout"
+    ],
+    "hazards": [
+      "level:tangled_canopy/l4/collision"
+    ],
+    "triggers": [
+      "level:tangled_canopy/l4/collision"
+    ],
+    "terrain": [
+      "level:tangled_canopy/l4/collision",
+      "tileset:tangled_canopy"
+    ],
+    "background": [
+      "level:tangled_canopy/l4/collision",
+      "tileset:tangled_canopy"
+    ],
+    "entities": [
+      "level:tangled_canopy/l4/collision",
+      "level:tangled_canopy/l4/hazards",
+      "enemy:boing_bug",
+      "enemy:clover_roller",
+      "enemy:gilt_wanderer",
+      "enemy:pebble_trudger",
+      "enemy:puddle_drifter",
+      "enemy:tumble_snout"
+    ],
+    "foreground": [
+      "level:tangled_canopy/l4/collision",
+      "tileset:tangled_canopy"
+    ],
+    "level": [
+      "level:tangled_canopy/l4/collision",
+      "level:tangled_canopy/l4/hazards",
+      "level:tangled_canopy/l4/triggers",
+      "level:tangled_canopy/l4/terrain",
+      "level:tangled_canopy/l4/background",
+      "level:tangled_canopy/l4/entities",
+      "level:tangled_canopy/l4/foreground"
+    ]
+  }
+}

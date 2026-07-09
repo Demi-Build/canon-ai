@@ -180,41 +180,107 @@ def reserved_hue_bands(
 
 
 class WorldPhase:
+    """World plan: title + an ORDERED list of biome stages (easy → hard).
+    ``World.edges`` records the linear play chain and ``unlock_rules``
+    the policy — data the world map + branching graphs (later) read."""
+
     name = "plat:world"
 
-    def __init__(self, pitch: str = "a small hand-crafted-feeling 2D platformer") -> None:
+    def __init__(
+        self,
+        pitch: str = "a small hand-crafted-feeling 2D platformer",
+        num_stages: int = 1,
+    ) -> None:
         self.pitch = pitch
+        self.num_stages = num_stages
+
+    def _validate(self, obj: dict) -> list[str]:
+        stages = obj.get("stages")
+        if not isinstance(stages, list) or len(stages) != self.num_stages:
+            return [
+                f'"stages" must be a list of exactly {self.num_stages} '
+                "objects (in play order)."
+            ]
+        problems = []
+        seen: set[str] = set()
+        for i, entry in enumerate(stages):
+            if not isinstance(entry, dict) or not all(
+                isinstance(entry.get(k), str) and entry.get(k)
+                for k in ("stage_id", "biome", "brief")
+            ):
+                problems.append(
+                    f"stages[{i}] must be an object with non-empty string "
+                    '"stage_id", "biome", and "brief".'
+                )
+                continue
+            slug = slugify(str(entry["stage_id"]))
+            if slug in seen:
+                problems.append(
+                    f"stages[{i}] stage_id {entry['stage_id']!r} repeats an "
+                    "earlier stage — every stage needs a distinct id."
+                )
+            seen.add(slug)
+        return problems
 
     def run(self, ctx: Any) -> None:
         seed = str(getattr(ctx.config, "seed", ""))
+        fallback = {
+            "title": "Untitled Hollows",
+            "stages": [
+                {
+                    "stage_id": f"stage_{i + 1}",
+                    "biome": "caverns",
+                    "brief": "A quiet cavern stage.",
+                }
+                for i in range(self.num_stages)
+            ],
+        }
         data = llm_json(
             ctx,
             self.name,
-            lambda fb: ctx.prompts.world_generation(self.pitch, seed),
-            required_keys=("title", "stage_id", "stage_brief"),
-            fallback={
-                "title": "Untitled Hollows",
-                "stage_id": "stage_1",
-                "stage_brief": "A quiet cavern stage.",
-            },
+            lambda fb: ctx.prompts.world_generation(
+                self.pitch, seed, self.num_stages
+            ),
+            required_keys=("title", "stages"),
+            fallback=fallback,
+            validate_obj=self._validate,
         )
-        stage_id = slugify(str(data["stage_id"]))
+        stage_ids: list[str] = []
+        briefs: dict[str, str] = {}
+        biomes: dict[str, str] = {}
+        for entry in data["stages"]:
+            stage_id = slugify(str(entry["stage_id"]))
+            base, counter = stage_id, 2
+            while stage_id in briefs:  # fallback dedup, post-validation
+                stage_id = f"{base}_{counter}"
+                counter += 1
+            stage_ids.append(stage_id)
+            briefs[stage_id] = str(entry["brief"])
+            biomes[stage_id] = slugify(str(entry["biome"])) or "wilds"
         world = World(
             artifact_id=make_artifact_id("world"),
             title=str(data["title"]),
-            stage_ids=[stage_id],
+            stage_ids=stage_ids,
+            # Linear play chain — the data seam branching graphs reuse.
+            edges=list(zip(stage_ids, stage_ids[1:])),
+            unlock_rules={"type": "linear"},
         )
         content_hash = ctx.adapter.write_json_singleton(
             "world.json", world.model_dump(mode="json")
         )
         stamp_provenance(ctx, world, content_hash)
         ctx.bible.world = world
-        ctx.artifacts["stage_id"] = stage_id
-        ctx.artifacts["stage_brief"] = str(data["stage_brief"])
+        ctx.artifacts["stage_ids"] = stage_ids
+        ctx.artifacts["stage_briefs"] = briefs
+        ctx.artifacts["stage_biomes"] = biomes
         logger.info(
-            "WorldPhase produced world %r (stage %r): %s",
-            world.title, stage_id, ctx.artifacts["stage_brief"],
+            "WorldPhase produced world %r with %d stage(s):",
+            world.title, len(stage_ids),
         )
+        for stage_id in stage_ids:
+            logger.info(
+                "  %s [%s]: %s", stage_id, biomes[stage_id], briefs[stage_id]
+            )
         _stamp_metadata(ctx, self.name)
 
 
@@ -224,6 +290,12 @@ class WorldPhase:
 
 
 class StagePhase:
+    """Per-stage plans, one LLM call per stage. Level ids are allocated
+    GLOBALLY across the world (stage k of M owns l{(k-1)*L+1}..l{kL}) so
+    ``bible.levels`` keying, regen addressing, and PLAT_LEVEL all stay
+    id-unique; the biome-local display name ("2-1") is derived from the
+    world order by the manifest, never stored as an id."""
+
     name = "plat:stage"
 
     def __init__(self, num_levels: int = 3, num_enemies: int = 3) -> None:
@@ -231,58 +303,70 @@ class StagePhase:
         self.num_enemies = num_enemies
 
     def run(self, ctx: Any) -> None:
-        stage_id = ctx.artifacts["stage_id"]
-        data = llm_json(
-            ctx,
-            self.name,
-            lambda fb: ctx.prompts.stage_generation(
-                ctx.bible.world.title if ctx.bible.world else "",
-                ctx.artifacts.get("stage_brief", ""),
-                self.num_levels,
-                self.num_enemies,
-            ),
-            required_keys=("theme", "level_briefs", "roster_brief"),
-            fallback={
-                "theme": "caverns",
-                "level_briefs": ["A level."] * self.num_levels,
-                "roster_brief": "Cave creatures.",
-            },
-        )
-        briefs = [str(b) for b in data.get("level_briefs") or []]
-        briefs = (briefs + ["A level."] * self.num_levels)[: self.num_levels]
-        # View hints are optional and lenient: unknown/missing → standard
-        # (the game-global framing). Deliberate exceptions only.
-        views = [str(v) for v in data.get("level_views") or []]
-        views = (views + ["standard"] * self.num_levels)[: self.num_levels]
-        level_ids = [f"l{i + 1}" for i in range(self.num_levels)]
-
         from examples.platformer_pack.effects import sanitize_effects
 
-        stage = Stage(
-            artifact_id=make_artifact_id("stage", stage_id),
-            stage_id=stage_id,
-            theme=str(data["theme"]),
-            level_ids=level_ids,
-            tileset_ref=make_artifact_id("tileset", stage_id),
-            effects=sanitize_effects(
-                data.get("effects"), warn=lambda m: warn(ctx, m)
-            ),
-            parents=[make_artifact_id("world")],
-        )
-        content_hash = ctx.adapter.write_json_singleton(
-            f"stage/{stage_id}/stage.json", stage.model_dump(mode="json")
-        )
-        stamp_provenance(ctx, stage, content_hash)
-        ctx.bible.stages[stage_id] = stage
-        ctx.artifacts["level_briefs"] = dict(zip(level_ids, briefs))
-        ctx.artifacts["level_views"] = dict(zip(level_ids, views))
-        ctx.artifacts["roster_brief"] = str(data["roster_brief"])
-        logger.info(
-            "StagePhase planned stage %r (theme %r): %d levels; roster: %s",
-            stage_id, stage.theme, len(level_ids), ctx.artifacts["roster_brief"],
-        )
-        for level_id, brief in ctx.artifacts["level_briefs"].items():
-            logger.info("  %s brief: %s", level_id, brief)
+        stage_ids = ctx.artifacts["stage_ids"]
+        world_title = ctx.bible.world.title if ctx.bible.world else ""
+        ctx.artifacts.setdefault("level_briefs", {})
+        ctx.artifacts.setdefault("level_views", {})
+        ctx.artifacts.setdefault("roster_briefs", {})
+        for number, stage_id in enumerate(stage_ids, start=1):
+            data = llm_json(
+                ctx,
+                f"{self.name}:{stage_id}",
+                lambda fb, _sid=stage_id, _n=number: ctx.prompts.stage_generation(
+                    world_title,
+                    _sid,
+                    ctx.artifacts.get("stage_briefs", {}).get(_sid, ""),
+                    self.num_levels,
+                    self.num_enemies,
+                    stage_number=_n,
+                    num_stages=len(stage_ids),
+                ),
+                required_keys=("theme", "level_briefs", "roster_brief"),
+                fallback={
+                    "theme": "caverns",
+                    "level_briefs": ["A level."] * self.num_levels,
+                    "roster_brief": "Cave creatures.",
+                },
+            )
+            briefs = [str(b) for b in data.get("level_briefs") or []]
+            briefs = (briefs + ["A level."] * self.num_levels)[: self.num_levels]
+            # View hints are optional and lenient: unknown/missing →
+            # standard (the game-global framing). Deliberate exceptions only.
+            views = [str(v) for v in data.get("level_views") or []]
+            views = (views + ["standard"] * self.num_levels)[: self.num_levels]
+            first = (number - 1) * self.num_levels
+            level_ids = [f"l{first + i + 1}" for i in range(self.num_levels)]
+
+            stage = Stage(
+                artifact_id=make_artifact_id("stage", stage_id),
+                stage_id=stage_id,
+                theme=str(data["theme"]),
+                biome=ctx.artifacts.get("stage_biomes", {}).get(stage_id, ""),
+                level_ids=level_ids,
+                tileset_ref=make_artifact_id("tileset", stage_id),
+                effects=sanitize_effects(
+                    data.get("effects"), warn=lambda m: warn(ctx, m)
+                ),
+                parents=[make_artifact_id("world")],
+            )
+            content_hash = ctx.adapter.write_json_singleton(
+                f"stage/{stage_id}/stage.json", stage.model_dump(mode="json")
+            )
+            stamp_provenance(ctx, stage, content_hash)
+            ctx.bible.stages[stage_id] = stage
+            ctx.artifacts["level_briefs"].update(dict(zip(level_ids, briefs)))
+            ctx.artifacts["level_views"].update(dict(zip(level_ids, views)))
+            ctx.artifacts["roster_briefs"][stage_id] = str(data["roster_brief"])
+            logger.info(
+                "StagePhase planned stage %r (%d/%d, theme %r): levels %s; "
+                "roster: %s",
+                stage_id, number, len(stage_ids), stage.theme,
+                ", ".join(level_ids), ctx.artifacts["roster_briefs"][stage_id],
+            )
+            for level_id, brief in zip(level_ids, briefs):
+                logger.info("  %s brief: %s", level_id, brief)
         _stamp_metadata(ctx, self.name)
 
 
@@ -291,14 +375,51 @@ class StagePhase:
 # ---------------------------------------------------------------------------
 
 
+#: Swim-style weights for swimmer definitions — rolled in CODE (the
+#: skeleton lookup table is deterministic per key, so a weighted roll
+#: that depends on archetype can't live in the schema yet). ``within`` =
+#: the classic body-bound patroller; ``surface`` rides the water's top
+#: row; ``float`` drifts diagonally through the body.
+SWIM_STYLES: tuple[tuple[str, int], ...] = (
+    ("within", 2), ("surface", 1), ("float", 1),
+)
+
+#: Chance (out of the weights' total) that a COMMON / UNCOMMON enemy
+#: roams every biome instead of a subset — the ecology knob that makes
+#: commons feel world-wide and rares biome-bound. Tuned down after the
+#: first real run rolled 5-of-7 worldwide and every biome played the
+#: same roster (one native per biome is separately GUARANTEED).
+_EVERYWHERE_WEIGHTS = {"common": (4, 10), "uncommon": (2, 10), "rare": (0, 10)}
+
+
+def roll_habitats(rarity: str, biomes: list[str], rng: Any) -> list[str]:
+    """The biome list one enemy inhabits — ``["*"]`` = the whole world.
+    Deterministic (caller derives the rng); commons bias worldwide, rares
+    always bind to exactly one biome."""
+    if len(biomes) <= 1:
+        return ["*"]
+    hits, total = _EVERYWHERE_WEIGHTS.get(rarity, (0, 10))
+    if rng.randrange(total) < hits:
+        return ["*"]
+    count = 1 if rarity == "rare" else rng.choice((1, 2))
+    return sorted(rng.sample(biomes, min(count, len(biomes))))
+
+
 class EnemyGeneratorPhase:
-    """Skeleton rolls mechanics from schemas/enemy.json; the LLM names and
-    flavors. Placeholder color is assigned here, on the definition — every
-    review surface resolves it from the database. Hue reservations come
-    from the game's palette (runs AFTER the style phase), so enemies
-    never share a hue with this game's hazards or volumes."""
+    """The WORLD enemy pool (ecology, not per-stage rosters): skeleton
+    rolls mechanics + rarity from schemas/enemy.json (v5); habitats and
+    swim styles roll in code; the LLM names and flavors each creature for
+    its habitat. Placeholder color is assigned here, on the definition.
+    Hue reservations come from the UNION of every stage palette (runs
+    AFTER the style phase), so enemies never share a hue with any biome's
+    hazards or volumes. Each stage's ``enemy_refs`` = the pool filtered
+    by its biome, repaired (loudly) up to a minimum roster."""
 
     name = "plat:enemies"
+
+    #: A stage roster below this gets the nearest pool enemies' habitats
+    #: widened (code repair, loud) — a biome must have creatures to place.
+    MIN_STAGE_ROSTER = 3
 
     def __init__(
         self,
@@ -312,28 +433,93 @@ class EnemyGeneratorPhase:
         self.schema_path = schema_path or (SCHEMAS_DIR / "enemy.json")
         self.tiles = tiles or DEFAULT_TILES
 
+    def _reserved_bands(self, ctx: Any) -> tuple[tuple[float, float], ...]:
+        """Union of every stage palette's hazard/volume hue bands (enemy
+        colors must read against ALL biomes — commons travel)."""
+        palettes = ctx.artifacts.get("palettes", {})
+        if not palettes:  # tests / single-palette legacy path
+            single = ctx.artifacts.get("palette")
+            palettes = {"": single} if single else {}
+        bands: list[tuple[float, float]] = []
+        for palette in palettes.values():
+            bands.extend(reserved_hue_bands(palette, self.tiles))
+        return tuple(dict.fromkeys(bands)) or DEFAULT_RESERVED_HUES
+
+    def _habitat_desc(self, habitats: list[str]) -> str:
+        if habitats == ["*"]:
+            return "roams EVERY biome of the world"
+        return f"native to the {', '.join(habitats)} biome(s) only"
+
     def run(self, ctx: Any) -> None:
         spec = load_skeleton_spec(self.schema_path)
-        stage_id = ctx.artifacts["stage_id"]
-        stage = ctx.bible.stages[stage_id]
-        theme = stage.theme
-        roster_brief = ctx.artifacts.get("roster_brief", "")
+        stages = list(ctx.bible.stages.values())
+        biomes = [s.biome for s in stages if s.biome]
+        roster_briefs = ctx.artifacts.get("roster_briefs", {})
+        if not roster_briefs and "roster_brief" in ctx.artifacts:
+            # Legacy single-stage artifacts shape (tests, old callers).
+            roster_briefs = {
+                s.stage_id: ctx.artifacts["roster_brief"] for s in stages
+            }
         seed = str(getattr(ctx.config, "seed", ""))
-        reserved = reserved_hue_bands(
-            ctx.artifacts.get("palette", {}), self.tiles
-        )
+        reserved = self._reserved_bands(ctx)
         seen_ids: set[str] = set()
         used_names: list[str] = []
 
         for i in range(self.count):
             skeleton = roll_skeleton(spec, derive_rng(seed, self.name, i))
+            rarity = str(skeleton.get("rarity", "common"))
+            if i < len(biomes) and len(biomes) > 1:
+                # GUARANTEED NATIVE: the first M pool slots bind one
+                # creature to each biome in world order — every biome
+                # gets fauna of its own before the weighted rolls run
+                # (the first real run's forest and ruins played identical
+                # rosters of meadow critters).
+                habitats = [biomes[i]]
+            elif i == len(biomes) and len(biomes) > 1:
+                # GUARANTEED WORLDWIDE: one anchor creature the whole
+                # kingdom shares ("some enemies really common across the
+                # whole world" — user's ecology; the weighted rolls alone
+                # can land all-bound OR all-worldwide on a small pool).
+                habitats = ["*"]
+            else:
+                habitats = roll_habitats(
+                    rarity, biomes,
+                    derive_rng(seed, f"{self.name}:habitat", i),
+                )
+            swim_style = ""
+            if skeleton["archetype"] == "swimmer":
+                styles, weights = zip(*SWIM_STYLES)
+                swim_style = derive_rng(
+                    seed, f"{self.name}:swim", i
+                ).choices(styles, weights=weights)[0]
+            # Home = the first habitat biome's stage (theme + fauna brief
+            # context for the prompt). Worldwide creatures are named for
+            # the WORLD — no single biome's fauna brief (the first run
+            # flavored the whole pool as meadow critters).
+            if habitats == ["*"]:
+                home = None
+                theme = ctx.bible.world.title if ctx.bible.world else ""
+                roster_brief = ""
+            else:
+                home = next(
+                    (s for s in stages if s.biome in habitats),
+                    stages[0] if stages else None,
+                )
+                theme = home.theme if home else ""
+                roster_brief = (
+                    roster_briefs.get(home.stage_id, "") if home else ""
+                )
+
             data = llm_json(
                 ctx,
                 f"{self.name}:{i}",
-                lambda fb, _skel=skeleton, _i=i: ctx.prompts.enemy_generation(
-                    _skel, theme, roster_brief, _i,
-                    used_names=list(used_names), feedback=fb,
-                ),
+                lambda fb, _skel=skeleton, _i=i, _t=theme, _rb=roster_brief,
+                _r=rarity, _h=self._habitat_desc(habitats):
+                    ctx.prompts.enemy_generation(
+                        _skel, _t, _rb, _i,
+                        used_names=list(used_names), feedback=fb,
+                        rarity=_r, habitat_desc=_h,
+                    ),
                 required_keys=("name",),
                 fallback={"name": f"Enemy {i}", "flavor": ""},
                 validate_obj=lambda obj: (
@@ -356,6 +542,16 @@ class EnemyGeneratorPhase:
                 counter += 1
             seen_ids.add(enemy_id)
 
+            behavior = {
+                "patrol_range": skeleton["patrol_range"],
+                "aggro_range": skeleton["aggro_range"],
+                # Chasers pursue only this far from their home track
+                # before turning back (behavior doctrine: tracks first;
+                # only the rare 'relentless' VARIANT chases forever).
+                "leash_range": skeleton.get("leash_range", 0),
+            }
+            if swim_style:
+                behavior["swim_style"] = swim_style
             enemy = EnemyDefinition(
                 artifact_id=make_artifact_id("enemy", enemy_id),
                 enemy_id=enemy_id,
@@ -365,6 +561,8 @@ class EnemyGeneratorPhase:
                 # and render scale key off it (schema v4 rolls the
                 # discrete tier; pre-v4 bibles default to 1.0).
                 size=float(skeleton.get("size", 1.0)),
+                rarity=rarity,
+                habitats=habitats,
                 stats={
                     "hp": skeleton["hp"],
                     "damage": skeleton["damage"],
@@ -372,29 +570,80 @@ class EnemyGeneratorPhase:
                     "flavor": str(data.get("flavor", "")),
                     "placeholder_color": placeholder_color(i, reserved),
                 },
-                behavior={
-                    "patrol_range": skeleton["patrol_range"],
-                    "aggro_range": skeleton["aggro_range"],
-                },
-                parents=[stage.artifact_id],
+                behavior=behavior,
+                # Ecology edges: the world, plus every habitat stage —
+                # a habitat stage's regen re-flavors its natives.
+                parents=[
+                    make_artifact_id("world"),
+                    *(
+                        s.artifact_id
+                        for s in stages
+                        if habitats != ["*"] and s.biome in habitats
+                    ),
+                ],
             )
             content_hash = ctx.adapter.write_json_singleton(
                 f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
             )
             stamp_provenance(ctx, enemy, content_hash)
             ctx.bible.enemy_definitions[enemy_id] = enemy
-            stage.enemy_refs.append(enemy.artifact_id)
             logger.info(
-                "Enemy %d/%d: %r (%s, size %.1f) — hp=%s dmg=%s spd=%s %s "
-                "color=%s: %s",
-                i + 1, self.count, enemy.name, enemy.archetype, enemy.size,
+                "Enemy %d/%d: %r (%s%s, size %.1f, %s, %s) — hp=%s dmg=%s "
+                "spd=%s %s color=%s: %s",
+                i + 1, self.count, enemy.name, enemy.archetype,
+                f"/{swim_style}" if swim_style else "", enemy.size, rarity,
+                self._habitat_desc(habitats),
                 enemy.stats["hp"], enemy.stats["damage"], enemy.stats["speed"],
                 " ".join(f"{k}={v}" for k, v in enemy.behavior.items()),
                 enemy.stats["placeholder_color"], enemy.stats["flavor"],
             )
 
+        self._assign_stage_rosters(ctx, stages)
         logger.info(
-            "EnemyGeneratorPhase produced %d definitions: %s",
+            "EnemyGeneratorPhase produced a %d-creature world pool: %s",
             len(seen_ids), ", ".join(sorted(seen_ids)),
         )
         _stamp_metadata(ctx, self.name)
+
+    def _assign_stage_rosters(self, ctx: Any, stages: list) -> None:
+        """Stage rosters = the pool filtered by biome. A roster below
+        MIN_STAGE_ROSTER gets the nearest non-resident enemies' habitats
+        widened — a code repair (recorded on the definitions, loud), not
+        a re-roll."""
+        pool = list(ctx.bible.enemy_definitions.values())
+        for stage in stages:
+            residents = [
+                e for e in pool
+                if e.habitats == ["*"] or stage.biome in e.habitats
+            ]
+            missing = self.MIN_STAGE_ROSTER - len(residents)
+            if missing > 0:
+                outsiders = [e for e in pool if e not in residents]
+                for enemy in outsiders[:missing]:
+                    enemy.habitats = sorted({*enemy.habitats, stage.biome})
+                    content_hash = ctx.adapter.write_json_singleton(
+                        f"enemy/{enemy.enemy_id}.json",
+                        enemy.model_dump(mode="json"),
+                    )
+                    stamp_provenance(ctx, enemy, content_hash)
+                    residents.append(enemy)
+                    warn(
+                        ctx,
+                        f"ecology: stage {stage.stage_id!r} ({stage.biome}) "
+                        f"had too few residents — widened "
+                        f"{enemy.enemy_id!r}'s habitats to include it "
+                        f"(now {enemy.habitats}).",
+                    )
+            stage.enemy_refs = [e.artifact_id for e in residents]
+            # The roster is stage.json content — rewrite + re-stamp so the
+            # on-disk plan matches the Bible after ecology assignment.
+            content_hash = ctx.adapter.write_json_singleton(
+                f"stage/{stage.stage_id}/stage.json",
+                stage.model_dump(mode="json"),
+            )
+            stamp_provenance(ctx, stage, content_hash)
+            logger.info(
+                "Stage %s (%s) roster: %s",
+                stage.stage_id, stage.biome or "?",
+                ", ".join(e.enemy_id for e in residents),
+            )

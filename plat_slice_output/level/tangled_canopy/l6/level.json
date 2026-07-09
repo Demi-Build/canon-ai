@@ -1,0 +1,149 @@
+{
+  "artifact_id": "",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "level:tangled_canopy/l6/layout",
+    "tileset:tangled_canopy"
+  ],
+  "level_id": "l6",
+  "stage_id": "tangled_canopy",
+  "grid_width": 69,
+  "grid_height": 23,
+  "pixels_per_cell": null,
+  "view_cells": 30,
+  "brief": "A relentless aerial jump gauntlet across the highest canopy layer, hopping between tiny leaf platforms, bouncing mushroom tops, and crumbling branch tips with no ground beneath and swooping moth-hawks attacking mid-jump.",
+  "layout_fallback": true,
+  "spawn": [
+    2,
+    20
+  ],
+  "exit": [
+    68,
+    20
+  ],
+  "collision": "level/tangled_canopy/l6/collision.npz",
+  "collision_hash": "sha256:ea4f8eb2889080972278887500c28242f2096c481a8e666419bbc825ed97e779",
+  "terrain": "level/tangled_canopy/l6/terrain.npz",
+  "terrain_hash": "sha256:5713a328dc1c6a46e195f803aa4c1456539d4722fb78e41e01db04b5e4443826",
+  "background": "level/tangled_canopy/l6/background.npz",
+  "background_hash": "sha256:7d5fe5143e59e44e0a7480f6bb710c20a96c5be3f2e58423548b4dd7071e92e2",
+  "hazards": [],
+  "triggers": [],
+  "foreground": [
+    {
+      "x": 5,
+      "y": 1,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 18,
+      "y": 0,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 34,
+      "y": 1,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 51,
+      "y": 0,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 63,
+      "y": 1,
+      "type": "vine",
+      "params": {}
+    }
+  ],
+  "hazards_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "triggers_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "foreground_hash": "sha256:48e618cd0b08f872cc815b54e485fef609c198910078049c95b2e84aae7c4b69",
+  "entities_hash": "sha256:a4c8358d1546946f9365c0e49d235129b28c35f85874fab467356b73c41f74a6",
+  "entities": [
+    {
+      "ref": "enemy:tumble_snout",
+      "pos": [
+        18,
+        20
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:boing_bug",
+      "pos": [
+        34,
+        20
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:gilt_wanderer",
+      "pos": [
+        52,
+        20
+      ],
+      "overrides": {
+        "variant": "elite"
+      }
+    },
+    {
+      "ref": "enemy:tumble_snout",
+      "pos": [
+        63,
+        20
+      ],
+      "overrides": {
+        "variant": "champion"
+      }
+    }
+  ],
+  "step_parents": {
+    "collision": [
+      "level:tangled_canopy/l6/layout"
+    ],
+    "hazards": [
+      "level:tangled_canopy/l6/collision"
+    ],
+    "triggers": [
+      "level:tangled_canopy/l6/collision"
+    ],
+    "terrain": [
+      "level:tangled_canopy/l6/collision",
+      "tileset:tangled_canopy"
+    ],
+    "background": [
+      "level:tangled_canopy/l6/collision",
+      "tileset:tangled_canopy"
+    ],
+    "entities": [
+      "level:tangled_canopy/l6/collision",
+      "level:tangled_canopy/l6/hazards",
+      "enemy:boing_bug",
+      "enemy:clover_roller",
+      "enemy:gilt_wanderer",
+      "enemy:pebble_trudger",
+      "enemy:puddle_drifter",
+      "enemy:tumble_snout"
+    ],
+    "foreground": [
+      "level:tangled_canopy/l6/collision",
+      "tileset:tangled_canopy"
+    ],
+    "level": [
+      "level:tangled_canopy/l6/collision",
+      "level:tangled_canopy/l6/hazards",
+      "level:tangled_canopy/l6/triggers",
+      "level:tangled_canopy/l6/terrain",
+      "level:tangled_canopy/l6/background",
+      "level:tangled_canopy/l6/entities",
+      "level:tangled_canopy/l6/foreground"
+    ]
+  }
+}

@@ -98,7 +98,7 @@ class TestOrchestratedGeneration:
             ):
                 assert f"level:ashen_depths/{lid}/{step}" in done
             assert f"review:ashen_depths/{lid}" in done
-        assert "review:ashen_depths/legend" in done
+        assert "review:legend" in done
         assert "plat:manifest" in done
         assert not report.escalated and not report.blocked
 
@@ -109,13 +109,16 @@ class TestOrchestratedGeneration:
         _orchestrate_fresh(run)
         _ctx2, edits, report = _resume(run)
         assert not edits.user_edited and not edits.stale
-        # Only the cheap always-fresh derivations re-ran.
+        # Only the cheap always-fresh derivations re-ran (vlm_qa is an
+        # always node so the explicit flag alone decides whether it
+        # judges — a no-op stamp on flagless runs like this one).
         assert sorted(report.done) == [
             "plat:manifest",
+            "plat:vlm_qa",
             "review:ashen_depths/l1",
             "review:ashen_depths/l2",
             "review:ashen_depths/l3",
-            "review:ashen_depths/legend",
+            "review:legend",
         ]
         assert not report.escalated
 

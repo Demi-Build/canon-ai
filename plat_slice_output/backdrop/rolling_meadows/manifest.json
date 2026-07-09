@@ -1,0 +1,22 @@
+{
+  "artifact_id": "backdrop:rolling_meadows",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:rolling_meadows",
+    "phase:plat:style"
+  ],
+  "stage_id": "rolling_meadows",
+  "band_paths": [
+    "backdrop/rolling_meadows/band_0.png",
+    "backdrop/rolling_meadows/band_1.png"
+  ],
+  "band_hashes": {
+    "backdrop/rolling_meadows/band_0.png": "sha256:4d5496049e089d4866e84b28b1de0255a15fbf0e04b0ddf6731fb3d641f00132",
+    "backdrop/rolling_meadows/band_1.png": "sha256:b9e2d89f62b7e33c09f8d331bae929b15763e4752f3cfa3768bdd96507cc8063"
+  },
+  "depths": [
+    0.2,
+    0.5
+  ]
+}

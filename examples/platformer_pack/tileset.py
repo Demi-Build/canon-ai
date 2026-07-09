@@ -79,7 +79,9 @@ class PlaceholderTilesetPhase:
         style phase ran this run, otherwise re-read from its artifact
         (``style/<stage>/style.json``) so a tileset-only regen still
         paints the generated palette, not the placeholder."""
-        palette = ctx.artifacts.get("palette")
+        palette = ctx.artifacts.get("palettes", {}).get(stage_id)
+        if palette is None:  # legacy single-palette artifacts shape
+            palette = ctx.artifacts.get("palette")
         if palette is not None:
             return palette
         style_path = ctx.adapter.resolve_path(f"style/{stage_id}/style.json")
@@ -88,9 +90,15 @@ class PlaceholderTilesetPhase:
         return {}
 
     def run(self, ctx: Any) -> None:
+        for stage_id in ctx.artifacts.get(
+            "stage_ids", list(ctx.bible.stages)
+        ):
+            self._run_stage(ctx, stage_id)
+        _stamp_metadata(ctx, self.name)
+
+    def _run_stage(self, ctx: Any, stage_id: str) -> None:
         from PIL import Image
 
-        stage_id = ctx.artifacts["stage_id"]
         if make_artifact_id("tileset", stage_id) in pinned_ids(ctx.bible):
             # This phase otherwise overwrites the tilesheet with flat
             # placeholder squares AND replaces the whole Tileset entity —
@@ -99,7 +107,6 @@ class PlaceholderTilesetPhase:
                 "PlaceholderTilesetPhase: tileset:%s is pinned — kept.",
                 stage_id,
             )
-            _stamp_metadata(ctx, self.name)
             return
         ordered = sorted(self.tiles.tiles, key=lambda t: t.id)
         # Style-guide palette (role → hex); PLACEHOLDER_PALETTE fills any
@@ -174,4 +181,3 @@ class PlaceholderTilesetPhase:
             "PlaceholderTilesetPhase wrote %s (%d slots: %s).",
             sheet_rel, len(slots), ", ".join(t.name for t in ordered),
         )
-        _stamp_metadata(ctx, self.name)

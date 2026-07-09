@@ -24,6 +24,14 @@
 # When real art replaces the placeholder tilesheet, this script does not
 # change. Controls: arrows/A-D move, Space/W/Up jump or swim, R restart,
 # Esc quit. Stomp: land on an enemy's head to damage it and bounce.
+#
+# World flow (multi-stage): a DK/SMW-style WORLD MAP (manifest
+# "world_map", code-laid nodes clustered per biome) → START overlay
+# (scene frozen, any input begins + starts the level timer) → play →
+# END overlay ("Congratulations!" + time) → back to the map, node marked
+# beaten and saved to user://plat_save_<seed-hash>.json. Linear unlock
+# (manifest "unlock"). PLAT_LEVEL=<lid> bypasses map + overlays straight
+# into gameplay — the frame-capture hook stays headless-friendly.
 extends Node2D
 
 const CELL := 32.0
@@ -42,9 +50,24 @@ var spawn_grace_s := 1.0
 
 var manifest: Dictionary
 var movement: Dictionary
-var stage_id: String
+var stage_id: String = ""  # current biome stage; swapped by _enter_stage
+var level_stage := {}  # level_id -> stage_id (manifest "stages")
+var level_display := {}  # level_id -> "1-1" display name (world_map nodes)
 var level_ids: Array
 var level_index := 0
+
+# --- world flow: MAP -> START -> PLAYING -> END -> MAP ---
+enum GameState { MAP, START, PLAYING, END }
+var game_state: int = GameState.MAP
+var map_root: CanvasLayer
+var overlay_root: CanvasLayer
+var map_nodes: Array = []  # manifest world_map nodes (play order)
+var map_selected := 0
+var map_move_cool := 0.0
+var input_armed := false  # any-key gates fire only after all keys release
+var beaten := {}  # level_id -> true; persisted per seed
+var level_time := 0.0
+var save_path := ""
 
 var grid: Array = []
 var terrain: Array = []
@@ -111,8 +134,17 @@ func _ready() -> void:
 	rules = manifest.get("rules", {})
 	for v in manifest.get("variants", []):
 		variant_defs[str(v["name"])] = v
-	stage_id = manifest["stage_id"]
 	level_ids = manifest["levels"]
+	# Multi-stage world: each level belongs to a biome stage (shared
+	# tileset/backdrop/music/props); the map nodes carry the display
+	# names players see ("2-1") — internal ids stay l1..lN.
+	for stage_entry in manifest.get("stages", []):
+		for lid in stage_entry.get("levels", []):
+			level_stage[str(lid)] = str(stage_entry["stage_id"])
+	for node in manifest.get("world_map", {}).get("nodes", []):
+		level_display[str(node["level_id"])] = str(
+			node.get("display_name", node["level_id"])
+		)
 	var gfx: Dictionary = manifest.get("graphics", {})
 	view_w_cells = float(gfx.get("view_cells", 20))
 	actor_scale = float(gfx.get("actor_scale", 1.4))
@@ -122,9 +154,6 @@ func _ready() -> void:
 	stomp_bounce = float(combat.get("stomp_bounce_factor", 0.7))
 	iframes_s = float(combat.get("hurt_iframes_s", 1.0))
 	spawn_grace_s = float(combat.get("spawn_grace_s", 1.0))
-	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
-	stage_effects = stage.get("effects", [])
-	_setup_audio(manifest.get("audio", {}))
 	status = $UI/Status
 	# Hearts HUD on the UI CanvasLayer (screen-space — a world node would
 	# scale and drift under camera zoom), below the status line.
@@ -134,16 +163,273 @@ func _ready() -> void:
 	camera = Camera2D.new()
 	add_child(camera)
 	camera.make_current()
-	_load_tileset()
 	_load_enemy_defs()
+	map_nodes = manifest.get("world_map", {}).get("nodes", [])
+	# Progress is per-seed user state (never part of the generated tree).
+	save_path = "user://plat_save_%s.json" % str(
+		manifest.get("seed", "")
+	).md5_text().substr(0, 12)
+	_load_progress()
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
-	# (frame-capture runs verify any level without playing to it).
+	# DIRECTLY (no map, no start overlay — frame-capture runs verify any
+	# level without input).
 	var env_level := OS.get_environment("PLAT_LEVEL")
 	if env_level != "":
 		var env_index := level_ids.find(env_level)
 		if env_index >= 0:
 			level_index = env_index
-	_load_level(level_index)
+			_load_level(level_index)
+			game_state = GameState.PLAYING
+			return
+	_enter_map()
+
+
+# ---------------------------------------------------------------------------
+# World map (DK/SMW style) — drawn from manifest.world_map; positions are
+# normalized 0..1 (deterministic code layout, biome clusters left→right).
+# ---------------------------------------------------------------------------
+
+
+func _first_unbeaten() -> int:
+	for i in range(level_ids.size()):
+		if not beaten.has(str(level_ids[i])):
+			return i
+	return level_ids.size() - 1  # all beaten: everything stays selectable
+
+
+func _world_complete() -> bool:
+	for lid in level_ids:
+		if not beaten.has(str(lid)):
+			return false
+	return true
+
+
+func _enter_map() -> void:
+	# The map replaces the level view: free the world, keep the last
+	# stage's music playing (its biome is where the player stands).
+	for node in [world_root, backdrop_root, effects_root]:
+		if node != null:
+			node.queue_free()
+	world_root = null
+	backdrop_root = null
+	effects_root = null
+	_dismiss_overlay()
+	if hearts_root != null:
+		hearts_root.visible = false
+	map_selected = clampi(_first_unbeaten(), 0, level_ids.size() - 1)
+	_build_map()
+	game_state = GameState.MAP
+	input_armed = false
+	status.text = "%s — world map  (arrows select, Enter plays, Esc quits)" % (
+		manifest["world"]
+	)
+
+
+func _map_dot(center: Vector2, radius: float, color: Color) -> Polygon2D:
+	var dot := Polygon2D.new()
+	var points := PackedVector2Array()
+	for i in range(14):
+		var a := TAU * float(i) / 14.0
+		points.append(center + Vector2(cos(a), sin(a)) * radius)
+	dot.polygon = points
+	dot.color = color
+	return dot
+
+
+func _map_ring(center: Vector2, radius: float, color: Color) -> Line2D:
+	var ring := Line2D.new()
+	for i in range(15):
+		var a := TAU * float(i) / 14.0
+		ring.add_point(center + Vector2(cos(a), sin(a)) * radius)
+	ring.width = 3.0
+	ring.default_color = color
+	return ring
+
+
+func _build_map() -> void:
+	if map_root != null:
+		map_root.queue_free()
+	map_root = CanvasLayer.new()
+	# Below the UI layer: the status line stays readable over the map.
+	map_root.layer = 0
+	add_child(map_root)
+	var vp := get_viewport_rect().size
+	var bg := ColorRect.new()
+	bg.color = Color(0.055, 0.055, 0.085)
+	bg.size = vp
+	map_root.add_child(bg)
+	var margin := Vector2(vp.x * 0.08, vp.y * 0.2)
+	var span := vp - margin * 2.0
+	var pts := {}
+	for node in map_nodes:
+		pts[str(node["level_id"])] = margin + Vector2(
+			float(node["pos"][0]) * span.x, float(node["pos"][1]) * span.y
+		)
+	# Biome regions, tinted with each stage's own palette background.
+	var palettes: Dictionary = manifest.get("palettes", {})
+	for stage_entry in manifest.get("stages", []):
+		var sid := str(stage_entry["stage_id"])
+		var lids: Array = stage_entry.get("levels", [])
+		if lids.is_empty():
+			continue
+		var min_x := INF
+		var max_x := -INF
+		for lid in lids:
+			min_x = minf(min_x, pts[str(lid)].x)
+			max_x = maxf(max_x, pts[str(lid)].x)
+		var tint := Color(str(
+			palettes.get(sid, {}).get("background", "#20222c")
+		))
+		var region := ColorRect.new()
+		region.color = Color(tint.r, tint.g, tint.b, 0.55)
+		region.position = Vector2(min_x - 44.0, margin.y * 0.55)
+		region.size = Vector2(max_x - min_x + 88.0, vp.y - margin.y * 1.1)
+		map_root.add_child(region)
+		var biome_label := Label.new()
+		biome_label.text = "%s — %s" % [
+			str(stage_entry.get("biome", "")),
+			str(stage_entry.get("theme", "")),
+		]
+		biome_label.position = Vector2(min_x - 34.0, margin.y * 0.55 + 8.0)
+		map_root.add_child(biome_label)
+	# The path, then its level nodes on top.
+	var path := Line2D.new()
+	path.width = 4.0
+	path.default_color = Color(0.9, 0.88, 0.8, 0.45)
+	for lid in level_ids:
+		path.add_point(pts[str(lid)])
+	map_root.add_child(path)
+	var unlocked_max := _first_unbeaten()
+	for i in range(level_ids.size()):
+		var lid := str(level_ids[i])
+		var p: Vector2 = pts[lid]
+		var color := Color(0.42, 0.42, 0.5)  # locked
+		if beaten.has(lid):
+			color = Color(1.0, 0.82, 0.29)  # beaten: gold
+		elif i <= unlocked_max:
+			color = Color.WHITE  # unlocked, unbeaten
+		map_root.add_child(_map_dot(p, 12.0, color))
+		var name_label := Label.new()
+		name_label.text = str(level_display.get(lid, lid))
+		name_label.position = p + Vector2(-13.0, 17.0)
+		map_root.add_child(name_label)
+	map_root.add_child(_map_ring(
+		pts[str(level_ids[map_selected])], 19.0, Color(0.25, 1.0, 0.44)
+	))
+	if _world_complete():
+		var banner := Label.new()
+		banner.text = "WORLD COMPLETE!"
+		banner.add_theme_font_size_override("font_size", 56)
+		banner.position = Vector2(vp.x / 2.0 - 260.0, vp.y * 0.06)
+		map_root.add_child(banner)
+
+
+func _map_process(delta: float) -> void:
+	map_move_cool = maxf(0.0, map_move_cool - delta)
+	var step := 0
+	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
+		step = 1
+	elif Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
+		step = -1
+	if step != 0 and map_move_cool <= 0.0:
+		map_selected = clampi(
+			map_selected + step, 0,
+			clampi(_first_unbeaten(), 0, level_ids.size() - 1)
+		)
+		map_move_cool = 0.18
+		_build_map()
+	if input_armed and (
+		Input.is_key_pressed(KEY_ENTER)
+		or Input.is_key_pressed(KEY_SPACE)
+		or Input.is_key_pressed(KEY_Z)
+	):
+		if map_root != null:
+			map_root.queue_free()
+			map_root = null
+		level_index = map_selected
+		_load_level(level_index)
+		_show_overlay("START", str(level_display.get(
+			str(level_ids[level_index]), level_ids[level_index]
+		)))
+		game_state = GameState.START
+		input_armed = false
+
+
+# ---------------------------------------------------------------------------
+# Start/end overlays — the scene stands frozen behind a translucent veil;
+# any input moves the flow forward (playtest ask: every level has an
+# explicit start, and a "Congratulations!" close with the level time).
+# ---------------------------------------------------------------------------
+
+
+func _show_overlay(title: String, subtitle: String) -> void:
+	_dismiss_overlay()
+	overlay_root = CanvasLayer.new()
+	overlay_root.layer = 20
+	add_child(overlay_root)
+	var vp := get_viewport_rect().size
+	var veil := ColorRect.new()
+	veil.color = Color(0.0, 0.0, 0.0, 0.55)
+	veil.size = vp
+	overlay_root.add_child(veil)
+	var title_label := Label.new()
+	title_label.text = title
+	title_label.add_theme_font_size_override("font_size", 72)
+	title_label.position = Vector2(vp.x / 2.0 - 220.0, vp.y * 0.36)
+	title_label.size = Vector2(440.0, 90.0)
+	title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	overlay_root.add_child(title_label)
+	var sub_label := Label.new()
+	sub_label.text = subtitle
+	sub_label.add_theme_font_size_override("font_size", 28)
+	sub_label.position = Vector2(vp.x / 2.0 - 220.0, vp.y * 0.36 + 96.0)
+	sub_label.size = Vector2(440.0, 40.0)
+	sub_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	overlay_root.add_child(sub_label)
+
+
+func _dismiss_overlay() -> void:
+	if overlay_root != null:
+		overlay_root.queue_free()
+		overlay_root = null
+
+
+func _format_time(seconds: float) -> String:
+	return "%d:%04.1f" % [int(seconds) / 60, fmod(seconds, 60.0)]
+
+
+func _load_progress() -> void:
+	var file := FileAccess.open(save_path, FileAccess.READ)
+	if file == null:
+		return
+	var data: Variant = JSON.parse_string(file.get_as_text())
+	if data is Dictionary:
+		for lid in data.get("beaten", []):
+			beaten[str(lid)] = true
+
+
+func _save_progress() -> void:
+	var file := FileAccess.open(save_path, FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify({"beaten": beaten.keys()}))
+
+
+func _enter_stage(new_stage: String) -> void:
+	# Stage assets are shared by the biome's levels — swap tileset, stage
+	# effects, and audio only when the level's stage actually changes.
+	if new_stage == stage_id:
+		return
+	stage_id = new_stage
+	slot_atlas.clear()
+	slot_category.clear()
+	blocking.clear()
+	one_way.clear()
+	hazard.clear()
+	volumes.clear()
+	_load_tileset()
+	var stage: Dictionary = _load_json("res://stage/%s/stage.json" % stage_id)
+	stage_effects = stage.get("effects", [])
+	_setup_audio(manifest.get("audio", {}).get(stage_id, {}))
 
 
 func _load_json(path: String) -> Variant:
@@ -199,6 +485,7 @@ func _load_enemy_defs() -> void:
 
 func _load_level(index: int) -> void:
 	var level_id: String = level_ids[index]
+	_enter_stage(level_stage.get(level_id, stage_id))
 	var base := "res://level/%s/%s" % [stage_id, level_id]
 	var level: Dictionary = _load_json(base + "/level.json")
 	grid = _load_json(base + "/collision.grid.json")["collision"]
@@ -243,7 +530,11 @@ func _load_level(index: int) -> void:
 	_build_decor(level.get("foreground", []))
 	_build_effects()
 	won = false
-	status.text = "%s — %s  (R restart, Esc quit)" % [manifest["world"], level_id]
+	if hearts_root != null:
+		hearts_root.visible = true  # hidden while the world map is up
+	status.text = "%s — %s  (R restart, Esc quit)" % [
+		manifest["world"], level_display.get(level_id, level_id),
+	]
 
 
 func _build_background(background: Array, view_w: float) -> void:
@@ -378,31 +669,102 @@ func _build_tiles() -> void:
 
 
 func _build_markers(triggers: Array) -> void:
-	# The exit has NO graphic: the exit zone is the exit's whole COLUMN
-	# (rightmost floored column), bottom to top — you leave to the right.
-	# Checkpoints from the triggers layer (3b): amber markers; crossing one
-	# fills it and moves the respawn point there.
+	# VISIBLE gameplay props (playtest ask: the exit had no graphic so
+	# levels read as continuing past a teleport, and checkpoints were
+	# abstract boxes). Generated prop sprites when the art track produced
+	# them (manifest "props"), drawn placeholder shapes otherwise. The
+	# exit ZONE stays the whole column — the goal object marks it; the
+	# checkpoint flag raises its colored pennant once claimed.
+	var props: Dictionary = manifest.get("props", {}).get(stage_id, {})
+	_build_exit_goal(str(props.get("exit", "")))
 	checkpoints.clear()
 	for t in triggers:
 		if str(t.get("type", "")) != "checkpoint":
 			continue
-		# Gold BORDER, filled only once activated — the filled translucent
-		# rect read as a mystery crate next to real art (play-test note).
-		var frame := _outline_frame(Vector2(CELL - 8, CELL - 8))
-		frame.modulate = Color(1.0, 0.82, 0.29)
-		frame.position = Vector2(t["x"], t["y"]) * CELL + Vector2(4, 4)
-		world_root.add_child(frame)
-		var fill := ColorRect.new()
-		fill.color = Color(1.0, 0.82, 0.29, 0.55)
-		fill.position = frame.position
-		fill.size = Vector2(CELL - 8, CELL - 8)
-		fill.visible = false
-		world_root.add_child(fill)
+		var claimed := _build_checkpoint_flag(
+			str(props.get("checkpoint", "")),
+			Vector2((float(t["x"]) + 0.5) * CELL, (float(t["y"]) + 1.0) * CELL),
+		)
 		checkpoints.append({
 			"pos": Vector2(t["x"], t["y"]),
 			"active": false,
-			"node": fill,
+			"node": claimed,  # activation flips it visible (claimed look)
 		})
+
+
+func _prop_sprite(sprite_rel: String, foot: Vector2, side: float) -> Sprite2D:
+	# One bottom-anchored, column-centered prop sprite, or null when the
+	# art track produced nothing (caller draws its placeholder shape).
+	if sprite_rel == "" or not FileAccess.file_exists("res://" + sprite_rel):
+		return null
+	var image := Image.load_from_file(
+		ProjectSettings.globalize_path("res://" + sprite_rel)
+	)
+	if image == null:
+		return null
+	var sprite := Sprite2D.new()
+	sprite.texture = ImageTexture.create_from_image(image)
+	sprite.centered = false
+	sprite.texture_filter = tile_filter
+	sprite.scale = Vector2(side, side) / sprite.texture.get_size()
+	sprite.position = Vector2(foot.x - side / 2.0, foot.y - side)
+	return sprite
+
+
+func _build_checkpoint_flag(sprite_rel: String, foot: Vector2) -> CanvasItem:
+	# foot = bottom-center of the trigger cell (flag plants on the
+	# ground). Returns the CLAIMED visual, hidden until activation.
+	var side := CELL * 1.5
+	var base_sprite := _prop_sprite(sprite_rel, foot, side)
+	if base_sprite != null:
+		base_sprite.modulate = Color(0.55, 0.55, 0.6)  # unclaimed: greyed
+		world_root.add_child(base_sprite)
+		var claimed_sprite := _prop_sprite(sprite_rel, foot, side)
+		claimed_sprite.visible = false  # full color once claimed
+		world_root.add_child(claimed_sprite)
+		return claimed_sprite
+	# Placeholder flag: pole + pennant; grey pennant swaps to gold.
+	var pole := ColorRect.new()
+	pole.color = Color(0.42, 0.34, 0.28)
+	pole.size = Vector2(maxf(2.0, CELL / 16.0), CELL * 1.5)
+	pole.position = Vector2(foot.x - pole.size.x / 2.0, foot.y - pole.size.y)
+	world_root.add_child(pole)
+	var pennant_points := PackedVector2Array([
+		Vector2(foot.x, foot.y - CELL * 1.5),
+		Vector2(foot.x + CELL * 0.55, foot.y - CELL * 1.28),
+		Vector2(foot.x, foot.y - CELL * 1.06),
+	])
+	var pennant := Polygon2D.new()
+	pennant.polygon = pennant_points
+	pennant.color = Color(0.55, 0.55, 0.6)  # unclaimed: grey
+	world_root.add_child(pennant)
+	var claimed := Polygon2D.new()
+	claimed.polygon = pennant_points
+	claimed.color = Color(1.0, 0.82, 0.29)  # claimed: gold
+	claimed.visible = false
+	world_root.add_child(claimed)
+	return claimed
+
+
+func _build_exit_goal(sprite_rel: String) -> void:
+	# The goal object standing ON the exit cell — the level visibly ENDS
+	# here (you still leave through the whole column, any height).
+	var foot := Vector2((exit_cell.x + 0.5) * CELL, (exit_cell.y + 1.0) * CELL)
+	var sprite := _prop_sprite(sprite_rel, foot, CELL * 2.0)
+	if sprite != null:
+		world_root.add_child(sprite)
+		return
+	# Placeholder goal: a green doorway — frame + translucent glow.
+	var door := Vector2(CELL * 1.1, CELL * 1.8)
+	var glow := ColorRect.new()
+	glow.color = Color(0.25, 1.0, 0.44, 0.35)
+	glow.size = door
+	glow.position = Vector2(foot.x - door.x / 2.0, foot.y - door.y)
+	world_root.add_child(glow)
+	var frame := _outline_frame(door)
+	frame.modulate = Color(0.25, 1.0, 0.44)
+	frame.position = glow.position
+	world_root.add_child(frame)
 
 
 func _spawn_enemies(placements: Array) -> void:
@@ -747,14 +1109,25 @@ func _volume_params(x: float, y: float) -> Variant:
 	return null
 
 
-func _enemy_can_occupy(archetype: String, x: float, y: float) -> bool:
+func _enemy_can_occupy(archetype: String, x: float, y: float, swim_style: String = "") -> bool:
 	# Terrain constraint for an enemy's next step (GameRules-aware):
-	# swimmers stay in their volume; land enemies keep solid footing and —
-	# unless the game is 'amphibious' — never enter a volume.
+	# swimmers stay in their volume (surface-riders on its TOP row); land
+	# enemies keep solid footing and — unless the game is 'amphibious' —
+	# never enter a volume. NO enemy walks into a hazard or clips through
+	# a solid (behavior doctrine; jumpers are v2). Mirrors
+	# platformer_play.py (mechanics parity).
 	var cell := _tile(x, y)
 	var below := _tile(x, y + 1.0)
+	if hazard.has(cell):
+		return false  # nobody strolls into spikes
 	if archetype == "swimmer":
-		return volumes.has(cell)
+		if not volumes.has(cell):
+			return false
+		if swim_style == "surface":
+			return not volumes.has(_tile(x, y - 1.0))
+		return true
+	if blocking.has(cell) or one_way.has(cell):
+		return false  # no clipping through terrain
 	if volumes.has(cell) and str(rules.get("enemy_water_policy", "swimmers_only")) != "amphibious":
 		return false
 	return blocking.has(below) or one_way.has(below)  # no cliff-walking
@@ -763,9 +1136,29 @@ func _enemy_can_occupy(archetype: String, x: float, y: float) -> bool:
 func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_ESCAPE):
 		get_tree().quit()
+	# Any-key gates only fire once every key has been RELEASED since the
+	# state began — the keypress that opened a state can't also close it.
+	if not input_armed and not Input.is_anything_pressed():
+		input_armed = true
+	match game_state:
+		GameState.MAP:
+			_map_process(delta)
+			return
+		GameState.START:
+			if input_armed and Input.is_anything_pressed():
+				_dismiss_overlay()
+				level_time = 0.0
+				game_state = GameState.PLAYING
+			return
+		GameState.END:
+			if input_armed and Input.is_anything_pressed():
+				_enter_map()
+			return
 	if Input.is_key_pressed(KEY_R):
 		_load_level(level_index)
+		level_time = 0.0
 		return
+	level_time += delta
 
 	var volume: Variant = _volume_params(player_pos.x, player_pos.y)
 
@@ -876,13 +1269,34 @@ func _process(delta: float) -> void:
 		var espeed := float(enemy["speed"])
 		var behavior: Dictionary = enemy["behavior"]
 		var archetype := str(enemy["spec"].get("archetype", "sentry"))
+		var swim_style := str(behavior.get("swim_style", ""))
 		var pos: Vector2 = enemy["pos"]
 		enemy["hurt_t"] = maxf(0.0, float(enemy["hurt_t"]) - delta)
-		if (archetype == "patroller" or archetype == "swimmer") and espeed > 0.0:
+		if archetype == "swimmer" and swim_style == "float" and espeed > 0.0:
+			# Floating swimmer: diagonal drift, each axis bouncing off
+			# the water's boundary independently (pygame mirrors this —
+			# mechanics parity).
+			var dir_y := float(enemy.get("dir_y", 1.0))
+			var step := espeed * 0.7 * delta
+			var drift_x: float = pos.x + enemy["dir"] * step
+			if (
+				absf(drift_x - enemy["home_x"]) >= float(behavior.get("patrol_range", 4))
+				or not _enemy_can_occupy(archetype, drift_x, pos.y, swim_style)
+			):
+				enemy["dir"] = enemy["dir"] * -1.0
+			else:
+				pos.x = drift_x
+			var drift_y: float = pos.y + dir_y * step
+			if not volumes.has(_tile(pos.x, drift_y)):
+				dir_y *= -1.0
+			else:
+				pos.y = drift_y
+			enemy["dir_y"] = dir_y
+		elif (archetype == "patroller" or archetype == "swimmer") and espeed > 0.0:
 			var next_x: float = pos.x + enemy["dir"] * espeed * delta
 			if (
 				absf(next_x - enemy["home_x"]) >= float(behavior.get("patrol_range", 4))
-				or not _enemy_can_occupy(archetype, next_x, pos.y)
+				or not _enemy_can_occupy(archetype, next_x, pos.y, swim_style)
 			):
 				enemy["dir"] = enemy["dir"] * -1.0
 			else:
@@ -890,10 +1304,25 @@ func _process(delta: float) -> void:
 		elif archetype == "chaser" and espeed > 0.0 and not grace:
 			# Spawn grace (GameRules.spawn_grace): chasers hold still
 			# until the player's first move after a (re)spawn.
-			if absf(player_pos.x - pos.x) <= float(behavior.get("aggro_range", 6)):
+			# Leashed pursuit (behavior doctrine): chase only while the
+			# player is in aggro AND home is within leash_range; else
+			# walk BACK to the home track. Only the 'relentless' variant
+			# (behavior override) chases forever. platformer_play.py
+			# mirrors this — mechanics parity.
+			var leash := float(behavior.get("leash_range", 0))
+			var aggro := float(behavior.get("aggro_range", 6))
+			var chasing := (
+				absf(player_pos.x - pos.x) <= aggro
+				and (leash <= 0.0 or absf(pos.x - enemy["home_x"]) < leash)
+			)
+			if chasing:
 				var next_x: float = pos.x + signf(player_pos.x - pos.x) * espeed * delta
 				if _enemy_can_occupy(archetype, next_x, pos.y):
 					pos.x = next_x  # halts at volume/cliff edges
+			elif absf(pos.x - enemy["home_x"]) > 0.1:
+				var back_x: float = pos.x + signf(enemy["home_x"] - pos.x) * espeed * delta
+				if _enemy_can_occupy(archetype, back_x, pos.y):
+					pos.x = back_x
 		enemy["pos"] = pos
 		enemy["node"].position = pos * CELL + enemy["vis_off"]
 		if enemy["node"] is Sprite2D:
@@ -956,8 +1385,14 @@ func _process(delta: float) -> void:
 	if not won and int(player_pos.x) == int(exit_cell.x):
 		won = true
 		_play_sfx("win")
-		if level_index + 1 < level_ids.size():
-			level_index += 1
-			_load_level(level_index)
-		else:
-			status.text = "%s — WORLD COMPLETE (R to replay, Esc to quit)" % manifest["world"]
+		var lid := str(level_ids[level_index])
+		beaten[lid] = true
+		_save_progress()  # durable immediately, even if the player quits
+		_show_overlay(
+			"Congratulations!",
+			"%s cleared in %s — any key for the world map" % [
+				str(level_display.get(lid, lid)), _format_time(level_time),
+			],
+		)
+		game_state = GameState.END
+		input_armed = false

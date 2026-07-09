@@ -1,0 +1,14 @@
+[
+  {
+    "x": 9,
+    "y": 12,
+    "type": "floor_spike",
+    "params": {}
+  },
+  {
+    "x": 10,
+    "y": 12,
+    "type": "floor_spike",
+    "params": {}
+  }
+]

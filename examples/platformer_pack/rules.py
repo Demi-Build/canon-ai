@@ -46,6 +46,11 @@ v1 enforced policies:
   respawning beside a checkpoint-camping enemy stays fair; "off" — no
   grace at all. Enforced in both play surfaces (damage gates + chaser
   AI gate).
+- ``rarity_caps`` (multi-stage ecology): per-level at-most-N caps per
+  enemy RARITY tier ("rare"/"uncommon"/... — schema v5 rolls the tier
+  onto the definition). Enforced at placement validation and stated in
+  the placement prompt; an absent tier is uncapped. This is what makes
+  rares actually rare on the ground, not just in the fiction.
 """
 
 from __future__ import annotations
@@ -68,9 +73,10 @@ class GameRules(BaseModel):
         "swimmers_only"
     )
     platform_drop_through: bool = True
-    variant_caps: dict[str, int] = {"elite": 1, "champion": 1}
+    variant_caps: dict[str, int] = {"elite": 1, "champion": 1, "relentless": 1}
     checkpoint_enemy_reset: bool = True
     spawn_grace: Literal["until_move", "off"] = "until_move"
+    rarity_caps: dict[str, int] = {"rare": 1, "uncommon": 2}
 
 
 def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:

@@ -12,11 +12,12 @@ the fix is arithmetic — repair them. Numbers live in data files you can
 edit, not in code. Everything regenerates piece by piece.
 
 ```
-world → stage plan → style guide → enemy definitions → tileset
+world (biome stages, in play order) → per-stage plans → per-stage style
+      → WORLD enemy pool (rarity + habitats) → per-stage tilesets
       → per level: layout (DSL → stamp → validators/repair) → terrain
-        → background → enemy placement → decor
-      → ART AT THE END: tilesheet, sprites, backdrop, audio
-      → review renders → manifest → (optional) Godot project export
+        → background → enemy placement (stage roster) → decor
+      → ART AT THE END: tilesheets, sprites, backdrops, audio (per stage)
+      → review renders → VLM QA → manifest (world map) → Godot export
 ```
 
 Key vocabulary:
@@ -30,27 +31,34 @@ Key vocabulary:
   rejected, the rejection text is written to be fed straight back to the
   model, with located cells and concrete ops to add.
 - **Repair, not re-roll** — reachability breaks get auto-bridged
-  platforms, misplaced checkpoints snap to valid columns, pools poured on
-  the ground row snap one row up, spawn-crowding enemies get column-nudged.
-  The agent keeps design authorship; geometry is tool work.
+  platforms, misplaced spawns AND checkpoints snap to valid columns,
+  pools poured on the ground row snap one row up, spawn-crowding enemies
+  get column-nudged. The agent keeps design authorship; geometry is tool
+  work.
 
 ---
 
 ## Quickstart ($0, fully deterministic)
 
 ```bash
-# generate a game with placeholder art (flat colored tiles)
+# generate a full 3-biome world with placeholder art — every feature of
+# the pipeline exercised at $0, including the VLM QA loop (fake judge)
 uv run python examples/run_platformer_slice.py \
-  --backend fake --engine godot --output-dir /tmp/my_game --seed emberfall_001
+  --backend fake \
+  --image-backend fake --music-backend fake --sfx-backend fake \
+  --vlm-backend fake \
+  --engine godot --orchestrate \
+  --output-dir /tmp/my_game --seed emberfall_001
 
-# look at it: per-level review PNGs (block + skinned pairs)
+# look at it: per-level review PNGs (block + skinned pairs) + QA verdicts
 open /tmp/my_game/review/
+cat /tmp/my_game/review/*/qa_report.json
 
-# play it in Godot (4.3+)
+# play it in Godot (4.3+) — opens on the world map
 godot --path /tmp/my_game
-PLAT_LEVEL=l3 godot --path /tmp/my_game     # jump straight to one level
+PLAT_LEVEL=l5 godot --path /tmp/my_game     # jump straight to one level
 
-# or play it in the pygame harness (quick pre-art surface)
+# or play one level in the pygame harness (quick pre-art surface)
 uv run --extra platformer --extra play \
   python examples/platformer_play.py /tmp/my_game l1
 ```
@@ -80,20 +88,54 @@ fail-fast on missing credentials:
 | `--image-backend fal` | Diffusion tiles/sprites/backdrops (nano-banana) | `FAL_KEY` (or `FAL_KEY_ID`+`FAL_KEY_SECRET`) |
 | `--music-backend lyria` | One looping stage theme | `GOOGLE_API_KEY` |
 | `--sfx-backend elevenlabs` | The closed SFX event set | `ELEVENLABS_API_KEY` |
+| `--vlm-backend anthropic` | Claude vision judge for end-of-pipeline QA | `ANTHROPIC_API_KEY` |
 
-A `.env` file is **not** read automatically — export first:
+A `.env` file is **not** read automatically — export first. The
+everything-on run — world plan + levels + diffusion art + music + SFX +
+the VLM QA judge over every level's renders:
 
 ```bash
 set -a; source .env; set +a
 uv run python examples/run_platformer_slice.py \
-  --backend anthropic --image-backend fal \
-  --music-backend lyria --sfx-backend elevenlabs \
+  --backend anthropic \
+  --image-backend fal \
+  --music-backend lyria \
+  --sfx-backend elevenlabs \
+  --vlm-backend anthropic \
+  --num-stages 3 --num-levels 3 --num-enemies 7 \
   --engine godot --orchestrate \
-  --output-dir ~/my_real_game --seed my_seed_001
+  --output-dir ~/my_real_game \
+  --seed "a cheerful island archipelago, tidepools and cliff winds"
+
+# then: review the QA verdicts + warnings before you even open Godot
+cat ~/my_real_game/review/*/qa_report.json
+python3 -c "import json; print(*json.load(open('$HOME/my_real_game/manifest.json'))['warnings'], sep='\n')"
+
+godot --path ~/my_real_game        # world map → START → play → Congrats
 ```
 
-Every paid backend also has a `fake` twin (`--image-backend fake`, etc.)
-that exercises the identical code path deterministically at $0.
+Ballpark cost at the 3×3 defaults: ~40 text calls + ~38 images (~$1.50
+fal) + 3 music themes + the SFX set + ~9 vision judgments (cents). Drop
+any flag to skip that spend — the game plays fine with placeholders and
+silence. Every paid backend has a `fake` twin (`--image-backend fake`,
+`--vlm-backend fake`, etc.) that exercises the identical code path
+deterministically at $0 — the Quickstart above is exactly that.
+
+If QA flags something, regen surgically (never automatically):
+
+```bash
+# e.g. the report suggested enemy:tide_skitter and l5's layout
+uv run canon regen ~/my_real_game/bible.json l5 enemy:tide_skitter --mark-only
+set -a; source .env; set +a
+uv run python examples/run_platformer_slice.py \
+  --backend anthropic --image-backend fal --vlm-backend anthropic \
+  --engine godot --orchestrate \
+  --output-dir ~/my_real_game --seed "<the ORIGINAL seed>"
+```
+
+(Resume = the original runner command with the original flags —
+especially `--image-backend fal`, or stale art regenerates as
+placeholder squares over your paid tilesheet.)
 
 ---
 
@@ -144,6 +186,8 @@ Policy toggles, each enforced by validators and both play surfaces:
 - `spawn_grace`: `"until_move"` — blink untouchable at spawn, chasers hold
   still until your first input, then `spawn_grace_s` seconds of shield —
   or `"off"`
+- `rarity_caps`: per-level at-most-N caps per enemy rarity tier
+  (`{"rare": 1, "uncommon": 2}`) — what keeps rares rare on the ground
 
 Unknown keys ride through to the manifest **inert** (open carriage): you
 can sketch a future rule today; it starts working when its enforcement
@@ -166,13 +210,32 @@ Tile names are DSL vocabulary: the layout agent can now write
 `volume(lava, 20, 26, 12)` and the prompt advertises it automatically.
 Id bands are enforced: solids/one-way 1–9, hazards 10–19, volumes 20+.
 
+**Water is optional, and when it appears it's a FEATURE.** Beyond
+contained pools/basins, the DSL has free-standing water:
+`water_wall(x1,x2,y_top)` drops a full column from `y_top` to the
+terrain — a waterfall/shaft the player swims up and leaps out of (over a
+bottomless gap it runs out the bottom: sinking too deep is a fall death,
+a deliberate spout hazard) — and `water_block(x1,y1,x2,y2)` floats a
+pocket of water in open air. Both are exempt from containment by design
+(generic spellings `volume_wall`/`volume_block` take any volume tile).
+Airy jump-gauntlet levels are encouraged to skip water entirely.
+
 ### Enemy variants — `variants.json` (`--variants`)
 
 Named upgrades a placement opts into (`{"variant": "champion"}`):
 `stat_mults` (hp/damage), `speed_mult`, `size` (multiplies the
 definition's size), `visual` (`outline` / `scale` / `outline_scale`),
 `behavior` overrides. A champion guarding a chokepoint is the pack's
-mini-boss story.
+mini-boss story; the `relentless` variant overrides the chase leash —
+the ONE enemy per level that never gives up.
+
+**Behavior doctrine** (enforced in both play surfaces): most enemies
+patrol fixed tracks; chasers pursue only within their `leash_range`
+(schema-rolled) and walk back to their home track after — only
+`relentless` chases forever. No enemy walks into a hazard tile or clips
+through solids; swimmers respect their swim style (`within`, `surface`,
+`float`). Enemies the terrain can't sustain are never offered to the
+placement agent (a swimmer needs water its whole body fits).
 
 ### Enemy stats — `schemas/enemy.json`
 
@@ -221,6 +284,91 @@ fallback — a game without audio flags plays fine. Audio is its own
 artifact (`audio:<stage>`), so re-rolling a theme never cascades through
 levels: `canon regen <dir>/bible.json phase:plat:audio --mark-only`,
 then resume.
+
+---
+
+## The world: biomes, the world map, and the enemy ecology
+
+A game is a **world of biome stages** (`--num-stages`, default 3), each
+with its own palette, tileset, backdrop, props, and (if flagged) music —
+levels within a biome share them, which keeps generation cost linear in
+stages, not levels. Level ids are global (`l1..l9`); players see
+stage-local **display names** (`1-1`…`3-3`).
+
+The Godot game opens on a **DK/SMW-style world map** (code-drawn v1):
+biome regions tinted with their own palettes, a path of level nodes,
+linear unlock, beaten nodes gold. Entering a level shows a **START
+overlay** (scene frozen until any input — the timer starts then);
+finishing shows **Congratulations! + your level time**, returns you to
+the map, and saves progress per seed (`user://plat_save_<hash>.json`).
+`PLAT_LEVEL=<lid>` still boots straight into a level (the frame-capture
+hook, no map/overlays).
+
+Enemies are a **world pool** (`--num-enemies`, default 7), not per-stage
+rosters: each definition rolls a **rarity** (common/uncommon/rare —
+schema v5) and gets **habitats** (some roam everywhere, rares bind to
+one biome). A stage's roster is the pool filtered by its biome, and
+per-level `rarity_caps` (game_rules.json) keep rares actually rare on
+the ground. Swimmers additionally roll a **swim style**: `within` (the
+classic body-bound patrol), `surface` (rides the water's top row), or
+`float` (drifts diagonally, bouncing off the basin) — enforced at
+placement and in both play surfaces.
+
+---
+
+## Checkpoint flags & the exit goal
+
+Every level shows its gameplay props: a **checkpoint flag** per trigger
+(grey pennant until claimed, gold after — chasers may still camp it, the
+spawn shield is the fairness fix) and an **exit goal doorway** on the
+exit cell, so the level visibly ends instead of teleporting you off the
+right edge (the exit zone is still the whole column).
+
+Both surfaces draw placeholder shapes by default. With
+`--image-backend`, the sprite art phase also generates themed prop
+sprites (`sprite/prop/<stage>/{checkpoint,exit}.png`) owned by a
+`props:<stage>` artifact — hash-tracked, edit-detected, and pinnable
+like any art. The prop *name set* is closed in code: a new prop only
+becomes real with its draw + trigger point in both play surfaces.
+
+---
+
+## VLM QA — a vision judge over the review renders
+
+Every level already ships a **block render** (analytic truth) and a
+**skinned render** (what the player sees). With an explicit flag, a
+vision model judges each pair (plus the palette and roster legend) at
+the very end of the pipeline:
+
+```bash
+--vlm-backend none|fake|anthropic    # default none = no QA
+--vlm-model <id>                     # optional model override
+```
+
+Per level it returns structured verdicts on three dimensions —
+**fidelity** (the skinned render matches the block truth: every
+placement present, effective sizes right, nothing missing or extra),
+**readability** (player/enemies/hazards distinguishable against tiles
+and backdrop), and **style coherence** (palette adherence, sprites match
+the tileset style) — plus short notes.
+
+The report is `review/<stage>/qa_report.json` (deterministic shape, no
+timestamps). Failing verdicts become **manifest warnings** that survive
+resumes — the manifest re-derives them from the on-disk report, so a
+later run without the flag never launders a failing report. The report
+may *suggest* mark-only regen targets; it never regenerates anything —
+invalidation stays user-controlled.
+
+The code-not-LLM split applies here too: everything computable is a
+**code check** feeding the same report — missing sprite files, a
+sprite's opaque bounding box vs its canvas (a corner-hugging sprite
+renders smaller than its hitbox), tile-region palette conformance. The
+VLM judges only what code can't: does it *read* right.
+
+`--vlm-backend anthropic` is PAID (`ANTHROPIC_API_KEY`, fail-fast);
+`fake` exercises the entire loop deterministically at $0, including one
+canned failing verdict so the warning path stays covered. v1 judges on
+every flagged run (no staleness tracking yet).
 
 ---
 
@@ -294,7 +442,9 @@ a bug.
 | `--backend fake\|anthropic` | `fake` | text generation |
 | `--seed <str>` | `emberfall_001` | determinism root |
 | `--output-dir <path>` | `./plat_slice_output` | the game tree |
-| `--num-levels / --num-enemies` | 3 / 4 | content counts |
+| `--num-stages` | 3 | biome stages (world-map areas) |
+| `--num-levels` | 3 | levels PER stage |
+| `--num-enemies` | 7 | WORLD enemy pool size (ecology) |
 | `--engine json\|godot` | `json` | godot = playable project export |
 | `--orchestrate` | off | DAG scheduling, resume, per-step regen |
 | `--rules / --tiles / --variants / --combat / --graphics` | pack templates | your game's data files |
@@ -302,6 +452,8 @@ a bug.
 | `--image-model <id>` | backend default | diffusion model override |
 | `--music-backend none\|fake\|lyria` | `none` | stage theme |
 | `--sfx-backend none\|fake\|elevenlabs` | `none` | SFX events |
+| `--vlm-backend none\|fake\|anthropic` | `none` | end-of-pipeline visual QA judge |
+| `--vlm-model <id>` | backend default | VLM judge model override |
 
 Godot 4.3+ is required for the exported project (`godot --path <dir>`);
 `PLAT_LEVEL=<level id>` starts on any level — also the frame-capture

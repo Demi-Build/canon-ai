@@ -1,0 +1,25 @@
+{
+  "artifact_id": "world",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [],
+  "title": "Sunny Crown Kingdom",
+  "stage_ids": [
+    "rolling_meadows",
+    "tangled_canopy",
+    "crumbled_sunspire"
+  ],
+  "edges": [
+    [
+      "rolling_meadows",
+      "tangled_canopy"
+    ],
+    [
+      "tangled_canopy",
+      "crumbled_sunspire"
+    ]
+  ],
+  "unlock_rules": {
+    "type": "linear"
+  }
+}

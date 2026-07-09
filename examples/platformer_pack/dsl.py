@@ -83,6 +83,10 @@ _SIGNATURES: dict[str, str] = {
     "water": "iii",
     "volume": "niii",
     "pool": "nii",
+    "water_wall": "iii",
+    "volume_wall": "niii",
+    "water_block": "iiii",
+    "volume_block": "niiii",
     "hazard_strip": "nii",
     "checkpoint": "i",
     "spawn": "i",
@@ -115,6 +119,10 @@ class StampResult:
     #: Deterministic in-code repairs applied during the stamp (volume
     #: surface snapped off the ground row, ...) — loud, for the log.
     repairs: list[str] = field(default_factory=list)
+    #: Cells placed by the FREE-water ops (water_wall / water_block —
+    #: deliberate uncontained features: waterfalls, climb shafts,
+    #: floating pockets). The containment rule exempts exactly these.
+    free_volume: set = field(default_factory=set)
 
 
 def parse_dsl(text: str) -> list[tuple[str, list]]:
@@ -191,7 +199,8 @@ def _resolve(
 
 
 def stamp(
-    text: str, width: int, height: int, tiles: TileRegistry = DEFAULT_TILES
+    text: str, width: int, height: int, tiles: TileRegistry = DEFAULT_TILES,
+    validate_markers: bool = True,
 ) -> StampResult:
     """Expand a DSL string into the collision grid (int8, registry-id
     valued).
@@ -200,6 +209,11 @@ def stamp(
     Raises DslError for out-of-bounds coordinates, unknown tile names, or
     missing/duplicate spawn/exit — the messages are written to be fed back
     to the Layout Agent verbatim.
+
+    ``validate_markers=False`` skips the final-grid spawn/exit/checkpoint
+    checks (and their missing-marker requirements) — for the snap repair
+    TOOLS, which probe the terrain a program builds in order to CHOOSE
+    valid marker columns; the real stamp afterwards still validates.
     """
     import numpy as np
 
@@ -463,13 +477,26 @@ def stamp(
             tile_name, x1, x2 = args
             tile = _resolve(tiles, name, tile_name, "volume")
             _check_x(name, x1, x2)
-            for x in range(x1, x2 + 1):
-                if grid[ground_row, x] != floor_id:
-                    raise DslError(
-                        f"pool: column {x} has no ground floor to sink "
-                        "into — pool() replaces solid floor; lay "
-                        f"floor({x1},{x2}) there first or move the pool."
-                    )
+            # Name what ACTUALLY occupies each bad column — the old "lay
+            # floor there first" hint was unfollowable when the program's
+            # own wall/gap had overwritten/removed floor it DID lay (the
+            # sunlit run's l3 repeated the same rejected pool verbatim
+            # three times against it).
+            id_names = {t.id: t.name for t in tiles.tiles}
+            bad = [
+                f"{x} ({id_names.get(int(grid[ground_row, x]), 'unknown')})"
+                for x in range(x1, x2 + 1)
+                if grid[ground_row, x] != floor_id
+            ]
+            if bad:
+                raise DslError(
+                    f"pool: ground-row column(s) {', '.join(bad)} are not "
+                    f"solid floor, so the pool cannot sink in — an earlier "
+                    f"op of yours removed or overwrote the floor there "
+                    f"(gap/pit leaves 'empty'; wall/volume replace it). "
+                    f"Move the pool to columns whose ground row is still "
+                    f"floor, or stop overlapping it with those ops."
+                )
             # Replace the walking surface; bedrock below is the basin and
             # the surrounding floor forms the banks — contained by shape.
             grid[ground_row, x1 : x2 + 1] = tile.id
@@ -477,6 +504,72 @@ def stamp(
             x1, x2, y_surface = args
             tile = _resolve(tiles, name, "water", "volume")
             _stamp_volume(name, tile, x1, x2, y_surface)
+        elif name in ("water_wall", "volume_wall"):
+            # FREE water feature: a vertical wall/waterfall of liquid the
+            # player can swim UP and leap out of. Each column fills from
+            # y_top DOWN through open air to the first solid — or all the
+            # way out the BOTTOM edge (a spout: sinking past the bottom
+            # is a fall death, deliberately). Exempt from containment.
+            if name == "water_wall":
+                x1, x2, y_top = args
+                tile = _resolve(tiles, name, "water", "volume")
+            else:
+                tile_name, x1, x2, y_top = args
+                tile = _resolve(tiles, name, tile_name, "volume")
+            if x1 > x2:
+                x1, x2 = x2, x1
+            _check_x(name, x1, x2)
+            if not 0 <= y_top < height:
+                raise DslError(
+                    f"{name}: top row {y_top} outside 0..{height - 1}."
+                )
+            for x in range(x1, x2 + 1):
+                if grid[y_top, x] != empty_id:
+                    raise DslError(
+                        f"{name}: column {x} at top row {y_top} is occupied "
+                        f"by {tiles.by_id[int(grid[y_top, x])].name} — the "
+                        "wall's top must start in open air."
+                    )
+                y = y_top
+                while y < height and grid[y, x] == empty_id:
+                    grid[y, x] = tile.id
+                    result.free_volume.add((x, y))
+                    y += 1
+        elif name in ("water_block", "volume_block"):
+            # FREE water feature: a floating pocket of liquid (whimsy is
+            # allowed — some worlds float their water). Every target cell
+            # must be open air. Exempt from containment.
+            if name == "water_block":
+                x1, y1, x2, y2 = args
+                tile = _resolve(tiles, name, "water", "volume")
+            else:
+                tile_name, x1, y1, x2, y2 = args
+                tile = _resolve(tiles, name, tile_name, "volume")
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            _check_x(name, x1, x2)
+            if not 0 <= y1 <= y2 < height:
+                raise DslError(
+                    f"{name}: rows {y1}..{y2} outside 0..{height - 1}."
+                )
+            occupied = [
+                f"({x}, {y}) is {tiles.by_id[int(grid[y, x])].name}"
+                for y in range(y1, y2 + 1)
+                for x in range(x1, x2 + 1)
+                if grid[y, x] != empty_id
+            ]
+            if occupied:
+                raise DslError(
+                    f"{name}: target cells must be open air, but "
+                    f"{'; '.join(occupied[:4])} — move the block or clear "
+                    "the space first."
+                )
+            for y in range(y1, y2 + 1):
+                for x in range(x1, x2 + 1):
+                    grid[y, x] = tile.id
+                    result.free_volume.add((x, y))
         elif name == "carve":
             x1, y1, x2, y2 = args
             if x1 > x2:
@@ -528,6 +621,20 @@ def stamp(
     # All problems found here report TOGETHER (DslError.problems) — the
     # l3 real run serialized discovery one error per attempt into
     # fallback: fix the spawn complaint, die on the volume one it hid.
+    if not validate_markers:
+        # Repair-tool probe: terrain only. Records still mirror the
+        # final grid; markers land unvalidated (or not at all).
+        hazard_ids = {t.id for t in hazard_tiles}
+        result.hazards = [
+            h for h in result.hazards if int(grid[h.y, h.x]) in hazard_ids
+        ]
+        if spawn_col is not None:
+            result.spawn = (spawn_col, standing_row)
+        result.triggers.extend(
+            SparseMaskEntry(x=x, y=standing_row, type="checkpoint")
+            for x in checkpoint_cols
+        )
+        return result
     problems: list[str] = []
     if spawn_col is None:
         problems.append("missing spawn(x) — every level needs exactly one.")

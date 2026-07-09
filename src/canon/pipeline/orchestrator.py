@@ -442,6 +442,13 @@ def _iter_hashed_files(bible: Any):
             if stored:
                 yield aid, rel, stored, audio, f"sfx_hashes:{rel}"
 
+    for props in getattr(bible, "props", {}).values():
+        aid = props.artifact_id or f"props:{props.stage_id}"
+        for rel in props.prop_paths.values():
+            stored = props.prop_hashes.get(rel)
+            if stored:
+                yield aid, rel, stored, props, f"prop_hashes:{rel}"
+
     player = getattr(bible, "player", None)
     if player is not None and player.sprite_path and player.sprite_hash:
         yield (
@@ -465,6 +472,7 @@ def _dependency_edges(bible: Any) -> dict[str, set[str]]:
         *getattr(bible, "tilesets", {}).values(),
         *getattr(bible, "backdrops", {}).values(),
         *getattr(bible, "audio", {}).values(),
+        *getattr(bible, "props", {}).values(),
     ]
     world = getattr(bible, "world", None)
     if world is not None:

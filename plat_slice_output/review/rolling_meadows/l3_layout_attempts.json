@@ -1,0 +1,34 @@
+{
+  "level_id": "l3",
+  "stage_id": "rolling_meadows",
+  "grid_width": 82,
+  "grid_height": 23,
+  "difficulty": 3,
+  "fallback": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn: column 2 has no floor under it \u2014 ground floor exists at columns 10-17, 22-41, 46-53, 67-81 \u2014 put spawn() on one of those, or lay floor under column 2 first."
+      ],
+      "content": "floor(0,81)\ngap(18,21)\ngap(42,45)\npool(water,0,8)\nwall(9,19,21)\nvolume(water,10,17,20)\nwall(18,19,21)\npool(water,55,65)\nwall(54,19,21)\nwall(66,19,21)\nstairs_up(22,27)\nstairs_down(68,73)\nplatform(12,15,3)\nplatform(30,14,4)\nplatform(47,13,4)\nplatform(62,15,3)\nledge(10,16,12)\nledge(28,34,11)\nledge(45,51,10)\nledge(60,66,12)\ncarve(10,10,16,14)\ncarve(28,9,34,13)\ncarve(45,8,51,12)\ncarve(60,10,66,14)\nhazard_strip(spike,74,77)\nhazard_strip(spike,36,38)\nhazard_strip(spike,22,24)\nspawn(2)\ncheckpoint(40)\nexit(79)"
+    },
+    {
+      "attempt": 2,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn at (11, 20) is covered by a WATER tile \u2014 nothing may occupy the spawn cell; move that water or move the spawn."
+      ],
+      "content": "floor(0,81)\ngap(18,21)\ngap(42,45)\npool(water,0,8)\nwall(9,19,21)\nvolume(water,10,17,20)\nwall(18,19,21)\npool(water,55,65)\nwall(54,19,21)\nwall(66,19,21)\nstairs_up(22,27)\nstairs_down(68,73)\nplatform(12,15,3)\nplatform(30,14,4)\nplatform(47,13,4)\nplatform(62,15,3)\nledge(10,16,12)\nledge(28,34,11)\nledge(45,51,10)\nledge(60,66,12)\ncarve(10,10,16,14)\ncarve(28,9,34,13)\ncarve(45,8,51,12)\ncarve(60,10,66,14)\nhazard_strip(spike,74,77)\nhazard_strip(spike,36,38)\nhazard_strip(spike,22,24)\nspawn(11)\ncheckpoint(40)\nexit(79)"
+    },
+    {
+      "attempt": 3,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn at (25, 20) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "content": "floor(0,81)\ngap(18,21)\ngap(42,45)\npool(water,0,8)\nwall(9,19,21)\nvolume(water,10,17,20)\nwall(18,19,21)\npool(water,55,65)\nwall(54,19,21)\nwall(66,19,21)\nstairs_up(22,27)\nstairs_down(68,73)\nplatform(12,15,3)\nplatform(30,14,4)\nplatform(47,13,4)\nplatform(62,15,3)\nledge(10,16,12)\nledge(28,34,11)\nledge(45,51,10)\nledge(60,66,12)\ncarve(10,10,16,14)\ncarve(28,9,34,13)\ncarve(45,8,51,12)\ncarve(60,10,66,14)\nhazard_strip(spike,74,77)\nhazard_strip(spike,36,38)\nhazard_strip(spike,22,24)\nspawn(25)\ncheckpoint(40)\nexit(79)"
+    }
+  ]
+}

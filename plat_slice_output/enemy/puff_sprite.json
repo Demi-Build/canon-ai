@@ -1,0 +1,32 @@
+{
+  "artifact_id": "enemy:puff_sprite",
+  "status": "pending",
+  "provenance_hash": "sha256:85cf42ad12bfdb86b4dbdc483fee6df0b9b4f25e52ba25df5fb6f170c8e227bb",
+  "parents": [
+    "world",
+    "stage:rolling_meadows"
+  ],
+  "enemy_id": "puff_sprite",
+  "name": "Puff Sprite",
+  "archetype": "sentry",
+  "size": 1.0,
+  "rarity": "uncommon",
+  "habitats": [
+    "meadow"
+  ],
+  "stats": {
+    "hp": 4,
+    "damage": 1,
+    "speed": 0,
+    "flavor": "A gossamer wisp that hovers perfectly still above a favourite wildflower, batting its translucent wings just enough to hold position and bumping any passerby who strays within reach.",
+    "placeholder_color": "#f2e235"
+  },
+  "behavior": {
+    "patrol_range": 5,
+    "aggro_range": 5
+  },
+  "rig": null,
+  "portrait_path": "",
+  "sprite_path": "sprite/enemy/puff_sprite/base.png",
+  "sprite_hash": "sha256:a47ea8c8c57e60697cbd3a277aaa2bf328ffbeb7a51bf8a82e6f5b0415967868"
+}

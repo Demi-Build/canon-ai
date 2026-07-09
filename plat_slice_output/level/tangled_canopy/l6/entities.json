@@ -1,0 +1,26 @@
+[
+  {
+    "enemy_id": "tumble_snout",
+    "x": 18,
+    "y": 20,
+    "variant": ""
+  },
+  {
+    "enemy_id": "boing_bug",
+    "x": 34,
+    "y": 20,
+    "variant": ""
+  },
+  {
+    "enemy_id": "gilt_wanderer",
+    "x": 52,
+    "y": 20,
+    "variant": "elite"
+  },
+  {
+    "enemy_id": "tumble_snout",
+    "x": 63,
+    "y": 20,
+    "variant": "champion"
+  }
+]

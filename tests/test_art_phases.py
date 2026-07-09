@@ -99,9 +99,53 @@ class TestSpriteArt:
             for w in ctx.artifacts.get("slice_warnings", [])
             if w.startswith("sprite art:")
         ]
-        assert len(warnings) == len(ctx.bible.enemy_definitions) + 1  # + player
+        # + player + the 2 gameplay props (checkpoint flag, exit goal)
+        assert len(warnings) == len(ctx.bible.enemy_definitions) + 3
         for enemy in ctx.bible.enemy_definitions.values():
             assert enemy.sprite_path == ""
+        # No prop generated → no artifact, and the manifest block is
+        # empty — consumers draw their placeholder shapes.
+        assert ctx.bible.props == {}
+        manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert manifest["props"] == {STAGE: {}}
+
+    def test_prop_sprites_written_and_stamped(self, tmp_path: Path) -> None:
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        props = ctx.bible.props[STAGE]
+        assert props.artifact_id == f"props:{STAGE}"
+        assert sorted(props.prop_paths) == ["checkpoint", "exit"]
+        for name, rel in props.prop_paths.items():
+            assert rel == f"sprite/prop/{STAGE}/{name}.png"
+            assert (tmp_path / "out" / rel).exists()
+            assert props.prop_hashes[rel].startswith("sha256:")
+        assert props.provenance_hash
+        manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert manifest["props"][STAGE] == props.prop_paths
+
+    def test_pinned_props_survive_a_sprite_reroll(self, tmp_path: Path) -> None:
+        """The per-asset pin guard: props:<stage> pinned → a sprite_art
+        re-run with a DIFFERENT producer leaves the prop bytes intact."""
+        from examples.platformer_pack.art_phases import SpriteArtPhase
+
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        rels = list(ctx.bible.props[STAGE].prop_paths.values())
+        before = {rel: (tmp_path / "out" / rel).read_bytes() for rel in rels}
+
+        ctx.bible.metadata.pinned.append(f"props:{STAGE}")
+        blue = Image.new("RGB", (64, 64), (255, 255, 255))
+        for y in range(16, 48):
+            for x in range(16, 48):
+                blue.putpixel((x, y), (40, 60, 200))
+        buffer = io.BytesIO()
+        blue.save(buffer, format="PNG")
+        blue_path = tmp_path / "blue.png"
+        blue_path.write_bytes(buffer.getvalue())
+        SpriteArtPhase(
+            producer=DiffusionSheetProducer(FakeImageBackend(placeholder=blue_path))
+        ).run(ctx)
+
+        for rel, data in before.items():
+            assert (tmp_path / "out" / rel).read_bytes() == data
 
     def test_backend_failure_falls_back_loudly(self, tmp_path: Path) -> None:
         class ExplodingBackend:

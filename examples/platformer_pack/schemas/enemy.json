@@ -1,9 +1,12 @@
 {
-  "schema_version": "4",
+  "schema_version": "6",
   "entity_type": "enemy",
   "fields": {
     "archetype": {
-      "choices": [["patroller", 3], ["chaser", 2], ["sentry", 1], ["swimmer", 2]]
+      "choices": [["patroller", 5], ["chaser", 1], ["sentry", 1], ["swimmer", 3]]
+    },
+    "rarity": {
+      "choices": [["common", 3], ["uncommon", 2], ["rare", 1]]
     },
     "size": {
       "choices": [[1.0, 4], [1.5, 2], [2.0, 1]]
@@ -25,6 +28,11 @@
     "aggro_range": {
       "lookup": [["patroller", 0], ["chaser", 6], ["sentry", 5], ["swimmer", 0]],
       "depends_on": "archetype"
+    },
+    "leash_range": {
+      "lookup": [["patroller", 0], ["chaser", [8, 12]], ["sentry", 0], ["swimmer", 0]],
+      "depends_on": "archetype",
+      "lookup_ranges": true
     }
   }
 }

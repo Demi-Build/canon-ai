@@ -76,6 +76,17 @@ def _fake_layout(
         f"volume({vol},26,30,{g - 2})",
         f"wall(31,{g - 2},{g - 1})",
         f"platform(34,{g - 3},3)",
+    ]
+    if difficulty >= 3:
+        # Water-as-a-FEATURE ops (free volume, containment-exempt): a
+        # swim-up wall standing on the ground and a floating pocket —
+        # the whimsy shapes the prompt teaches, exercised at $0. The
+        # registry-generic spellings play any game (lava worlds too).
+        lines += [
+            f"volume_wall({vol},{right - 9},{right - 8},{g - 6})",
+            f"volume_block({vol},10,2,12,3)",
+        ]
+    lines += [
         f"hazard_strip({haz},{right - 6},{right - 5})",
         f"checkpoint({right - 4})",
         "spawn(2)",
@@ -122,10 +133,10 @@ def _parse_summary_cells(summary: str) -> list[tuple[int, int]]:
 def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
     """Deterministic land/water placement spots parsed from the placement
     prompt's standable/volume summaries, spread across the level and kept
-    clear of the spawn column. Water spots come DEEPEST-FIRST (a sized
-    swimmer needs rows of water for its whole body — what the prompt now
-    teaches); the placement loop hands ground-row spots to big-bodied
-    land enemies for the same reason."""
+    clear of the spawn column. Water spots come categorized the way the
+    validator judges swim styles: "water" deepest-first (within-style
+    bodies), "surface" = top-row cells (surface riders), "pocket" =
+    cells inside a 2x2 all-water block (floaters)."""
     stand_m = re.search(r"y from top\): (.+)\n", msg)
     vol_m = re.search(r"swimmers ONLY go here\): (.+)\n", msg)
     spawn_m = re.search(r"Player spawn: \[(\d+), (\d+)\]", msg)
@@ -162,34 +173,114 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
             d += 1
         return d
 
+    def _distinct_columns(cells: list[tuple[int, int]], count: int) -> list:
+        out: list[tuple[int, int]] = []
+        for cell in cells:
+            if all(cell[0] != w[0] for w in out):
+                out.append(cell)
+            if len(out) == count:
+                break
+        return out
+
     deep_first = sorted(water_set, key=lambda c: (-_depth(c), c))
-    water: list[tuple[int, int]] = []
-    for cell in deep_first:
-        if all(cell[0] != w[0] for w in water):
-            water.append(cell)
-        if len(water) == 2:
-            break
-    return {"land": land, "water": water}
+    surface_cells = sorted(
+        c for c in water_set if (c[0], c[1] - 1) not in water_set
+    )
+    pocket_cells = [
+        c
+        for c in deep_first
+        if any(
+            all(
+                (px_, py_) in water_set
+                for px_ in (bx, bx + 1)
+                for py_ in (by, by + 1)
+            )
+            for bx in (c[0] - 1, c[0])
+            for by in (c[1] - 1, c[1])
+        )
+    ]
+    return {
+        "land": land,
+        "water": _distinct_columns(deep_first, 2),
+        "surface": _distinct_columns(surface_cells, 2),
+        "pocket": _distinct_columns(pocket_cells, 2),
+    }
 
-_FAKE_DECOR = {
-    "l1": [
-        {"x": 6, "y": 2, "type": "stalactite"},
-        {"x": 22, "y": 8, "type": "crystal"},
-        {"x": 35, "y": 11, "type": "vine"},
-    ],
-    "l2": [
-        {"x": 10, "y": 3, "type": "stalactite"},
-        {"x": 33, "y": 10, "type": "vine"},
-        {"x": 50, "y": 10, "type": "moss"},
-    ],
-    "l3": [
-        {"x": 8, "y": 4, "type": "stalactite"},
-        {"x": 42, "y": 11, "type": "crystal"},
-        {"x": 57, "y": 13, "type": "vine"},
-    ],
-}
+def _fake_decor(width: int, height: int) -> list[dict]:
+    """Dims-adaptive decor — ceiling pieces near the top, growth near the
+    ground, spread across whatever grid was rolled."""
+    g = height - 3
+    return [
+        {"x": 5, "y": 1, "type": "stalactite"},
+        {"x": max(1, width // 2), "y": 2, "type": "crystal"},
+        {"x": max(1, width // 3), "y": g, "type": "vine"},
+        {"x": max(1, width - 6), "y": g, "type": "moss"},
+    ]
 
-_FAKE_ENEMY_NAMES = ["Cinder Beetle", "Ash Wraith", "Slag Sentry", "Vent Skimmer"]
+
+#: World plan pool — the first N stages are served for --num-stages N;
+#: index 0 alone reproduces the classic single-stage ashen_depths tree.
+_FAKE_STAGES = [
+    {
+        "stage_id": "ashen_depths",
+        "biome": "caverns",
+        "brief": (
+            "Collapsed lava tubes below a dead volcano; warm ash drifts "
+            "through cold stone corridors."
+        ),
+        "theme": "ashen lava tubes",
+    },
+    {
+        "stage_id": "bloom_terraces",
+        "biome": "meadow",
+        "brief": (
+            "Sunlit terraces of wildflowers stacked up an old caldera "
+            "rim; pollen glows in the light."
+        ),
+        "theme": "sunlit flower terraces",
+    },
+    {
+        "stage_id": "frostspire_peaks",
+        "biome": "peaks",
+        "brief": (
+            "Wind-scoured ice spires above the clouds; the light is "
+            "thin and blue."
+        ),
+        "theme": "wind-scoured ice spires",
+    },
+]
+
+
+def _fake_stage_plans(count: int) -> list[dict]:
+    plans = [dict(entry) for entry in _FAKE_STAGES[:count]]
+    for i in range(len(plans), count):
+        plans.append(
+            {
+                "stage_id": f"far_wilds_{i + 1}",
+                "biome": f"wilds{i + 1}",
+                "brief": "Uncharted wilds past the mapped world.",
+                "theme": "uncharted wilds",
+            }
+        )
+    return plans
+
+
+def _rotate_hex(color: str, steps: int) -> str:
+    """Deterministic per-stage palette variation: rotate the RGB channels
+    — luminance stays in the same ballpark (the contrast/warmth repairs
+    are code anyway), but each biome reads distinctly."""
+    raw = color.lstrip("#")
+    r, g, b = (raw[i : i + 2] for i in (0, 2, 4))
+    channels = [r, g, b]
+    steps %= 3
+    rotated = channels[steps:] + channels[:steps]
+    return "#" + "".join(rotated)
+
+
+_FAKE_ENEMY_NAMES = [
+    "Cinder Beetle", "Ash Wraith", "Slag Sentry", "Vent Skimmer",
+    "Bloom Hopper", "Frost Urchin", "Gale Drifter",
+]
 
 #: Canned style palette, keyed by color_role — ember-dusk hues that pass
 #: the contrast/warm-hazard validators for BOTH shipped registries. Roles
@@ -213,35 +304,52 @@ def make_fake_responder():
         msg = request.user_message
         task_match = re.search(r"### TASK: (\w+)", msg)
         task = task_match.group(1) if task_match else ""
-        level_match = re.search(r"### LEVEL: (\w+)", msg)
-        level_id = level_match.group(1) if level_match else "l1"
 
         if task == "world":
+            stages_match = re.search(r"exactly (\d+) biome STAGE", msg)
+            count = int(stages_match.group(1)) if stages_match else 1
             return json.dumps(
                 {
                     "title": "Emberfall Hollows",
-                    "stage_id": "ashen_depths",
-                    "stage_brief": (
-                        "Collapsed lava tubes below a dead volcano; warm ash "
-                        "drifts through cold stone corridors."
-                    ),
+                    "stages": [
+                        {
+                            "stage_id": plan["stage_id"],
+                            "biome": plan["biome"],
+                            "brief": plan["brief"],
+                        }
+                        for plan in _fake_stage_plans(count)
+                    ],
                 }
             )
         if task == "stage":
             count_match = re.search(r"exactly (\d+) strings", msg)
             n = int(count_match.group(1)) if count_match else 3
+            stage_match = re.search(r"### STAGE: (\w+)", msg)
+            sid = stage_match.group(1) if stage_match else "ashen_depths"
+            number_match = re.search(r"Stage (\d+) of (\d+)", msg)
+            is_last_stage = (
+                number_match.group(1) == number_match.group(2)
+                if number_match
+                else True
+            )
+            theme = next(
+                (p["theme"] for p in _fake_stage_plans(9) if p["stage_id"] == sid),
+                "uncharted wilds",
+            )
             briefs = [
                 "A gentle descent teaching jumps over low ledges.",
                 "Broken ground: a collapsed bridge over a glowing chasm.",
                 "The deep vents: spike fields and crumbling footholds.",
             ]
             briefs = (briefs * ((n // 3) + 1))[:n]
-            # Deliberate framing exception on the finale only — the rest
-            # stay standard (scale is consistent within a game).
-            views = ["standard"] * (n - 1) + ["vista"] if n else []
+            # Deliberate framing exception on the WORLD finale only — the
+            # rest stay standard (scale is consistent within a game).
+            views = ["standard"] * n
+            if n and is_last_stage:
+                views[-1] = "vista"
             return json.dumps(
                 {
-                    "theme": "ashen lava tubes",
+                    "theme": theme,
                     "level_briefs": briefs,
                     "level_views": views,
                     "roster_brief": "Ash-crusted vermin and ember constructs.",
@@ -276,10 +384,22 @@ def make_fake_responder():
         if task == "style":
             roles_match = re.search(r"### ROLES: ([a-z_,]+)", msg)
             roles = roles_match.group(1).split(",") if roles_match else []
+            stage_match = re.search(r"### STAGE: (\w+)", msg)
+            sid = stage_match.group(1) if stage_match else ""
+            plans = [p["stage_id"] for p in _fake_stage_plans(9)]
+            steps = plans.index(sid) if sid in plans else 0
+            # Structural + background hues rotate per biome (distinct
+            # looks); hazard/volume roles keep their canonical readable
+            # hues everywhere.
+            rotate = {"background", "ground", "platform", "wall"}
             return json.dumps(
                 {
                     "palette": {
-                        role: _FAKE_PALETTE.get(role, "#8a8a8a")
+                        role: (
+                            _rotate_hex(_FAKE_PALETTE.get(role, "#8a8a8a"), steps)
+                            if role in rotate
+                            else _FAKE_PALETTE.get(role, "#8a8a8a")
+                        )
                         for role in roles
                     }
                 }
@@ -305,7 +425,8 @@ def make_fake_responder():
             )
         if task == "placement":
             roster_match = re.search(
-                r"roster \(id, archetype, size, behavior\): (\[.*?\])\n", msg
+                r"roster \(id, archetype, size, rarity, behavior\): (\[.*?\])\n",
+                msg,
             )
             roster = json.loads(roster_match.group(1)) if roster_match else []
             # Variant vocabulary comes from the prompt (data-driven): mark
@@ -315,16 +436,40 @@ def make_fake_responder():
             offered = re.findall(r"'(\w+)'", offer_match.group(1)) if offer_match else []
             order = [n for n in ("elite", "champion") if n in offered]
             order += sorted(set(offered) - set(order))
+            # Rarity caps come from the prompt too ("at most 1 'rare' per
+            # level") — the canned agent respects them like a real one.
+            caps = {
+                tier: int(cap)
+                for cap, tier in re.findall(r"at most (\d+) '(\w+)' per level", msg)
+            }
+            rarity_used: dict[str, int] = {}
             spots = _fake_spots(msg)
             land = list(spots["land"])
-            water = list(spots["water"])
+            pools = {
+                "": list(spots["water"]),
+                "within": list(spots["water"]),
+                "surface": list(spots["surface"]),
+                "float": list(spots["pocket"]),
+            }
             placements = []
-            # Archetype-aware: swimmers into volume spots (deepest
-            # first), everyone else on land — big bodies take the
-            # ground-row spot (open air above), like the prompt teaches;
-            # earliest placements take the variant vocabulary.
+            # Archetype-aware: swimmers into the water spots their SWIM
+            # STYLE validates against (surface riders on the top row,
+            # floaters in a 2x2 pocket, within-bodies deepest-first);
+            # everyone else on land — big bodies take the ground-row spot
+            # (open air above), like the prompt teaches; earliest
+            # placements take the variant vocabulary.
             for entry in roster:
-                pool = water if entry["archetype"] == "swimmer" else land
+                rarity = str(entry.get("rarity", "") or "")
+                cap = caps.get(rarity)
+                if cap is not None and rarity_used.get(rarity, 0) >= cap:
+                    continue
+                if entry["archetype"] == "swimmer":
+                    style = str(
+                        (entry.get("behavior") or {}).get("swim_style", "")
+                    )
+                    pool = pools.get(style, pools[""])
+                else:
+                    pool = land
                 if not pool:
                     continue
                 if pool is land and float(entry.get("size", 1.0)) > 1.0:
@@ -333,13 +478,21 @@ def make_fake_responder():
                     x, y = spot
                 else:
                     x, y = pool.pop(0)
+                if rarity:
+                    rarity_used[rarity] = rarity_used.get(rarity, 0) + 1
                 placement = {"enemy_id": entry["id"], "x": x, "y": y}
                 if len(placements) < len(order):
                     placement["variant"] = order[len(placements)]
                 placements.append(placement)
             return json.dumps({"placements": placements})
         if task == "decor":
-            return json.dumps({"decor": _FAKE_DECOR.get(level_id, [])})
+            grid_match = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            width, height = (
+                (int(grid_match.group(1)), int(grid_match.group(2)))
+                if grid_match
+                else (48, 16)
+            )
+            return json.dumps({"decor": _fake_decor(width, height)})
         raise ValueError(f"Fake responder: unrecognized prompt task {task!r}.")
 
     return respond
@@ -369,8 +522,23 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--output-dir", default="./plat_slice_output")
     parser.add_argument("--seed", default="emberfall_001")
-    parser.add_argument("--num-levels", type=int, default=3)
-    parser.add_argument("--num-enemies", type=int, default=4)
+    parser.add_argument(
+        "--num-stages", type=int, default=3,
+        help="Biome stages in the world (each = a world-map area whose "
+        "levels share palette/tileset/backdrop/music/props). Levels are "
+        "numbered globally across stages (l1..lN); in-game they display "
+        "as stage-local names (1-1..3-3).",
+    )
+    parser.add_argument(
+        "--num-levels", type=int, default=3,
+        help="Levels PER STAGE.",
+    )
+    parser.add_argument(
+        "--num-enemies", type=int, default=7,
+        help="Size of the WORLD enemy pool (ecology: each definition "
+        "rolls rarity and habitats; stage rosters filter the pool by "
+        "biome).",
+    )
     parser.add_argument(
         "--engine", choices=["json", "godot"], default="json",
         help="godot: use GodotOutputAdapter and emit a playable Godot "
@@ -427,6 +595,23 @@ def main() -> None:
         "and only ever used when this flag says so.",
     )
     parser.add_argument(
+        "--vlm-backend", choices=["none", "fake", "anthropic"],
+        default="none",
+        help="Vision judge for the end-of-pipeline QA loop (default none "
+        "= no QA). Per level it compares the block render (analytic "
+        "truth) against the skinned render and writes structured "
+        "fidelity/readability/style verdicts to review/<stage>/"
+        "qa_report.json; failing verdicts become manifest warnings. It "
+        "NEVER regenerates anything — it may suggest mark-only targets. "
+        "anthropic is PAID (ANTHROPIC_API_KEY) and only ever used when "
+        "this flag says so; fake exercises the whole loop "
+        "deterministically at $0.",
+    )
+    parser.add_argument(
+        "--vlm-model", default=None,
+        help="Model id for the VLM judge (default: the backend's).",
+    )
+    parser.add_argument(
         "--graphics", default=None,
         help="Path to a graphics.json spec — target resolution + art "
         "style as per-game data (defaults to the pack's 32px crisp "
@@ -475,10 +660,12 @@ def main() -> None:
     )
     from examples.platformer_pack.graphics import load_graphics
     from examples.platformer_pack.tileset_art import build_image_producer
+    from examples.platformer_pack.vlm_qa import build_vlm_judge
 
     image_producer = build_image_producer(args.image_backend, args.image_model)
     music_producer = build_music_producer(args.music_backend)
     sfx_producer = build_sfx_producer(args.sfx_backend)
+    vlm_judge = build_vlm_judge(args.vlm_backend, args.vlm_model)
     graphics = load_graphics(args.graphics) if args.graphics else load_graphics()
     if args.orchestrate:
         from canon.pipeline.orchestrator import detect_edits
@@ -496,10 +683,11 @@ def main() -> None:
         report = run_orchestrated(
             ctx, persist_path=bible_path,
             num_levels=args.num_levels, num_enemies=args.num_enemies,
+            num_stages=args.num_stages,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,
-            combat=combat,
+            combat=combat, vlm_judge=vlm_judge,
         )
         print(
             f"\nOrchestrated: {len(report.done)} node(s) ran, "
@@ -514,10 +702,11 @@ def main() -> None:
     else:
         phases = compose_pipeline(
             num_levels=args.num_levels, num_enemies=args.num_enemies,
+            num_stages=args.num_stages,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,
-            combat=combat,
+            combat=combat, vlm_judge=vlm_judge,
         )
         run_pipeline(phases, ctx)
 

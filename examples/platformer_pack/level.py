@@ -42,7 +42,9 @@ from examples.platformer_pack.validate import (
     auto_bridge,
     check_placements,
     snap_checkpoints,
+    snap_spawn,
     standable_cells,
+    swimmer_spot_exists,
     volume_cells,
 )
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
@@ -61,6 +63,46 @@ def _fallback_dsl(width: int) -> str:
     """A guaranteed-valid layout so a fully misbehaving LLM still yields a
     walkable (if boring) level instead of a dead pipeline."""
     return f"floor(0,{width - 1})\nspawn(2)\nexit({width - 3})"
+
+
+def _stage_for_level(ctx: Any, level_id: str):
+    """The stage that owns ``level_id`` — level ids are globally unique
+    (allocated in world order by StagePhase), so the Bible is the
+    resolver; single-stage callers/tests that never planned stages fall
+    back to the lone stage."""
+    for stage in ctx.bible.stages.values():
+        if level_id in stage.level_ids:
+            return stage
+    stages = list(ctx.bible.stages.values())
+    if len(stages) == 1:
+        return stages[0]
+    raise KeyError(
+        f"no stage owns level {level_id!r} — stages: "
+        f"{ {s.stage_id: s.level_ids for s in stages} }"
+    )
+
+
+def _stage_number(ctx: Any, stage_id: str) -> int:
+    """1-based position of the stage in world play order."""
+    world = getattr(ctx.bible, "world", None)
+    order = list(world.stage_ids) if world and world.stage_ids else list(
+        ctx.bible.stages
+    )
+    return order.index(stage_id) + 1 if stage_id in order else 1
+
+
+def world_stages(ctx: Any) -> list:
+    """Stages in world play order — the iteration every multi-stage
+    phase shares (sequential and DAG alike, for byte parity)."""
+    world = getattr(ctx.bible, "world", None)
+    order = list(world.stage_ids) if world and world.stage_ids else list(
+        ctx.bible.stages
+    )
+    return [
+        ctx.bible.stages[stage_id]
+        for stage_id in order
+        if stage_id in ctx.bible.stages
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +126,21 @@ def stamp_level_collision(
     """Layout Agent → stamp → collision.npz; creates the Level entity
     (registered in the Bible) carrying spawn/exit/hazards/triggers/brief."""
     spec = load_skeleton_spec(SCHEMAS_DIR / "level_layout.json")
-    stage_id = ctx.artifacts["stage_id"]
-    stage = ctx.bible.stages[stage_id]
+    stage = _stage_for_level(ctx, level_id)
+    stage_id = stage.stage_id
     seed = str(getattr(ctx.config, "seed", ""))
     brief = _level_brief(ctx, level_id)
 
-    # Difficulty escalates by level POSITION, not by roll — the schema
-    # keys it off this context value (depends_on_context). Clamped to the
-    # schema's 1..3 table for longer level lists.
-    roll_context = {"level_number": min(index + 1, 3)}
+    # Difficulty escalates across the WORLD: stage position + level
+    # position within the stage, clamped to the schema's 1..3 table
+    # (stage 1 → 1,2,3; stage 2 → 2,3,3; stage 3 → 3,3,3). The schema
+    # keys off this context value (depends_on_context) — code computes
+    # the progression, the table stays data.
+    stage_number = _stage_number(ctx, stage_id)
+    roll_context = {
+        "level_number": min(stage_number + index, 3),
+        "stage_number": stage_number,
+    }
     knobs = roll_skeleton(
         spec, derive_rng(seed, phase_name, level_id), context=roll_context
     )
@@ -127,11 +175,15 @@ def stamp_level_collision(
         return content
 
     def validate(content: str) -> tuple[bool, list[str]]:
-        # Design problems (DSL errors, covered spawn, spilled pools) go
-        # back to the agent; reachability breaks and checkpoint columns
-        # are ARITHMETIC — the bridge/snap tools repair them in code
-        # (never an LLM round-trip).
+        # Design problems (DSL errors, spilled pools) go back to the
+        # agent; reachability breaks and spawn/checkpoint COLUMNS are
+        # ARITHMETIC — the bridge/snap tools repair them in code (never
+        # an LLM round-trip; the first multi-stage run lost three levels
+        # to spawn-only failures before spawn joined the snap tools).
         try:
+            content, spawn_moves = snap_spawn(
+                content, width, height, tiles=tiles
+            )
             content, snaps = snap_checkpoints(
                 content, width, height, tiles=tiles
             )
@@ -146,7 +198,7 @@ def stamp_level_collision(
         if problems:
             return False, problems
         accepted["dsl"], accepted["bridges"] = repaired, bridges
-        accepted["snaps"] = snaps
+        accepted["snaps"] = spawn_moves + snaps
         return True, []
 
     fallback_dsl = _fallback_dsl(width)
@@ -161,8 +213,10 @@ def stamp_level_collision(
         # Wide difficulty-3 grids need more ops than the prompt's 512-token
         # default allows — a truncated program is a guaranteed DslError, and
         # identical caps across retries made that failure unrecoverable.
+        # The initial budget scales with GRID AREA (an 82x23 finale wants
+        # ~2x the ops of a 43x15 opener); escalation still multiplies it.
         token_escalation=default_token_escalation,
-        initial_max_tokens=768,
+        initial_max_tokens=max(768, min(2048, width * height)),
     )
     fell_back = raw_text == fallback_dsl
     if fell_back:
@@ -293,22 +347,63 @@ def place_level_entities(
     """Entity Agent → validated placements → entities.json + Level.entities."""
     import numpy as np
 
+    # The level's roster is its STAGE's (ecology: the world pool filtered
+    # by biome — Stage.enemy_refs); an empty refs list (pre-ecology
+    # bibles, direct tests) falls back to the whole pool.
+    stage = ctx.bible.stages.get(level.stage_id)
+    stage_refs = {
+        ref.split(":", 1)[1]
+        for ref in (stage.enemy_refs if stage else [])
+    }
     roster = [
         {
             "id": e.enemy_id,
             "archetype": e.archetype,
             "size": float(getattr(e, "size", 1.0) or 1.0),
+            "rarity": str(getattr(e, "rarity", "") or ""),
             "behavior": e.behavior,
         }
         for e in ctx.bible.enemy_definitions.values()
+        if not stage_refs or e.enemy_id in stage_refs
     ]
-    enemy_defs = {
-        e["id"]: {"archetype": e["archetype"], "size": e["size"]}
-        for e in roster
-    }
     level_id = level.level_id
     with np.load(ctx.adapter.resolve_path(level.collision)) as data:
         grid = data["collision"]
+    # Env feasibility (code, before the prompt): an enemy this TERRAIN
+    # can't sustain is never offered — a swimmer needs water its whole
+    # body fits (the first multi-stage run burned every retry trying to
+    # seat a 1.5-body swimmer in 1-deep puddles). Land archetypes always
+    # have standable ground in a valid level; flyers join this gate when
+    # they exist.
+    infeasible = [
+        e for e in roster
+        if e["archetype"] == "swimmer"
+        and not swimmer_spot_exists(
+            grid, e["size"],
+            str(e["behavior"].get("swim_style", "") or ""), tiles,
+        )
+    ]
+    if infeasible:
+        roster = [e for e in roster if e not in infeasible]
+        logger.info(
+            "Placement %s: terrain can't sustain %s — excluded from the "
+            "offered roster (env feasibility is code's call).",
+            level_id,
+            ", ".join(
+                f"{e['id']} (size-{e['size']:g} "
+                f"{e['behavior'].get('swim_style') or 'within'} swimmer)"
+                for e in infeasible
+            ),
+        )
+    enemy_defs = {
+        e["id"]: {
+            "archetype": e["archetype"],
+            "size": e["size"],
+            "rarity": e["rarity"],
+            "swim_style": str(e["behavior"].get("swim_style", "") or ""),
+        }
+        for e in roster
+    }
     spawn = level.spawn or (0, 0)
     summary = _cells_summary(sorted(standable_cells(grid, tiles)))
     volume_summary = _volume_summary(grid, tiles)
@@ -588,18 +683,17 @@ class LayoutStampPhase:
         self.graphics = graphics
 
     def run(self, ctx: Any) -> None:
-        stage_id = ctx.artifacts["stage_id"]
-        stage = ctx.bible.stages[stage_id]
-        for index, level_id in enumerate(stage.level_ids):
-            level = stamp_level_collision(
-                ctx, level_id, index,
-                movement=self.movement, rules=self.rules, tiles=self.tiles,
-                graphics=self.graphics,
-                default_width=self.width, default_height=self.height,
-                phase_name=self.name,
-            )
-            write_level_hazards(ctx, level)
-            write_level_triggers(ctx, level)
+        for stage in world_stages(ctx):
+            for index, level_id in enumerate(stage.level_ids):
+                level = stamp_level_collision(
+                    ctx, level_id, index,
+                    movement=self.movement, rules=self.rules, tiles=self.tiles,
+                    graphics=self.graphics,
+                    default_width=self.width, default_height=self.height,
+                    phase_name=self.name,
+                )
+                write_level_hazards(ctx, level)
+                write_level_triggers(ctx, level)
         _stamp_metadata(ctx, self.name)
 
 
@@ -621,15 +715,14 @@ class PlacementPhase:
         self.combat = combat
 
     def run(self, ctx: Any) -> None:
-        stage_id = ctx.artifacts["stage_id"]
-        stage = ctx.bible.stages[stage_id]
-        for level_id in stage.level_ids:
-            place_level_entities(
-                ctx, ctx.bible.levels[level_id],
-                max_enemies=self.max_enemies, rules=self.rules,
-                tiles=self.tiles, variants=self.variants,
-                combat=self.combat, phase_name=self.name,
-            )
+        for stage in world_stages(ctx):
+            for level_id in stage.level_ids:
+                place_level_entities(
+                    ctx, ctx.bible.levels[level_id],
+                    max_enemies=self.max_enemies, rules=self.rules,
+                    tiles=self.tiles, variants=self.variants,
+                    combat=self.combat, phase_name=self.name,
+                )
         _stamp_metadata(ctx, self.name)
 
 
@@ -643,12 +736,11 @@ class DecoratorPhase:
         self.max_decor = max_decor
 
     def run(self, ctx: Any) -> None:
-        stage_id = ctx.artifacts["stage_id"]
-        stage = ctx.bible.stages[stage_id]
-        for level_id in stage.level_ids:
-            level = ctx.bible.levels[level_id]
-            decorate_level(
-                ctx, level, max_decor=self.max_decor, phase_name=self.name
-            )
-            write_level_manifest(ctx, level)
+        for stage in world_stages(ctx):
+            for level_id in stage.level_ids:
+                level = ctx.bible.levels[level_id]
+                decorate_level(
+                    ctx, level, max_decor=self.max_decor, phase_name=self.name
+                )
+                write_level_manifest(ctx, level)
         _stamp_metadata(ctx, self.name)

@@ -1,0 +1,18 @@
+{
+  "artifact_id": "props:rolling_meadows",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:rolling_meadows",
+    "phase:plat:style"
+  ],
+  "stage_id": "rolling_meadows",
+  "prop_paths": {
+    "checkpoint": "sprite/prop/rolling_meadows/checkpoint.png",
+    "exit": "sprite/prop/rolling_meadows/exit.png"
+  },
+  "prop_hashes": {
+    "sprite/prop/rolling_meadows/checkpoint.png": "sha256:eb58196182316123b7817a0bb2cb32aae8ab153a7a41aece93986241aec86b0a",
+    "sprite/prop/rolling_meadows/exit.png": "sha256:1715303265d8284ce30da7c1a9a4be54c6c38bab32a7cd448796b57c9f6a42ef"
+  }
+}

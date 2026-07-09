@@ -28,7 +28,7 @@ import logging
 from typing import Any
 
 from canon.bible.artifacts import make_artifact_id
-from canon.bible.platformer import Backdrop, PlayerDefinition
+from canon.bible.platformer import Backdrop, PlayerDefinition, StageProps
 from canon.pipeline.orchestrator import pinned_ids
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, warn
@@ -52,6 +52,26 @@ MIN_OPAQUE_RATIO = 0.02
 #: Dominant hue may drift this far (degrees) from the enemy's assigned
 #: color before we warn. Wide on purpose: sprites need internal detail.
 HUE_TOLERANCE_DEG = 75.0
+
+#: Closed gameplay-prop vocabulary: (name, descriptor, color hex). The
+#: NAMES are code-interpreted — each has a draw + trigger point in BOTH
+#: play surfaces (checkpoint flag flips state when claimed; the exit goal
+#: marks the leave-right column), so a new prop only becomes real with
+#: its consumer code. Colors match the review-render markers.
+PROP_SPECS: tuple[tuple[str, str, str], ...] = (
+    (
+        "checkpoint",
+        "a checkpoint marker: a small triangular pennant flag on a short "
+        "pole planted in the ground",
+        "#ffd24a",
+    ),
+    (
+        "exit",
+        "a level exit goal: an ornate free-standing doorway with a "
+        "glowing arch, closed set piece",
+        "#40ff70",
+    ),
+)
 
 
 def _hue_of(hex_color: str) -> float:
@@ -188,13 +208,18 @@ class SpriteArtPhase:
 
     def owns(self, ctx: Any) -> list[str]:
         # An explicitly-regenerated enemy definition gets fresh art too;
-        # "player" makes `canon regen player` reschedule this phase.
+        # "player" makes `canon regen player` reschedule this phase, and
+        # "props:<sid>" does the same for the gameplay-prop sprites.
         return [
             *(
                 e.artifact_id or f"enemy:{eid}"
                 for eid, e in getattr(ctx.bible, "enemy_definitions", {}).items()
             ),
             "player",
+            *(
+                make_artifact_id("props", sid)
+                for sid in getattr(ctx.bible, "stages", {})
+            ),
         ]
 
     def run(self, ctx: Any) -> None:
@@ -288,6 +313,52 @@ class SpriteArtPhase:
                         f"+img:{self.producer.model}"
                     ),
                 )
+
+        # Gameplay props (closed PROP_SPECS set), themed per stage. A
+        # failed/empty generation leaves the entry absent — consumers
+        # keep their drawn placeholder shapes (loud fallback).
+        for stage_id, st in ctx.bible.stages.items():
+            aid = make_artifact_id("props", stage_id)
+            if aid in pinned:
+                logger.info(
+                    "SpriteArtPhase: props:%s is pinned — props kept.",
+                    stage_id,
+                )
+                continue
+            props = StageProps(
+                artifact_id=aid,
+                stage_id=stage_id,
+                parents=[
+                    make_artifact_id("stage", stage_id), "phase:plat:style",
+                ],
+            )
+            for prop_name, descriptor, color_hex in PROP_SPECS:
+                sprite = self._generate(
+                    ctx, f"{prop_name} prop", descriptor, color_hex,
+                    st.theme, world_title, (size, size),
+                )
+                if sprite is None:
+                    continue
+                rel = f"sprite/prop/{stage_id}/{prop_name}.png"
+                props.prop_paths[prop_name] = rel
+                props.prop_hashes[rel] = self._write(ctx, rel, sprite)
+            if not props.prop_paths:
+                continue  # nothing generated — no empty artifact
+            manifest_hash = ctx.adapter.write_json_singleton(
+                f"sprite/prop/{stage_id}/manifest.json",
+                props.model_dump(mode="json"),
+            )
+            stamp_provenance(
+                ctx, props, manifest_hash,
+                model_extra=(
+                    f"gfx:{self.graphics.digest()}+img:{self.producer.model}"
+                ),
+            )
+            ctx.bible.props[stage_id] = props
+            logger.info(
+                "SpriteArtPhase wrote %d prop sprite(s) for stage %s.",
+                len(props.prop_paths), stage_id,
+            )
         _stamp_metadata(ctx, self.name)
 
     def _generate(

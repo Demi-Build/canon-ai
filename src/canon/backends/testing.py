@@ -140,6 +140,45 @@ class FakeLLMBackend:
 
 
 # ---------------------------------------------------------------------------
+# FakeVLMBackend
+# ---------------------------------------------------------------------------
+
+
+class FakeVLMBackend:
+    """Deterministic vision-judge backend for testing.
+
+    Mirrors ``FakeLLMBackend``'s callable mode: the responder receives
+    ``(prompt, images)`` and returns the verdict string, so callers supply
+    canned verdicts keyed off prompt markers. Records every call to
+    ``.calls`` (images stored by byte length only — keeping full PNGs per
+    call would bloat assertions for no diagnostic gain).
+
+    Public utility — downstream users testing VLM QA loops without paying
+    for vision-model calls::
+
+        fake = FakeVLMBackend(lambda prompt, images: '{"passed": true}')
+    """
+
+    #: Identity folded into reports/provenance, like real backends' model.
+    model = "fake-vlm"
+
+    def __init__(self, responder: Callable[[str, list[bytes]], str]) -> None:
+        self._responder = responder
+        self.calls: list[dict] = []
+
+    def judge(self, prompt: str, images: list[bytes], max_tokens: int = 1024) -> str:
+        """Return the responder's canned verdict and record the call."""
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "image_sizes": [len(data) for data in images],
+                "max_tokens": max_tokens,
+            }
+        )
+        return self._responder(prompt, images)
+
+
+# ---------------------------------------------------------------------------
 # FakeImageBackend
 # ---------------------------------------------------------------------------
 

@@ -141,6 +141,10 @@ class Stage(ArtifactMeta):
 
     stage_id: str
     theme: str = ""
+    #: One-word biome name ("forest", "caves", ...) — the world-map area
+    #: this stage's levels cluster under, and the habitat vocabulary the
+    #: enemy ecology filters on. Empty on pre-multi-stage bibles.
+    biome: str = ""
     enemy_refs: list[str] = Field(default_factory=list)  # "enemy:<id>"
     boss_ref: str = ""  # "boss:<id>"
     level_ids: list[str] = Field(default_factory=list)
@@ -226,6 +230,13 @@ class EnemyDefinition(ArtifactMeta):
     #: multiplier rides on the placement). Code tolerates any positive
     #: float so hand-edited definitions stay loadable.
     size: float = 1.0
+    #: Ecology (multi-stage worlds): how often this creature should be
+    #: met ("common" | "uncommon" | "rare" — schema v5 rolls it; rarity
+    #: caps in GameRules bound per-level placements) and which biomes it
+    #: inhabits (["*"] = the whole world; else stage-biome names). Both
+    #: default to the pre-v5 behavior: everywhere, uncapped tier.
+    rarity: str = "common"
+    habitats: list[str] = Field(default_factory=lambda: ["*"])
     stats: dict[str, Any] = Field(default_factory=dict)
     behavior: dict[str, Any] = Field(default_factory=dict)
     rig: RigManifest | None = None
@@ -254,6 +265,24 @@ class PlayerDefinition(ArtifactMeta):
 
     sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
     sprite_hash: str = ""
+
+
+class StageProps(ArtifactMeta):
+    """A stage's generated gameplay-prop sprites (checkpoint flag, exit
+    goal). Addressed ``props:<stage_id>`` — its own artifact so a prop
+    re-roll never cascades through levels, and one artifact per stage so
+    props stay themed to the stage that shows them.
+
+    ``prop_paths`` maps prop name → output-relative file; ``prop_hashes``
+    maps each file path to its content hash (multi-file artifact, one
+    owner — the ``field:key`` adoption pattern backdrop bands proved).
+    The prop NAME set is closed in code (consumers interpret each name);
+    absent entries mean the consumer draws its placeholder shape.
+    """
+
+    stage_id: str
+    prop_paths: dict[str, str] = Field(default_factory=dict)
+    prop_hashes: dict[str, str] = Field(default_factory=dict)
 
 
 class StageAudio(ArtifactMeta):

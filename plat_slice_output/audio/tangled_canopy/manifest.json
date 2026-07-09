@@ -1,0 +1,13 @@
+{
+  "artifact_id": "audio:tangled_canopy",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:tangled_canopy"
+  ],
+  "stage_id": "tangled_canopy",
+  "music_path": "music/tangled_canopy/theme.mp3",
+  "music_hash": "sha256:15671080262ad739b8938baa5c582413cccebc9a92ec156f780b5e9f9a39b63a",
+  "sfx_paths": {},
+  "sfx_hashes": {}
+}
