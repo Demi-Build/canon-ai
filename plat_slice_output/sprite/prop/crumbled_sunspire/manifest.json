@@ -1,0 +1,18 @@
+{
+  "artifact_id": "props:crumbled_sunspire",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:crumbled_sunspire",
+    "phase:plat:style"
+  ],
+  "stage_id": "crumbled_sunspire",
+  "prop_paths": {
+    "checkpoint": "sprite/prop/crumbled_sunspire/checkpoint.png",
+    "exit": "sprite/prop/crumbled_sunspire/exit.png"
+  },
+  "prop_hashes": {
+    "sprite/prop/crumbled_sunspire/checkpoint.png": "sha256:6412ffe7446f1bded349efe3b0780a9f5e37b8152f4f8c287764ddea6c575e08",
+    "sprite/prop/crumbled_sunspire/exit.png": "sha256:71d75b23d5cc471d399d207a96766954da33e63c280677fc0ebc6e38d2dde7d8"
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "artifact_id": "",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "level:tangled_canopy/l5/layout",
+    "tileset:tangled_canopy"
+  ],
+  "level_id": "l5",
+  "stage_id": "tangled_canopy",
+  "grid_width": 79,
+  "grid_height": 21,
+  "pixels_per_cell": null,
+  "view_cells": null,
+  "brief": "A steep vertical climb up a colossal ancient tree trunk, leaping between gnarled bark ledges and swaying fungal shelves while aggressive tree-hoppers ambush from above and dislodging roots collapse underfoot.",
+  "layout_fallback": true,
+  "spawn": [
+    2,
+    18
+  ],
+  "exit": [
+    78,
+    18
+  ],
+  "collision": "level/tangled_canopy/l5/collision.npz",
+  "collision_hash": "sha256:a0e87bdfdd0d6217244d53a5663d743e78ac5537cdf27cda9e5032c1a910eab0",
+  "terrain": "level/tangled_canopy/l5/terrain.npz",
+  "terrain_hash": "sha256:47e72ff16b9c664c8fbdc4b176758f72efd0d7780ebf5619d3b0bbf51ac4fe59",
+  "background": "level/tangled_canopy/l5/background.npz",
+  "background_hash": "sha256:7f221aeca50c6e6e19fe989e58eec12339175ce5de7de84a608fbac62375658b",
+  "hazards": [],
+  "triggers": [],
+  "foreground": [
+    {
+      "x": 5,
+      "y": 1,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 23,
+      "y": 0,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 41,
+      "y": 2,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 58,
+      "y": 0,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 70,
+      "y": 1,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 14,
+      "y": 19,
+      "type": "moss",
+      "params": {}
+    }
+  ],
+  "hazards_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "triggers_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "foreground_hash": "sha256:d0d058db4784f00513f3e60cf285c2a540fa67d50813d02320dd2a2a7a5eb247",
+  "entities_hash": "sha256:c29e68d65812daad5d8d7d2fb2c3f2635989e800fd39510e68a193eeecc73d47",
+  "entities": [
+    {
+      "ref": "enemy:tumble_snout",
+      "pos": [
+        18,
+        18
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:boing_bug",
+      "pos": [
+        35,
+        18
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:clover_roller",
+      "pos": [
+        54,
+        18
+      ],
+      "overrides": {
+        "variant": "elite"
+      }
+    },
+    {
+      "ref": "enemy:pebble_trudger",
+      "pos": [
+        68,
+        18
+      ],
+      "overrides": {}
+    }
+  ],
+  "step_parents": {
+    "collision": [
+      "level:tangled_canopy/l5/layout"
+    ],
+    "hazards": [
+      "level:tangled_canopy/l5/collision"
+    ],
+    "triggers": [
+      "level:tangled_canopy/l5/collision"
+    ],
+    "terrain": [
+      "level:tangled_canopy/l5/collision",
+      "tileset:tangled_canopy"
+    ],
+    "background": [
+      "level:tangled_canopy/l5/collision",
+      "tileset:tangled_canopy"
+    ],
+    "entities": [
+      "level:tangled_canopy/l5/collision",
+      "level:tangled_canopy/l5/hazards",
+      "enemy:boing_bug",
+      "enemy:clover_roller",
+      "enemy:gilt_wanderer",
+      "enemy:pebble_trudger",
+      "enemy:puddle_drifter",
+      "enemy:tumble_snout"
+    ],
+    "foreground": [
+      "level:tangled_canopy/l5/collision",
+      "tileset:tangled_canopy"
+    ],
+    "level": [
+      "level:tangled_canopy/l5/collision",
+      "level:tangled_canopy/l5/hazards",
+      "level:tangled_canopy/l5/triggers",
+      "level:tangled_canopy/l5/terrain",
+      "level:tangled_canopy/l5/background",
+      "level:tangled_canopy/l5/entities",
+      "level:tangled_canopy/l5/foreground"
+    ]
+  }
+}

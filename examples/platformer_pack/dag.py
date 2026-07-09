@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import Any
 
 from canon.pipeline.orchestrator import Node, OrchestratorReport, orchestrate
+from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.godot_export import GodotExportPhase
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.layers import (
     assign_level_terrain,
     paint_level_background,
@@ -76,17 +78,18 @@ from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 logger = logging.getLogger(__name__)
 
 
-def _stage(ctx: Any):
-    """The single stage of the slice, or None before the macro phases ran
-    (fresh Bible) — expansion is deferred to the next pass in that case."""
-    stages = getattr(ctx.bible, "stages", {})
+def _stages(ctx: Any) -> list:
+    """The world's stages in play order, or [] before the macro phases
+    ran (fresh Bible) — expansion is deferred to the next pass then."""
+    from examples.platformer_pack.level import world_stages
+
+    stages = world_stages(ctx)
     if not stages:
         logger.info(
             "Platformer DAG: no stages in the Bible yet — per-level nodes "
             "expand on the next run, after the macro phases complete."
         )
-        return None
-    return next(iter(stages.values()))
+    return stages
 
 
 class LevelStepsDagPhase:
@@ -107,6 +110,8 @@ class LevelStepsDagPhase:
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        combat: CombatSpec = DEFAULT_COMBAT,
         max_enemies_per_level: int = 4,
         max_decor: int = 6,
     ) -> None:
@@ -116,20 +121,17 @@ class LevelStepsDagPhase:
         self.rules = rules
         self.tiles = tiles
         self.variants = variants
+        self.graphics = graphics
+        self.combat = combat
         self.max_enemies = max_enemies_per_level
         self.max_decor = max_decor
 
     def expand(self, ctx: Any) -> list[Node]:
-        stage = _stage(ctx)
-        if stage is None:
+        stages = _stages(ctx)
+        if not stages:
             return []
-        # Regen/resume runs start from a loaded Bible with empty scratch
-        # artifacts — node bodies resolve the stage through here.
-        ctx.artifacts.setdefault("stage_id", stage.stage_id)
-        sid = stage.stage_id
-        tileset_aid = stage.tileset_ref
 
-        def aid(level_id: str, step: str) -> str:
+        def aid(sid: str, level_id: str, step: str) -> str:
             return f"level:{sid}/{level_id}/{step}"
 
         def collision_body(level_id: str, index: int):
@@ -137,7 +139,8 @@ class LevelStepsDagPhase:
                 level = stamp_level_collision(
                     c, level_id, index,
                     movement=self.movement, rules=self.rules,
-                    tiles=self.tiles, default_width=self.width,
+                    tiles=self.tiles, graphics=self.graphics,
+                    default_width=self.width,
                     default_height=self.height, phase_name="plat:layout",
                 )
                 del level  # registered in the Bible by the body
@@ -150,79 +153,106 @@ class LevelStepsDagPhase:
 
             return run
 
+        # Step-major node order ACROSS ALL STAGES (all collisions in
+        # world order, then all hazards, ...) so a cap-1 orchestrated run
+        # executes in the same order as the sequential phases — identical
+        # warning order, identical logs, identical bytes.
+        per_stage = [
+            (stage.stage_id, stage.tileset_ref, list(stage.level_ids))
+            for stage in stages
+        ]
         nodes: list[Node] = []
-        level_ids = list(stage.level_ids)
         # collision creates the Level entity; everything else reads it.
-        for index, lid in enumerate(level_ids):
-            nodes.append(
-                Node(node_id=aid(lid, "collision"), run=collision_body(lid, index))
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "hazards"),
-                    run=level_body(lid, write_level_hazards),
-                    requires=[aid(lid, "collision")],
+        for sid, _ts, level_ids in per_stage:
+            for index, lid in enumerate(level_ids):
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "collision"),
+                        run=collision_body(lid, index),
+                    )
                 )
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "triggers"),
-                    run=level_body(lid, write_level_triggers),
-                    requires=[aid(lid, "collision")],
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "hazards"),
+                        run=level_body(lid, write_level_hazards),
+                        requires=[aid(sid, lid, "collision")],
+                    )
                 )
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "terrain"),
-                    run=level_body(lid, assign_level_terrain),
-                    requires=[aid(lid, "collision"), tileset_aid],
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "triggers"),
+                        run=level_body(lid, write_level_triggers),
+                        requires=[aid(sid, lid, "collision")],
+                    )
                 )
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "background"),
-                    run=level_body(lid, paint_level_background),
-                    requires=[aid(lid, "collision")],
+        for sid, tileset_aid, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "terrain"),
+                        run=level_body(lid, assign_level_terrain),
+                        requires=[aid(sid, lid, "collision"), tileset_aid],
+                    )
                 )
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "entities"),
-                    run=level_body(
-                        lid, place_level_entities,
-                        max_enemies=self.max_enemies, rules=self.rules,
-                        tiles=self.tiles, variants=self.variants,
-                        phase_name="plat:placement",
-                    ),
-                    requires=[aid(lid, "collision"), aid(lid, "hazards")],
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "background"),
+                        run=level_body(lid, paint_level_background),
+                        requires=[aid(sid, lid, "collision")],
+                    )
                 )
-            )
-        for lid in level_ids:
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "foreground"),
-                    run=level_body(
-                        lid, decorate_level,
-                        max_decor=self.max_decor, phase_name="plat:decorator",
-                    ),
-                    requires=[aid(lid, "collision"), tileset_aid],
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "entities"),
+                        run=level_body(
+                            lid, place_level_entities,
+                            max_enemies=self.max_enemies, rules=self.rules,
+                            tiles=self.tiles, variants=self.variants,
+                            combat=self.combat, phase_name="plat:placement",
+                        ),
+                        # Placement reads each definition's SIZE (footprint
+                        # validation) — an enemy re-roll must schedule before
+                        # and cascade into entities, or a grown body silently
+                        # invalidates the stored placements.
+                        requires=[
+                            aid(sid, lid, "collision"),
+                            aid(sid, lid, "hazards"),
+                            "phase:plat:enemies",
+                        ],
+                    )
                 )
-            )
-        for lid in level_ids:
-            # The per-level manifest descends from EVERY layer step
-            # (LEVEL_STEPS), so any layer edit/regen re-freshens it.
-            nodes.append(
-                Node(
-                    node_id=aid(lid, "level"),
-                    run=level_body(lid, write_level_manifest),
-                    requires=[aid(lid, step) for step in LEVEL_STEPS],
+        for sid, tileset_aid, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "foreground"),
+                        run=level_body(
+                            lid, decorate_level,
+                            max_decor=self.max_decor,
+                            phase_name="plat:decorator",
+                        ),
+                        requires=[aid(sid, lid, "collision"), tileset_aid],
+                    )
                 )
-            )
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                # The per-level manifest descends from EVERY layer step
+                # (LEVEL_STEPS), so any layer edit/regen re-freshens it.
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "level"),
+                        run=level_body(lid, write_level_manifest),
+                        requires=[aid(sid, lid, step) for step in LEVEL_STEPS],
+                    )
+                )
         return nodes
 
 
@@ -231,44 +261,89 @@ class RenderDagPhase:
 
     name = "plat:render"
 
-    def __init__(self, variants: VariantSet = DEFAULT_VARIANTS) -> None:
+    def __init__(
+        self,
+        variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
         self.variants = variants
+        self.graphics = graphics
 
     def expand(self, ctx: Any) -> list[Node]:
-        stage = _stage(ctx)
-        if stage is None:
+        stages = _stages(ctx)
+        if not stages:
             return []
-        sid = stage.stage_id
 
         def render_body(level_id: str):
             def run(c: Any) -> None:
                 render_level_review(
-                    c, c.bible.levels[level_id], variants=self.variants
+                    c, c.bible.levels[level_id], variants=self.variants,
+                    graphics=self.graphics,
                 )
 
             return run
 
         nodes = [
             Node(
-                node_id=f"review:{sid}/{lid}",
+                node_id=f"review:{stage.stage_id}/{lid}",
                 run=render_body(lid),
                 requires=[
-                    f"level:{sid}/{lid}/{step}"
+                    f"level:{stage.stage_id}/{lid}/{step}"
                     for step in ("terrain", "background", "entities", "foreground")
                 ],
                 always=True,
             )
+            for stage in stages
             for lid in stage.level_ids
         ]
         nodes.append(
             Node(
-                node_id=f"review:{sid}/legend",
+                node_id="review:legend",
                 run=lambda c: write_review_legend(c),
                 requires=["phase:plat:enemies"],
                 always=True,
             )
         )
         return nodes
+
+
+class VlmQaDagPhase:
+    """VLM QA judgment over the review renders — an ``always`` node, the
+    v1 cadence: it re-runs on every orchestration and its body is a no-op
+    unless a judge was built from an explicit ``--vlm-backend`` flag (no
+    staleness/caching story yet — deliberately). Sits between the renders
+    it judges and the manifest that ships its warnings."""
+
+    name = "plat:vlm_qa"
+
+    def __init__(
+        self,
+        judge: Any = None,
+        tiles: TileRegistry = DEFAULT_TILES,
+        variants: VariantSet = DEFAULT_VARIANTS,
+    ) -> None:
+        from examples.platformer_pack.vlm_qa import VlmQaPhase
+
+        self._phase = VlmQaPhase(judge=judge, tiles=tiles, variants=variants)
+
+    def expand(self, ctx: Any) -> list[Node]:
+        stages = _stages(ctx)
+        if not stages:
+            return []
+        requires = [
+            f"review:{stage.stage_id}/{lid}"
+            for stage in stages
+            for lid in stage.level_ids
+        ]
+        requires.append("review:legend")
+        return [
+            Node(
+                node_id="plat:vlm_qa",
+                run=self._phase.run,
+                requires=requires,
+                always=True,
+            )
+        ]
 
 
 class ManifestDagPhase:
@@ -278,24 +353,38 @@ class ManifestDagPhase:
 
     def __init__(
         self,
+        movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
         rules: GameRules = DEFAULT_RULES,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        combat: CombatSpec = DEFAULT_COMBAT,
     ) -> None:
         from examples.platformer_pack.compose import SliceManifestPhase
 
         self._phase = SliceManifestPhase(
-            rules=rules, tiles=tiles, variants=variants
+            movement=movement, rules=rules, tiles=tiles, variants=variants,
+            graphics=graphics, combat=combat,
         )
 
     def expand(self, ctx: Any) -> list[Node]:
-        stage = _stage(ctx)
-        if stage is None:
+        stages = _stages(ctx)
+        if not stages:
             return []
-        sid = stage.stage_id
-        requires = [f"level:{sid}/{lid}/level" for lid in stage.level_ids]
-        requires += [f"review:{sid}/{lid}" for lid in stage.level_ids]
-        requires.append(f"review:{sid}/legend")
+        requires = [
+            f"level:{stage.stage_id}/{lid}/level"
+            for stage in stages
+            for lid in stage.level_ids
+        ]
+        requires += [
+            f"review:{stage.stage_id}/{lid}"
+            for stage in stages
+            for lid in stage.level_ids
+        ]
+        requires.append("review:legend")
+        # QA verdicts become manifest warnings — the report must be
+        # written (or the no-op stamped) before the manifest reads it.
+        requires.append("plat:vlm_qa")
         return [
             Node(
                 node_id="plat:manifest",
@@ -326,24 +415,28 @@ class GodotExportDagPhase:
         ]
 
 
-def macro_phases(num_levels: int = 3, num_enemies: int = 4, *,
-                 tiles: TileRegistry = DEFAULT_TILES) -> list:
-    """The bootstrap prefix: world/stage/enemies/style/tileset as legacy
-    nodes."""
+def macro_phases(num_levels: int = 3, num_enemies: int = 4,
+                 num_stages: int = 1, *,
+                 tiles: TileRegistry = DEFAULT_TILES,
+                 graphics: GraphicsSpec = DEFAULT_GRAPHICS) -> list:
+    """The bootstrap prefix: world/stages/style/enemies/tilesets as legacy
+    nodes (style first — enemy hues avoid every palette's hazard/volume
+    hues)."""
     from examples.platformer_pack.style import StyleGuidePhase
 
     return [
-        WorldPhase(),
+        WorldPhase(num_stages=num_stages),
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
-        EnemyGeneratorPhase(count=num_enemies),
         StyleGuidePhase(tiles=tiles),
-        PlaceholderTilesetPhase(tiles=tiles),
+        EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
+        PlaceholderTilesetPhase(tiles=tiles, graphics=graphics),
     ]
 
 
 def compose_dag_pipeline(
     num_levels: int = 3,
     num_enemies: int = 4,
+    num_stages: int = 1,
     width: int = 48,
     height: int = 16,
     movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
@@ -351,17 +444,44 @@ def compose_dag_pipeline(
     tiles: TileRegistry = DEFAULT_TILES,
     variants: VariantSet = DEFAULT_VARIANTS,
     engine: str = "json",
+    image_producer: Any = None,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    music_producer: Any = None,
+    sfx_producer: Any = None,
+    combat: CombatSpec = DEFAULT_COMBAT,
+    vlm_judge: Any = None,
 ) -> list:
     """The full orchestrated pipeline. Per-level nodes expand only when
     the Bible already has a stage plan (see module docstring)."""
+    from examples.platformer_pack.art_phases import (
+        BackdropArtPhase,
+        SpriteArtPhase,
+        TilesetArtPhase,
+    )
+    from examples.platformer_pack.audio_phases import AudioPhase
+
     items = [
-        *macro_phases(num_levels, num_enemies, tiles=tiles),
+        *macro_phases(
+            num_levels, num_enemies, num_stages,
+            tiles=tiles, graphics=graphics,
+        ),
         LevelStepsDagPhase(
             width=width, height=height, movement=movement, rules=rules,
-            tiles=tiles, variants=variants,
+            tiles=tiles, variants=variants, graphics=graphics, combat=combat,
         ),
-        RenderDagPhase(variants=variants),
-        ManifestDagPhase(rules=rules, tiles=tiles, variants=variants),
+        # Art AT THE END: legacy barrier edges make these depend on every
+        # level node above and gate the renders below — paid generation
+        # never runs before the levels validate.
+        TilesetArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        SpriteArtPhase(producer=image_producer, graphics=graphics),
+        BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
+        RenderDagPhase(variants=variants, graphics=graphics),
+        VlmQaDagPhase(judge=vlm_judge, tiles=tiles, variants=variants),
+        ManifestDagPhase(
+            movement=movement, rules=rules, tiles=tiles, variants=variants,
+            graphics=graphics, combat=combat,
+        ),
     ]
     if engine == "godot":
         items.append(GodotExportDagPhase())
@@ -384,7 +504,9 @@ def run_orchestrated(
     if not getattr(ctx.bible, "stages", {}):
         bootstrap_kwargs = {
             k: compose_kwargs[k]
-            for k in ("num_levels", "num_enemies", "tiles")
+            for k in (
+                "num_levels", "num_enemies", "num_stages", "tiles", "graphics",
+            )
             if k in compose_kwargs
         }
         report = orchestrate(
@@ -428,4 +550,101 @@ def cli_ctx_factory(bible: Any):
 
 
 def cli_phases_factory(ctx: Any) -> list:
-    return compose_dag_pipeline()
+    from examples.platformer_pack.audio_phases import (
+        build_music_producer,
+        build_sfx_producer,
+    )
+
+    # CANON_PLAT_IMAGE_BACKEND: "", "fake", "fal", or "local" — same
+    # explicit opt-in as the runner's --image-backend; empty stays on the
+    # deterministic placeholder sheet. CANON_PLAT_MUSIC_BACKEND /
+    # CANON_PLAT_SFX_BACKEND mirror --music-backend/--sfx-backend (empty =
+    # silent). CANON_PLAT_VLM_BACKEND mirrors --vlm-backend (empty = no
+    # QA). CANON_PLAT_GRAPHICS: path to a graphics.json (the runner's
+    # --graphics; default = pack spec). CANON_PLAT_COMBAT: path to a
+    # combat.json (the runner's --combat; default = pack spec).
+    from examples.platformer_pack.combat import load_combat
+    from examples.platformer_pack.graphics import load_graphics
+    from examples.platformer_pack.tileset_art import build_image_producer
+    from examples.platformer_pack.vlm_qa import build_vlm_judge
+
+    producer = build_image_producer(
+        os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
+        os.environ.get("CANON_PLAT_IMAGE_MODEL") or None,
+    )
+    music = build_music_producer(os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""))
+    sfx = build_sfx_producer(os.environ.get("CANON_PLAT_SFX_BACKEND", ""))
+    vlm = build_vlm_judge(
+        os.environ.get("CANON_PLAT_VLM_BACKEND", ""),
+        os.environ.get("CANON_PLAT_VLM_MODEL") or None,
+    )
+    graphics_path = os.environ.get("CANON_PLAT_GRAPHICS")
+    graphics = load_graphics(graphics_path) if graphics_path else DEFAULT_GRAPHICS
+    combat_path = os.environ.get("CANON_PLAT_COMBAT")
+    combat = load_combat(combat_path) if combat_path else DEFAULT_COMBAT
+    return compose_dag_pipeline(
+        image_producer=producer, graphics=graphics,
+        music_producer=music, sfx_producer=sfx, combat=combat,
+        vlm_judge=vlm,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Field-level regen — "parts of rows" (`canon regen <bible>
+# enemy:<id>#flavor --field-ops examples.platformer_pack.dag:regen_field`).
+# File-backed assets get node-level regen for free once their phases
+# stamp hashes; FIELDS inside an entity need surgical ops like these.
+# ---------------------------------------------------------------------------
+
+
+def regen_field(ctx: Any, target: str) -> dict:
+    """Re-roll one FIELD of one entity: ``<artifact_id>#<field>``.
+
+    Supported today: ``enemy:<id>#flavor`` (name + mechanics locked; the
+    entity file is rewritten and provenance re-stamped). Image/audio
+    fields (``enemy:<id>#portrait``, stage music) join this registry as
+    their generation phases land — same grammar, same routing.
+    """
+    from examples.platformer_pack.phases import llm_json, stamp_provenance
+
+    artifact_id, _, field = target.partition("#")
+    kind, _, ident = artifact_id.partition(":")
+
+    if kind == "enemy" and field == "flavor":
+        enemy = ctx.bible.enemy_definitions.get(ident)
+        if enemy is None:
+            raise KeyError(
+                f"unknown enemy {ident!r}; roster: "
+                f"{sorted(ctx.bible.enemy_definitions)}"
+            )
+        stage = next(iter(ctx.bible.stages.values()), None)
+        theme = stage.theme if stage else ""
+        old = str(enemy.stats.get("flavor", ""))
+        data = llm_json(
+            ctx,
+            f"plat:regen:{target}",
+            lambda fb: ctx.prompts.enemy_flavor(
+                enemy.name, enemy.archetype, theme, old, feedback=fb
+            ),
+            required_keys=("flavor",),
+            fallback={"flavor": old},  # keep the row intact on failure
+        )
+        enemy.stats["flavor"] = str(data["flavor"])
+        content_hash = ctx.adapter.write_json_singleton(
+            f"enemy/{ident}.json", enemy.model_dump(mode="json")
+        )
+        stamp_provenance(ctx, enemy, content_hash)
+        logger.info(
+            "Field regen %s: %r -> %r", target, old, enemy.stats["flavor"]
+        )
+        return {
+            "target": target,
+            "old": old,
+            "new": enemy.stats["flavor"],
+            "changed": enemy.stats["flavor"] != old,
+        }
+
+    raise KeyError(
+        f"no field op for {target!r} — supported: enemy:<id>#flavor "
+        "(asset fields arrive with their generation phases)."
+    )

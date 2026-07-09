@@ -1,0 +1,25 @@
+{
+  "level_id": "l8",
+  "stage_id": "crumbled_sunspire",
+  "grid_width": 69,
+  "grid_height": 24,
+  "difficulty": 3,
+  "fallback": false,
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "failed_validation",
+      "reasons": [
+        "spawn: column 2 has no floor under it \u2014 ground floor exists at columns 14-27, 31, 42-54, 56-67 \u2014 put spawn() on one of those, or lay floor under column 2 first.",
+        "checkpoint: column 34 has no floor under it \u2014 ground floor exists at columns 14-27, 31, 42-54, 56-67 \u2014 put checkpoint() on one of those, or lay floor under column 34 first."
+      ],
+      "content": "floor(0,68)\ngap(10,12)\ngap(28,30)\nwall(0,10,22)\nwall(13,10,22)\nwall(55,10,22)\nwall(68,10,22)\ncarve(1,10,9,21)\ncarve(14,10,27,21)\ncarve(31,10,54,21)\ncarve(56,10,67,21)\nfloor(1,9)\nfloor(14,27)\nfloor(31,54)\nfloor(56,67)\nstairs_up(1,5)\nstairs_down(23,27)\npyramid(46,54)\nstairs_up(56,60)\nledge(3,7,18)\nledge(16,22,15)\nledge(33,39,17)\nledge(42,50,14)\nledge(57,63,18)\nledge(58,65,15)\nplatform(5,12,3)\nplatform(25,9,3)\nplatform(44,6,4)\nplatform(62,6,4)\npool(water,2,8)\nwall(1,20,22)\nwall(9,20,22)\npool(water,33,40)\nwall(32,20,22)\nwall(41,20,22)\nhazard_strip(spike,17,20)\nhazard_strip(spike,48,51)\nhazard_strip(spike,60,62)\nspawn(2)\ncheckpoint(34)\nexit(65)"
+    },
+    {
+      "attempt": 2,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,68)\ngap(10,12)\ngap(28,30)\nwall(0,10,22)\nwall(13,10,22)\nwall(55,10,22)\nwall(68,10,22)\ncarve(1,10,9,21)\ncarve(14,10,27,21)\ncarve(31,10,54,21)\ncarve(56,10,67,21)\nfloor(1,9)\nfloor(14,27)\nfloor(31,54)\nfloor(56,67)\nstairs_up(1,5)\nstairs_down(23,27)\npyramid(46,54)\nstairs_up(56,60)\nledge(3,7,18)\nledge(16,22,15)\nledge(33,39,17)\nledge(42,50,14)\nledge(57,63,18)\nledge(58,65,15)\nplatform(5,12,3)\nplatform(25,9,3)\nplatform(44,6,4)\nplatform(62,6,4)\npool(water,2,8)\nwall(1,20,22)\nwall(9,20,22)\npool(water,33,40)\nwall(32,20,22)\nwall(41,20,22)\nhazard_strip(spike,17,20)\nhazard_strip(spike,48,51)\nhazard_strip(spike,60,62)\nspawn(15)\ncheckpoint(43)\nexit(65)"
+    }
+  ]
+}

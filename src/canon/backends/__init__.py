@@ -16,13 +16,20 @@ Code that only needs to check availability can test for ``None``::
         print("fal-client not installed; skipping image generation")
 """
 
-from canon.backends.base import ImageBackend, LLMBackend, MusicBackend, SFXBackend
+from canon.backends.base import (
+    ImageBackend,
+    LLMBackend,
+    MusicBackend,
+    SFXBackend,
+    VLMBackend,
+)
 from canon.backends.registry import BackendRegistry
 from canon.backends.testing import (
     FakeImageBackend,
     FakeLLMBackend,
     FakeMusicBackend,
     FakeSFXBackend,
+    FakeVLMBackend,
 )
 
 # ---------------------------------------------------------------------------
@@ -49,18 +56,26 @@ try:
 except ImportError:
     ElevenLabsSFXBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from canon.backends.vlm_anthropic import AnthropicVLMBackend
+except ImportError:
+    AnthropicVLMBackend = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "LLMBackend",
     "ImageBackend",
     "MusicBackend",
     "SFXBackend",
+    "VLMBackend",
     "BackendRegistry",
     "FakeLLMBackend",
     "FakeImageBackend",
     "FakeMusicBackend",
     "FakeSFXBackend",
+    "FakeVLMBackend",
     "FalImageBackend",
     "LocalImageBackend",
     "LyriaMusicBackend",
     "ElevenLabsSFXBackend",
+    "AnthropicVLMBackend",
 ]

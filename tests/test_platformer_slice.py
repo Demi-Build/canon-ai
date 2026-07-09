@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ from examples.platformer_pack.validate import (  # noqa: E402
 from examples.platformer_pack.variants import load_variants  # noqa: E402
 from examples.run_platformer_slice import (  # noqa: E402
     _FAKE_LAYOUTS,
+    _REFERENCE_DIMS,
     make_fake_responder,
 )
 
@@ -87,6 +89,22 @@ class TestDsl:
         with pytest.raises(DslError, match=match):
             stamp(text, W, H)
 
+    def test_pool_conflict_names_the_occupying_tiles(self) -> None:
+        """The sunlit-run l3 class: the program lays floor, then its own
+        wall/gap overwrite/remove it, then pool() overlaps the damage.
+        'lay floor there first' was unfollowable — the error must name
+        what actually occupies each bad ground-row column."""
+        text = (
+            "floor(0,47)\ngap(18,21)\nwall(17,10,14)\n"
+            "pool(water,17,22)\nspawn(2)\nexit(45)"
+        )
+        with pytest.raises(DslError) as excinfo:
+            stamp(text, W, H)
+        message = str(excinfo.value)
+        assert "17 (wall)" in message
+        assert "18 (empty)" in message and "21 (empty)" in message
+        assert "removed or overwrote the floor" in message
+
     def test_parse_accepts_semicolons_and_comments(self) -> None:
         ops = parse_dsl("# a comment\nfloor(0,10); spawn(2)\nexit(8)")
         assert [op for op, _ in ops] == ["floor", "spawn", "exit"]
@@ -97,7 +115,8 @@ class TestDsl:
             width, height = LEVEL_DIMS[level_id]
             result = stamp(dsl_text, width, height)
             problems = check_level(
-                result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
+                result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+                free_volume=result.free_volume,
             )
             assert not problems, f"{level_id}: {problems}"
 
@@ -215,7 +234,7 @@ class TestValidators:
         assert "(20, 13)" in message  # nearest unreachable foothold
         assert "horizontal distance 10 exceeds max jump distance 4" in message
         assert "ADD THIS ONE LINE" in message
-        assert "platform(13,12,2)" in message  # jumpable: dx 3, rise 2
+        assert "platform(14,12,2)" in message  # verified: cells free, arc ok
         assert "wider than 3 columns" in message
 
     def test_auto_bridge_repairs_reachability_in_code(self) -> None:
@@ -230,6 +249,11 @@ class TestValidators:
             # Vertical breaks (the l2 attempt-2 shape): the only route is
             # over a high ledge bridge — rises of 7 need stacked steps.
             "floor(0,10)\nledge(15,25,7)\nfloor(30,47)\nspawn(2)\nexit(45)",
+            # SECOND real run's l1/l3 fallback: foothold DIRECTLY above
+            # the frontier (dx=0, rise 4). The old blind formula proposed
+            # a platform whose standing cell was the foothold's own
+            # supporting solid — a dead op re-emitted until the bound.
+            "floor(0,47)\npit(10,20)\nledge(9,20,10)\nspawn(2)\nexit(25)",
         )
         for dsl_text in cases:
             repaired, added, problems = auto_bridge(
@@ -242,6 +266,128 @@ class TestValidators:
             assert not check_level(
                 result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
             )
+
+    def test_structural_roles_get_separated(self) -> None:
+        """Ground/platform/wall within a few luminance points of each
+        other (the second real palette) are indistinguishable in play —
+        pairwise spacing is arithmetic, so a tool spreads them."""
+        from examples.platformer_pack.style import (
+            MIN_ROLE_SEPARATION,
+            _luminance,
+            enforce_contrast,
+            separate_structural_roles,
+        )
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        palette = {  # the real run's near-identical browns
+            "background": "#1a1208", "ground": "#4b3b2b",
+            "platform": "#6b4a2a", "wall": "#473b32",
+            "danger": "#c43a0a", "water": "#4a3d1a",
+        }
+        out, adjusted = separate_structural_roles(palette, DEFAULT_TILES)
+        assert adjusted, "near-identical structural roles must be spread"
+        lums = sorted(_luminance(out[r]) for r in ("ground", "platform", "wall"))
+        for a, b in zip(lums, lums[1:]):
+            assert b - a >= MIN_ROLE_SEPARATION - 1, lums
+        # And the background readability bar still holds afterwards.
+        out, _ = enforce_contrast(out, DEFAULT_TILES)
+        bg = _luminance(out["background"])
+        for role in ("ground", "platform", "wall"):
+            assert abs(_luminance(out[role]) - bg) >= 40 - 1
+
+    def test_exit_relocates_to_rightmost_floored_column(self) -> None:
+        """exit(x)'s x is advisory (play-test decision): the exit zone is
+        the rightmost column with open ground floor — side-scroller
+        'leave to the right' — and consumers win on the COLUMN, any row."""
+        # Plain floor: exit lands on the last column, not the declared 45.
+        result = stamp("floor(0,47)\nspawn(2)\nexit(45)", W, H)
+        assert result.exit == (47, 13)
+        # A spike on the last columns pushes the exit left of them.
+        result = stamp("floor(0,47)\nspike(46,47)\nspawn(2)\nexit(45)", W, H)
+        assert result.exit == (45, 13)
+        # A pit at the right edge: exit lands before the pit.
+        result = stamp("floor(0,47)\npit(44,47)\nspawn(2)\nexit(20)", W, H)
+        assert result.exit == (43, 13)
+
+    def test_snap_spawn_moves_to_valid_ground(self) -> None:
+        """The first multi-stage run lost THREE levels to fallback whose
+        final attempts failed ONLY on spawn placement — the exact column
+        is arithmetic, same contract as checkpoint snapping. Both
+        observed classes snap: no-floor-under-spawn (raised left edge)
+        and standing-cell-covered (terrain stamped over the spawn)."""
+        from examples.platformer_pack.validate import snap_spawn
+
+        # No ground floor at column 2 (the real l3 attempt-1 message).
+        text, moves = snap_spawn(
+            "floor(10,47)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert moves == ["spawn(2) -> spawn(10)"]
+        result = stamp(text, W, H)
+        assert result.spawn == (10, H - 3)
+
+        # Terrain covers the spawn's standing cell (the real l2 message).
+        covered = f"floor(0,47)\nledge(0,6,{H - 3})\nspawn(2)\nexit(45)"
+        text, moves = snap_spawn(covered, W, H)
+        assert moves == ["spawn(2) -> spawn(7)"]
+        assert stamp(text, W, H).spawn == (7, H - 3)
+
+        # A valid spawn is untouched; the exit column is never chosen.
+        text, moves = snap_spawn("floor(0,47)\nspawn(2)\nexit(45)", W, H)
+        assert moves == []
+        text, moves = snap_spawn("floor(44,47)\nspawn(45)\nexit(45)", W, H)
+        assert "spawn(45)" not in text and moves
+
+    def test_snap_checkpoints_moves_to_valid_ground(self) -> None:
+        """Checkpoint columns are a lookup, not a design decision — the
+        second real run's l3 burned all three attempts on them while the
+        validator recited the valid columns. Both observed classes snap:
+        no-floor-under-it and standing-cell-occupied (spike)."""
+        from examples.platformer_pack.validate import snap_checkpoints
+
+        # Gap under column 22 (the real l1 attempt-1 message) → snaps out.
+        text, moves = snap_checkpoints(
+            "floor(0,19)\nfloor(26,47)\nspawn(2)\ncheckpoint(22)\nexit(45)",
+            W, H,
+        )
+        assert moves == ["checkpoint(22) -> checkpoint(19)"]
+        assert "checkpoint(19)" in text
+        result = stamp(text, W, H)
+        assert any(t.type == "checkpoint" for t in result.triggers)
+
+        # Spike on the standing cell (the real l3 attempt-2 message).
+        text, moves = snap_checkpoints(
+            "floor(0,47)\nspike(30,32)\nspawn(2)\ncheckpoint(31)\nexit(45)",
+            W, H,
+        )
+        assert moves == ["checkpoint(31) -> checkpoint(29)"]
+
+        # Valid checkpoints are never touched.
+        text, moves = snap_checkpoints(
+            "floor(0,47)\nspawn(2)\ncheckpoint(24)\nexit(45)", W, H,
+        )
+        assert moves == [] and "checkpoint(24)" in text
+
+        # Nothing valid within the bound: left for stamp's feedback.
+        text, moves = snap_checkpoints(
+            "floor(0,10)\nfloor(40,47)\nspawn(2)\ncheckpoint(25)\nexit(45)",
+            W, H,
+        )
+        assert moves == [] and "checkpoint(25)" in text
+
+    def test_auto_bridge_bails_on_dead_ops_instead_of_looping(self) -> None:
+        """When no candidate placement fits, the tool returns the problems
+        for design feedback immediately — it must never append an op that
+        changed nothing (the first real run burned its whole bound on 8
+        copies of the same dead platform)."""
+        import numpy as np
+
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import _suggest_bridge
+
+        # A sealed box: every cell around the break is solid — nothing fits.
+        solid = next(t.id for t in DEFAULT_TILES.tiles if t.name == "floor")
+        grid = np.full((16, 48), solid, dtype=np.int8)
+        assert _suggest_bridge(grid, (9, 13), (9, 9), DEFAULT_MOVEMENT) is None
 
     def test_auto_bridge_never_touches_design_problems(self) -> None:
         """A covered spawn has many valid fixes — that's the agent's
@@ -262,26 +408,31 @@ class TestValidators:
         attempt 1 with tool bridges — no retry, no fallback, playable."""
         good = make_fake_responder()
         layout_calls: list[str] = []
-        gap_dsl = (
-            "floor(0,32)\nfloor(38,47)\ncheckpoint(20)\nspawn(2)\nexit(45)"
-        )
+        sent: dict[str, str] = {}
 
         def responder(request):
             msg = request.user_message
             if "### TASK: layout" in msg and "### LEVEL: l1" in msg:
                 layout_calls.append(msg)
-                return gap_dsl
+                # Dims are schema-rolled ranges — build the unreachable
+                # layout against whatever grid the prompt advertises: a
+                # 5-wide gap (> jump_width 4) between two floor runs.
+                m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+                right = int(m.group(1)) - 1
+                sent["gap_dsl"] = (
+                    f"floor(0,{right - 15})\nfloor({right - 9},{right})\n"
+                    f"checkpoint(20)\nspawn(2)\nexit({right - 2})"
+                )
+                return sent["gap_dsl"]
             return good(request)
 
         ctx = _run_slice(tmp_path / "run", responder=responder)
         assert len(layout_calls) == 1  # accepted first try — tool repaired
-        # No layout fallback. (Placement warnings are expected here: the
-        # canned spots were hand-verified for the ORIGINAL l1 geometry.)
         assert not any(
             "layout" in w for w in ctx.artifacts.get("slice_warnings", [])
         )
         dsl_text = ctx.artifacts["dsl_texts"]["l1"]
-        assert dsl_text.startswith(gap_dsl) and "# auto-bridge" in dsl_text
+        assert dsl_text.startswith(sent["gap_dsl"]) and "# auto-bridge" in dsl_text
         # The stored collision layer IS the bridged, traversable level.
         with np.load(tmp_path / "run" / ctx.bible.levels["l1"].collision) as d:
             grid = d["collision"]
@@ -297,22 +448,34 @@ class TestValidators:
         assert problems and "PLATFORM" in problems[0] and "spawn" in problems[0]
 
     def test_unstandable_spawn_feedback_names_missing_ground(self) -> None:
-        # gap() after spawn removes the floor beneath it.
-        result = stamp("floor(0,47)\nspawn(2)\nexit(45)\ngap(1,3)", W, H)
+        # A USER-EDITED grid can still strand the spawn (the stamp now
+        # catches gap-under-marker itself — see the final-grid tests);
+        # check_level's diagnosis covers grids the DSL never produced.
+        result = stamp("floor(0,47)\nspawn(2)\nexit(45)", W, H)
+        result.grid[14, 1:4] = 0  # ground row out from under spawn
+        result.grid[15, 1:4] = 0  # bedrock too
         problems = check_level(result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT)
         assert problems and "no solid ground beneath" in problems[0]
+
+    def test_gap_after_spawn_caught_on_the_final_grid(self) -> None:
+        """Ops after a marker used to escape its validation (checkpoint
+        on floor, later gap under it — the record lied). Markers now
+        validate against the FINISHED grid."""
+        with pytest.raises(DslError, match=r"spawn: column 2 has no floor"):
+            stamp("floor(0,47)\nspawn(2)\nexit(45)\ngap(1,3)", W, H)
 
     def test_layout_retry_prompt_carries_previous_attempt(
         self, tmp_path: Path
     ) -> None:
         """Repair, not re-roll: the retry prompt must contain the rejected
         DSL next to the diagnosis, so the model patches one design.
-        (A DESIGN failure — covered spawn. Reachability breaks no longer
-        reach the model at all; the bridge tool repairs those.)"""
+        (A DESIGN failure — a pool poured over its own gap. Covered
+        spawns and reachability breaks no longer reach the model at all;
+        the snap/bridge tools repair those.)"""
         good = make_fake_responder()
         layout_calls: list[str] = []
         failed_once = {"done": False}
-        bad_dsl = "floor(0,47)\nplatform(0,13,6)\nspawn(2)\nexit(45)"
+        sent: dict[str, str] = {}
 
         def responder(request):
             msg = request.user_message
@@ -320,18 +483,27 @@ class TestValidators:
                 layout_calls.append(msg)
                 if not failed_once["done"]:
                     failed_once["done"] = True
-                    return bad_dsl
+                    # Pour a pool over a gap the same program cut — the
+                    # sunlit run's un-repairable design failure class.
+                    m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+                    width = int(m.group(1))
+                    sent["bad_dsl"] = (
+                        f"floor(0,{width - 1})\ngap(10,13)\n"
+                        f"pool(water,10,13)\n"
+                        f"spawn(2)\nexit({width - 3})"
+                    )
+                    return sent["bad_dsl"]
             return good(request)
 
         _run_slice(tmp_path / "run", responder=responder)
 
         retries = [m for m in layout_calls if "previous layout attempt" in m]
         assert retries, "no layout retry prompt captured"
-        assert bad_dsl in retries[0]
+        assert sent["bad_dsl"] in retries[0]
         assert "rejected because" in retries[0]
         assert "changing as little as possible" in retries[0]
         # And the diagnosis rides along with the rejected output.
-        assert "covered by a PLATFORM" in retries[0]
+        assert "cannot sink in" in retries[0]
 
     def test_placement_retry_prompt_carries_previous_attempt(
         self, tmp_path: Path
@@ -339,7 +511,9 @@ class TestValidators:
         good = make_fake_responder()
         placement_calls: list[str] = []
         failed_once = {"done": False}
-        bad_json = '{"placements": [{"enemy_id": "cinder_beetle", "x": 3, "y": 13}]}'
+        # A DESIGN failure (mid-air placement) — spawn-crowding no longer
+        # reaches the model at all; the nudge tool repairs it.
+        bad_json = '{"placements": [{"enemy_id": "cinder_beetle", "x": 10, "y": 5}]}'
 
         def responder(request):
             msg = request.user_message
@@ -347,14 +521,14 @@ class TestValidators:
                 placement_calls.append(msg)
                 if not failed_once["done"]:
                     failed_once["done"] = True
-                    return bad_json  # too close to spawn
+                    return bad_json  # mid-air, nothing to stand on
             return good(request)
 
         _run_slice(tmp_path / "run", responder=responder)
 
         retries = [m for m in placement_calls if "previous placements attempt" in m]
         assert retries and bad_json in retries[0]
-        assert "too close to spawn" in retries[0]
+        assert "not a standable cell" in retries[0]
 
     def test_placement_prompt_includes_spawn(self, tmp_path: Path) -> None:
         """The 'stay away from spawn' rule is only followable if the prompt
@@ -374,29 +548,37 @@ class TestValidators:
     def test_placement_rules(self) -> None:
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
         spawn = result.spawn
-        archetypes = {"beetle": "patroller", "fish": "swimmer"}
-        accepted, problems = check_placements(
+        defs = {
+            "beetle": {"archetype": "patroller", "size": 1.0},
+            "fish": {"archetype": "swimmer", "size": 1.0},
+        }
+        accepted, problems, repairs = check_placements(
             result.grid,
             [
-                {"enemy_id": "beetle", "x": 14, "y": 13},  # ok
-                {"enemy_id": "beetle", "x": 3, "y": 13},  # too close to spawn
-                {"enemy_id": "beetle", "x": 40, "y": 13},  # spike cell
-                {"enemy_id": "ghost", "x": 14, "y": 13},  # unknown id
+                {"enemy_id": "beetle", "x": 20, "y": 13},  # ok (under the tier)
+                {"enemy_id": "beetle", "x": 3, "y": 13},  # spawn-crowding: NUDGED
+                {"enemy_id": "beetle", "x": 41, "y": 13},  # spike cell
+                {"enemy_id": "ghost", "x": 20, "y": 13},  # unknown id
                 {"enemy_id": "beetle", "x": 10, "y": 5},  # mid-air
-                {"enemy_id": "beetle", "x": 33, "y": 12},  # land enemy in water
-                {"enemy_id": "fish", "x": 33, "y": 12},  # swimmer in water: ok
-                {"enemy_id": "fish", "x": 14, "y": 13},  # swimmer on land
+                {"enemy_id": "beetle", "x": 28, "y": 12},  # land enemy in water
+                {"enemy_id": "fish", "x": 28, "y": 12},  # swimmer in water: ok
+                {"enemy_id": "fish", "x": 20, "y": 13},  # swimmer on land
                 # variant rides through; legacy elite bool maps to "elite"
-                {"enemy_id": "fish", "x": 32, "y": 13, "elite": True},
+                {"enemy_id": "fish", "x": 27, "y": 13, "elite": True},
             ],
             spawn,
-            archetypes,
+            defs,
         )
+        # Spawn safety is a CODE repair now: beetle@3 slides to the
+        # nearest standable column outside the radius (8 — the pool at
+        # 5-7 doesn't support land enemies) instead of kicking back.
         assert [(p["enemy_id"], p["x"]) for p in accepted] == [
-            ("beetle", 14), ("fish", 33), ("fish", 32),
+            ("beetle", 20), ("beetle", 8), ("fish", 28), ("fish", 27),
         ]
-        assert accepted[2]["variant"] == "elite"
-        assert len(problems) == 6
+        assert accepted[3]["variant"] == "elite"
+        assert len(repairs) == 1 and "spawn-safety nudge" in repairs[0]
+        assert "(3, 13) -> (8, 13)" in repairs[0]
+        assert len(problems) == 5
         assert any("swimmers must be placed inside water" in p for p in problems)
         assert any("only swimmers go in water" in p for p in problems)
 
@@ -414,6 +596,50 @@ class TestDatabasesDriveReview:
             r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
             # Reserved spike band: strongly-red hues are nudged away.
             assert not (r > 180 and g < 80 and b < 80), f"{color} reads as spike red"
+
+    def test_enemy_hue_reservations_come_from_palette(self) -> None:
+        """The reserved bands derive from the game's ACTUAL hazard/volume
+        palette hues — a lava game reserves orange, not hardcoded blue."""
+        import colorsys
+
+        from examples.platformer_pack.phases import (
+            placeholder_color,
+            reserved_hue_bands,
+        )
+        from examples.platformer_pack.tiles import load_tiles
+
+        lava_tiles = load_tiles(
+            Path(__file__).parent.parent / "examples/lava_world/tile_types.json"
+        )
+        palette = {"danger": "#e0453a", "lava": "#e8722c"}
+        bands = reserved_hue_bands(palette, lava_tiles)
+        assert len(bands) == 2  # spike + lava hues, no hardcoded blue band
+        for i in range(8):
+            color = placeholder_color(i, bands)
+            r, g, b = (int(color[j : j + 2], 16) / 255 for j in (1, 3, 5))
+            hue = colorsys.rgb_to_hsv(r, g, b)[0] * 360
+            for lo, hi in bands:
+                inside = (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
+                assert not inside, f"{color} sits in reserved band {lo}-{hi}"
+
+    def test_background_bands_derive_from_palette(self, tmp_path: Path) -> None:
+        """No hardcoded sky grays: horizon bands lighten the palette's
+        background color, sampled from the empty tileset slot."""
+        from PIL import Image
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+        level = ctx.bible.levels["l1"]
+        img = Image.open(
+            run / f"review/{level.stage_id}/l1.png"
+        ).convert("RGB")
+        # Top band pixel vs bottom-band empty pixel: same hue family
+        # (scaled background #2b2331), top strictly lighter.
+        top = img.getpixel((0, 4))
+        low = img.getpixel((0, (level.grid_height - 5) * 16))
+        assert sum(top) > sum(low)
+        base = (0x2B, 0x23, 0x31)  # canned style background
+        assert low == base  # bottom band = the palette background itself
 
     def test_schema_files_load_via_loader(self) -> None:
         for name in ("enemy.json", "level_layout.json"):
@@ -585,6 +811,68 @@ class TestEndToEnd:
         for level in ctx.bible.levels.values():
             assert level.spawn == (2, level.grid_height - 3)
 
+    def test_fallback_attempt_trace_is_persisted(self, tmp_path: Path) -> None:
+        """The l3 failure class: per-attempt validation reasons and the
+        rejected DSL must survive ON DISK (console WARNINGs scroll away),
+        and the Level must be queryable as fallback — not a failed
+        generation wearing a suit."""
+        good = make_fake_responder()
+
+        def broken_layouts(request):
+            if "### TASK: layout" in request.user_message:
+                return "not a dsl at all"
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=broken_layouts)
+        retries = getattr(ctx.config, "max_retries", 3)
+        for level in ctx.bible.levels.values():
+            assert level.layout_fallback is True
+            trace_path = (
+                tmp_path / "run" / "review" / level.stage_id
+                / f"{level.level_id}_layout_attempts.json"
+            )
+            trace = json.loads(trace_path.read_text())
+            assert trace["fallback"] is True
+            assert len(trace["attempts"]) == retries
+            for a in trace["attempts"]:
+                assert a["outcome"] == "failed_validation"
+                assert a["reasons"]
+                assert a["content"] == "not a dsl at all"
+            # The flag round-trips through level.json for status tools.
+            level_doc = json.loads(
+                (
+                    tmp_path / "run" / "level" / level.stage_id
+                    / level.level_id / "level.json"
+                ).read_text()
+            )
+            assert level_doc["layout_fallback"] is True
+
+    def test_layout_retries_escalate_token_budget(self, tmp_path: Path) -> None:
+        """The l3 class: identical caps across retries make a truncated
+        program unrecoverable — layout attempts must climb 768→1152→1728."""
+        good = make_fake_responder()
+        seen: list[int | None] = []
+
+        def broken_layouts(request):
+            if "### TASK: layout" in request.user_message:
+                seen.append(request.max_tokens)
+                return "not a dsl at all"
+            return good(request)
+
+        _run_slice(tmp_path / "run", responder=broken_layouts)
+        assert seen[:3] == [768, 1152, 1728]
+
+    def test_clean_run_writes_no_attempt_trace(self, tmp_path: Path) -> None:
+        """Attempt traces are failure evidence only — a clean run must not
+        grow diagnostic files (keeps the byte-identical run contract
+        meaningful)."""
+        ctx = _run_slice(tmp_path / "run")
+        assert not list((tmp_path / "run").glob("review/**/*_attempts.json"))
+        assert all(
+            level.layout_fallback is False
+            for level in ctx.bible.levels.values()
+        )
+
     def test_duplicate_enemy_names_prompted_and_deduped(
         self, tmp_path: Path
     ) -> None:
@@ -662,10 +950,18 @@ class TestEndToEnd:
         ctx = _run_slice(run)
         levels = ctx.bible.levels
 
-        # Variable dims from the schema.
-        assert [(lv.grid_width, lv.grid_height) for lv in levels.values()] == [
-            (48, 16), (56, 16), (64, 18),
-        ]
+        # Variable dims: schema-rolled RANGES, banded by difficulty —
+        # rolled values land inside their band and escalate in width.
+        bands = {
+            "l1": ((40, 52), (14, 16)),
+            "l2": ((52, 66), (16, 20)),
+            "l3": ((64, 84), (16, 24)),
+        }
+        for lid, ((w_lo, w_hi), (h_lo, h_hi)) in bands.items():
+            level = levels[lid]
+            assert w_lo <= level.grid_width <= w_hi, lid
+            assert h_lo <= level.grid_height <= h_hi, lid
+        assert levels["l1"].grid_width < levels["l3"].grid_width
         # Water present in every canned level's collision layer.
         for level in levels.values():
             with np.load(run / level.collision) as data:
@@ -684,14 +980,14 @@ class TestEndToEnd:
                 for p in level.entities
                 if p.overrides.get("variant")
             ]
-            assert sorted(named) == ["champion", "elite"]
+            assert sorted(named) == ["champion", "elite", "relentless"]
             # entities.json carries the variant field for consumers.
             entities_doc = json.loads(
                 (run / f"level/{level.stage_id}/{level.level_id}/entities.json")
                 .read_text()
             )
             assert [e["variant"] for e in entities_doc if e["variant"]] == [
-                "elite", "champion",
+                "elite", "champion", "relentless",
             ]
         # Foreground decor landed inline + in its layer file.
         for level in levels.values():
@@ -712,7 +1008,9 @@ class TestEndToEnd:
         assert [t["name"] for t in manifest["tiles"]] == [
             "empty", "floor", "platform", "wall", "spike", "water",
         ]
-        assert [v["name"] for v in manifest["variants"]] == ["elite", "champion"]
+        assert [v["name"] for v in manifest["variants"]] == [
+            "elite", "champion", "relentless",
+        ]
 
     def test_water_reachability_model(self) -> None:
         """A pool wider than jump_width is crossable by swimming; the same
@@ -806,19 +1104,22 @@ class TestEndToEnd:
             "floor(0,47)\nwall(19,12,13)\nwall(31,12,13)\n"
             "water(20,30,12)\nspawn(2)\nexit(45)", W, H,
         )
-        archetypes = {"fish": "swimmer", "beetle": "patroller"}
+        defs = {
+            "fish": {"archetype": "swimmer", "size": 1.0},
+            "beetle": {"archetype": "patroller", "size": 1.0},
+        }
         in_water = [{"enemy_id": "fish", "x": 25, "y": 12},
                     {"enemy_id": "beetle", "x": 25, "y": 12}]
 
         # forbidden: nobody in water.
-        accepted, problems = check_placements(
-            pool.grid, in_water, pool.spawn, archetypes,
+        accepted, problems, _ = check_placements(
+            pool.grid, in_water, pool.spawn, defs,
             rules=GameRules(enemy_water_policy="forbidden"),
         )
         assert not accepted and len(problems) == 2
         # amphibious: everybody allowed.
-        accepted, problems = check_placements(
-            pool.grid, in_water, pool.spawn, archetypes,
+        accepted, problems, _ = check_placements(
+            pool.grid, in_water, pool.spawn, defs,
             rules=GameRules(enemy_water_policy="amphibious"),
         )
         assert len(accepted) == 2 and not problems
@@ -909,9 +1210,9 @@ class TestEndToEnd:
         text = caplog.text
         assert "WorldPhase produced world" in text
         assert "StagePhase planned stage" in text
-        assert "EnemyGeneratorPhase produced 4 definitions" in text
-        assert "Layout l1 (difficulty 1, 48x16)" in text
-        assert "Layout l3 (difficulty 3, 64x18)" in text
+        assert "EnemyGeneratorPhase produced a 4-creature world pool" in text
+        assert re.search(r"Layout l1 \(difficulty 1, \d+x\d+\)", text)
+        assert re.search(r"Layout l3 \(difficulty 3, \d+x\d+\)", text)
         assert "Placement l1: " in text
         assert "TileAssignmentPhase mapped 3 levels" in text
         assert "BackgroundPhase wrote 3" in text
@@ -1067,16 +1368,18 @@ class TestGenericOps:
             result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
         )
         # Swimmers live in it (flush pools are volume cells like any).
-        accepted, problems = check_placements(
+        accepted, problems, _ = check_placements(
             result.grid,
             [{"enemy_id": "fish", "x": 22, "y": 14}],
             result.spawn,
-            {"fish": "swimmer"},
+            {"fish": {"archetype": "swimmer", "size": 1.0}},
         )
         assert accepted and not problems
 
     def test_pool_needs_ground_floor(self) -> None:
-        with pytest.raises(DslError, match="no ground floor to sink into"):
+        # The error names the occupying tile per bad column (here: never
+        # floored at all, so 'empty') — located, not just prohibitive.
+        with pytest.raises(DslError, match=r"20 \(empty\).*cannot sink in"):
             stamp("floor(0,10)\npool(water,20,25)\nspawn(2)\nexit(8)", W, H)
 
     def test_no_basin_message_teaches_pool_op(self) -> None:
@@ -1089,19 +1392,41 @@ class TestGenericOps:
                 W, H,
             )
 
-    def test_pour_on_ground_row_message_carries_the_recipe(self) -> None:
+    def test_pour_on_ground_row_snaps_up_in_code(self) -> None:
         """The observed real-model failure loop: surface poured ON the
-        ground floor row, three identical retries into fallback. The
-        message must teach the on-top-of-floor recipe, not just diagnose
-        (validator messages are prompts)."""
+        ground floor row. The old error message computed the exact fix
+        ("use surface row N-1") — computable fixes are tool work, so the
+        stamp now APPLIES it: snap the surface one row up, loudly."""
+        # H=16 → ground row 14; pouring at 14 hits the floor itself.
+        result = stamp(
+            "floor(0,47)\nwater(20,25,14)\nspawn(2)\nexit(45)", W, H
+        )
+        water_id = load_tiles().by_name["water"].id
+        assert all(
+            int(result.grid[13, x]) == water_id for x in range(20, 26)
+        )
+        assert int(result.grid[14, 20]) == load_tiles().by_name["floor"].id
+        assert len(result.repairs) == 1
+        assert "snapped to open row 13" in result.repairs[0]
+
+    def test_pour_on_ground_row_under_blockers_names_the_conflict(
+        self,
+    ) -> None:
+        """When the on-top surface row is blocked, the old recipe was
+        advice that could not work (the third real l3 run poured 24-30
+        under its own spike strip at 28-30 — following the recipe would
+        have failed again). The error must name the located conflict."""
         with pytest.raises(DslError) as exc_info:
-            # H=16 → ground row 14; pouring at 14 hits the floor itself.
-            stamp("floor(0,47)\nwater(20,25,14)\nspawn(2)\nexit(45)", W, H)
+            stamp(
+                "floor(0,47)\nspike(22,23)\nwater(20,25,14)\n"
+                "spawn(2)\nexit(45)",
+                W, H,
+            )
         message = str(exc_info.value)
         assert "IS the ground floor row" in message
         assert "ON TOP of the floor" in message
-        assert "wall(19,12,13)" in message
-        assert "water(20,25,13)" in message
+        assert "spike at column(s) 22, 23" in message
+        assert "cannot share the surface" in message
 
     def test_layout_prompt_carries_pool_recipe(self, tmp_path: Path) -> None:
         """Teach the recipe up front, not only in retry feedback."""
@@ -1140,6 +1465,223 @@ class TestCheckpoints:
                 "spawn(2)\nexit(45)", W, H,
             )
 
+
+#: Verbatim from review/ashen_grove/l3_layout_attempts.json of the third
+#: real (paid) run — the trace machinery exists exactly so failures turn
+#: into fixtures. 64x18, difficulty 3.
+_L3_ATTEMPT_1 = (
+    "spawn(2)\nfloor(0,63)\ngap(14,17)\ngap(38,41)\n"
+    "platform(20,13,4)\nplatform(44,13,4)\nplatform(10,14,3)\n"
+    "platform(50,11,3)\nhazard_strip(spike,6,9)\nhazard_strip(spike,28,30)\n"
+    "hazard_strip(spike,55,57)\nwall(23,14,16)\nvolume(water,24,30,16)\n"
+    "wall(31,14,16)\nwall(47,13,16)\nvolume(water,48,52,13)\n"
+    "wall(53,13,16)\ncheckpoint(34)\nexit(61)"
+)
+
+
+class TestL3TraceRegression:
+    """Replays of the third real run's failed l3 attempts (the trace the
+    attempt-log machinery was built to capture). Attempts 1-2 failed ONLY
+    on op order (spawn declared one line above its floor); the genuine
+    design conflict (pool poured under its own spike strip) stayed hidden
+    until attempt 3 because one error was reported per attempt."""
+
+    def test_spawn_before_floor_is_not_an_error(self) -> None:
+        """Attempts 1-2's only reported reason must no longer fire: the
+        final grid HAS floor under column 2."""
+        try:
+            stamp(_L3_ATTEMPT_1, 64, 18)
+        except DslError as exc:
+            assert not any("spawn" in p for p in exc.problems)
+
+    def test_real_conflict_surfaces_on_attempt_one(self) -> None:
+        """The pool/spike overlap (24-30 vs 28-30) must be reported the
+        FIRST time, located, instead of hiding behind the spawn false
+        positive for two attempts."""
+        with pytest.raises(DslError) as exc_info:
+            stamp(_L3_ATTEMPT_1, 64, 18)
+        message = str(exc_info.value)
+        assert "spike at column(s) 28, 29, 30" in message
+        assert "24-30" in message
+
+    def test_deconflicted_layout_stamps_with_snap_repair(self) -> None:
+        """Drop the conflicting spike strip and the layout the model
+        designed is valid: the first pool snaps onto the floor top in
+        code, the second pool was always fine."""
+        text = _L3_ATTEMPT_1.replace("hazard_strip(spike,28,30)\n", "")
+        result = stamp(text, 64, 18)
+        water_id = load_tiles().by_name["water"].id
+        assert result.spawn == (2, 15)
+        assert all(
+            int(result.grid[15, x]) == water_id for x in range(24, 31)
+        )  # pool A snapped to the standing row
+        assert all(
+            int(result.grid[y, x]) == water_id
+            for x in range(48, 53)
+            for y in (13, 14, 15)
+        )  # pool B as designed
+        assert len(result.repairs) == 1
+        assert "volume(water,24,30,16)" in result.repairs[0]
+        assert (34, 15, "checkpoint") in [
+            (t.x, t.y, t.type) for t in result.triggers
+        ]
+
+    def test_marker_order_is_irrelevant(self) -> None:
+        """Attempt 3 differed from attempt 1 only by marker position —
+        the two orderings must stamp identical levels."""
+        text = _L3_ATTEMPT_1.replace("hazard_strip(spike,28,30)\n", "")
+        reordered = "\n".join(
+            [ln for ln in text.splitlines() if not ln.startswith("spawn")]
+            + ["spawn(2)"]
+        )
+        a, b = stamp(text, 64, 18), stamp(reordered, 64, 18)
+        assert (a.grid == b.grid).all()
+        assert a.spawn == b.spawn and a.exit == b.exit
+        assert a.repairs == b.repairs
+
+    def test_all_marker_problems_reported_together(self) -> None:
+        """Two marker failures must land in ONE attempt's feedback —
+        serialized discovery burned the l3 retry budget."""
+        with pytest.raises(DslError) as exc_info:
+            stamp(
+                "floor(10,20)\nspawn(2)\ncheckpoint(30)\nexit(15)", W, H
+            )
+        problems = exc_info.value.problems
+        assert any(p.startswith("spawn") for p in problems)
+        assert any(p.startswith("checkpoint") for p in problems)
+
+
+class TestSteppedSlopes:
+    """Slopes v1: staircase/pyramid ops — stacked flat solids over the
+    existing physics; no new collision category."""
+
+    def test_stairs_up_profile(self) -> None:
+        result = stamp("floor(0,47)\nstairs_up(10,13)\nspawn(2)\nexit(45)", W, H)
+        floor_id = int(TileType.FLOOR)
+        # H=16 → ground row 14. Column 10: 1 block (row 13); column 13: 4.
+        for i, x in enumerate(range(10, 14)):
+            h = i + 1
+            assert all(
+                int(result.grid[14 - k, x]) == floor_id for k in range(1, h + 1)
+            ), f"column {x} should be {h} blocks tall"
+            assert int(result.grid[14 - h - 1, x]) == 0  # air above the step
+
+    def test_stairs_down_and_pyramid_profiles(self) -> None:
+        down = stamp("floor(0,47)\nstairs_down(10,12)\nspawn(2)\nexit(45)", W, H)
+        assert int(down.grid[11, 10]) == int(TileType.FLOOR)  # 3 tall
+        assert int(down.grid[13, 12]) == int(TileType.FLOOR)  # 1 tall
+        assert int(down.grid[12, 12]) == 0
+        hill = stamp("floor(0,47)\npyramid(20,24)\nspawn(2)\nexit(45)", W, H)
+        heights = [1, 2, 3, 2, 1]
+        for i, x in enumerate(range(20, 25)):
+            top = 14 - heights[i]
+            assert int(hill.grid[top, x]) == int(TileType.FLOOR)
+            assert int(hill.grid[top - 1, x]) == 0
+
+    def test_stairs_need_ground_floor(self) -> None:
+        with pytest.raises(DslError, match="stairs_up: column 25 has no ground"):
+            stamp("floor(0,20)\nstairs_up(25,27)\nspawn(2)\nexit(18)", W, H)
+
+    def test_tall_stairs_cap_leaves_air_above(self) -> None:
+        # A 20-column ramp on a 16-tall grid plateaus instead of sealing
+        # the level: cap = ground_row - 2 = 12 blocks.
+        result = stamp("floor(0,47)\nstairs_up(10,29)\nspawn(2)\nexit(45)", W, H)
+        assert int(result.grid[2, 29]) == int(TileType.FLOOR)  # capped top
+        assert int(result.grid[1, 29]) == 0  # air stays above
+
+    def test_stepped_slope_is_climbable(self) -> None:
+        """Every riser is 1 cell — reachability over the whole slope must
+        hold with the standard movement (the whole point of v1 slopes)."""
+        result = stamp(
+            "floor(0,47)\npyramid(18,26)\nspawn(2)\nexit(45)", W, H
+        )
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
+        )
+        assert not problems
+
+    def test_fake_layouts_carry_stairs(self) -> None:
+        for level_id, (w, h, _d) in _REFERENCE_DIMS.items():
+            assert "stairs_up(" in _FAKE_LAYOUTS[level_id]
+            result = stamp(_FAKE_LAYOUTS[level_id], w, h)
+            problems = check_level(
+                result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+                triggers=result.triggers,
+                free_volume=result.free_volume,
+            )
+            assert not problems, (level_id, problems)
+
+    def test_water_wall_fills_down_to_terrain_and_skips_containment(self) -> None:
+        """Water as a FEATURE (playtest direction): a free-standing wall
+        of water the player swims up — deliberately exempt from the
+        basin/containment rule."""
+        result = stamp(
+            "floor(0,47)\nwater_wall(10,11,6)\nspawn(2)\nexit(45)", W, H,
+        )
+        # Filled from row 6 down to the floor (ground row H-2), 2 wide.
+        assert int(result.grid[6, 10]) == TileType.WATER
+        assert int(result.grid[H - 3, 11]) == TileType.WATER
+        assert int(result.grid[5, 10]) == TileType.EMPTY
+        assert (10, 6) in result.free_volume
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+        )
+        assert not problems
+        # Without the exemption the same grid would (correctly) spill —
+        # proving the rule still guards ordinary pools.
+        assert check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
+        )
+
+    def test_water_wall_over_a_pit_runs_out_the_bottom(self) -> None:
+        """A spout: over a bottomless gap the wall reaches the bottom
+        edge — sinking past it is a fall death, the deliberate hazard the
+        user asked for. (Over a pit() the spikes at the bottom stop the
+        fill — also a legitimate spout floor.)"""
+        result = stamp(
+            "floor(0,47)\ngap(10,11)\nwater_wall(10,11,8)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert int(result.grid[H - 1, 10]) == TileType.WATER  # bottom edge
+
+    def test_water_wall_is_climbable_by_reachability(self) -> None:
+        """Swim up the wall, leap out at the top — the existing volume
+        reachability rules make water walls vertical paths for free."""
+        from examples.platformer_pack.validate import reachable_cells
+
+        # A high ledge reachable ONLY through the adjacent water wall.
+        text = (
+            "floor(0,47)\nledge(13,16,6)\nwater_wall(10,11,5)\n"
+            "spawn(2)\nexit(45)"
+        )
+        result = stamp(text, W, H)
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+            triggers=result.triggers,
+        )
+        assert not problems
+        reached = reachable_cells(result.grid, result.spawn, DEFAULT_MOVEMENT)
+        assert (14, 5) in reached  # standing on the ledge, via the water
+
+    def test_water_block_floats_and_rejects_occupied_cells(self) -> None:
+        result = stamp(
+            "floor(0,47)\nwater_block(20,4,22,5)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert int(result.grid[4, 21]) == TileType.WATER
+        assert (21, 4) in result.free_volume
+        problems = check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+        )
+        assert not problems
+        with pytest.raises(DslError, match="must be open air"):
+            stamp(
+                f"floor(0,47)\nwater_block(20,{H - 2},22,{H - 2})\n"
+                "spawn(2)\nexit(45)", W, H,
+            )
+
     def test_unreachable_checkpoint_flagged(self) -> None:
         """check_level validates checkpoints like spawn/exit — standable
         AND reachable, with the locate-and-instruct message."""
@@ -1159,11 +1701,11 @@ class TestCheckpoints:
 class TestVariantCaps:
     def test_unknown_variant_names_vocabulary(self) -> None:
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
-        accepted, problems = check_placements(
+        accepted, problems, _ = check_placements(
             result.grid,
             [{"enemy_id": "beetle", "x": 14, "y": 13, "variant": "mega"}],
             result.spawn,
-            {"beetle": "patroller"},
+            {"beetle": {"archetype": "patroller", "size": 1.0}},
         )
         assert not accepted
         assert problems and "unknown variant 'mega'" in problems[0]
@@ -1173,31 +1715,31 @@ class TestVariantCaps:
         from examples.platformer_pack.rules import GameRules
 
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
-        accepted, problems = check_placements(
+        accepted, problems, _ = check_placements(
             result.grid,
             [
-                {"enemy_id": "beetle", "x": 14, "y": 13, "variant": "elite"},
                 {"enemy_id": "beetle", "x": 20, "y": 13, "variant": "elite"},
+                {"enemy_id": "beetle", "x": 24, "y": 13, "variant": "elite"},
             ],
             result.spawn,
-            {"beetle": "patroller"},
+            {"beetle": {"archetype": "patroller", "size": 1.0}},
             rules=GameRules(variant_caps={"elite": 1}),
         )
-        assert [p["x"] for p in accepted] == [14]
+        assert [p["x"] for p in accepted] == [20]
         assert problems and "at most 1 'elite'" in problems[0]
 
     def test_uncapped_variant_rides_free(self) -> None:
         from examples.platformer_pack.rules import GameRules
 
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
-        accepted, problems = check_placements(
+        accepted, problems, _ = check_placements(
             result.grid,
             [
-                {"enemy_id": "beetle", "x": 14, "y": 13, "variant": "champion"},
                 {"enemy_id": "beetle", "x": 20, "y": 13, "variant": "champion"},
+                {"enemy_id": "beetle", "x": 24, "y": 13, "variant": "champion"},
             ],
             result.spawn,
-            {"beetle": "patroller"},
+            {"beetle": {"archetype": "patroller", "size": 1.0}},
             rules=GameRules(variant_caps={}),  # no cap on champion
         )
         assert len(accepted) == 2 and not problems
@@ -1260,9 +1802,11 @@ class TestStyleGuide:
         ctx = _run_slice(run)
         tileset = ctx.bible.tilesets["ashen_depths"]
         # Recorded on the artifact, in the manifest, and as the seed file.
-        assert tileset.palette["ground"] == "#6e5a4e"
+        # Ground is the canned #6e5a4e AFTER the separation tool spreads
+        # it from the too-close wall (#5b4d5e → ground lifted to #776459).
+        assert tileset.palette["ground"] == "#776459"
         manifest = json.loads((run / "manifest.json").read_text())
-        assert manifest["palette"] == tileset.palette
+        assert manifest["palettes"]["ashen_depths"] == tileset.palette
         style_doc = json.loads(
             (run / "style/ashen_depths/style.json").read_text()
         )
@@ -1271,7 +1815,7 @@ class TestStyleGuide:
         sheet = Image.open(run / tileset.tilesheet_path).convert("RGB")
         floor_slot = next(s for s in tileset.slots if s.name == "floor")
         x, y, _w, _h = floor_slot.px_region
-        assert sheet.getpixel((x + 1, y + 1)) == (0x6E, 0x5A, 0x4E)
+        assert sheet.getpixel((x + 1, y + 1)) == (0x77, 0x64, 0x59)
 
     def test_fallback_palette_is_loud(self, tmp_path: Path) -> None:
         good = make_fake_responder()
@@ -1343,9 +1887,9 @@ class TestStyleGuide:
         from examples.platformer_pack.style import check_palette
         from examples.platformer_pack.tiles import DEFAULT_TILES
 
-        assert check_palette(manifest["palette"], DEFAULT_TILES) == []
-        assert manifest["palette"]["water"] != "#1a4a6b"  # repaired
-        assert manifest["palette"]["danger"] == "#e84210"  # untouched
+        assert check_palette(manifest["palettes"]["ashen_depths"], DEFAULT_TILES) == []
+        assert manifest["palettes"]["ashen_depths"]["water"] != "#1a4a6b"  # repaired
+        assert manifest["palettes"]["ashen_depths"]["danger"] == "#e84210"  # untouched
 
     def test_style_prompt_carries_constraints(self, tmp_path: Path) -> None:
         """I1: the agent reads its constraints in the prompt."""
@@ -1397,8 +1941,9 @@ class TestLavaWorld:
         assert "lava" in [t["name"] for t in manifest["tiles"]]
         # The style agent styles THIS game's roles too (basalt ground,
         # lava pool) — data-driven end to end.
-        assert manifest["palette"]["lava"] == "#e8722c"
-        assert manifest["palette"]["basalt"] == "#5a4f5c"
+        assert manifest["palettes"]["ashen_depths"]["lava"] == "#e8722c"
+        # Canned #5a4f5c, lifted by the separation tool (wall too close).
+        assert manifest["palettes"]["ashen_depths"]["basalt"] == "#6e6470"
 
         # The volume in the collision grid IS lava, damaging by data.
         tileset = ctx.bible.tilesets["ashen_depths"]
@@ -1435,3 +1980,76 @@ class TestLavaWorld:
             p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file()
         ):
             assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
+
+
+class TestCarve:
+    """carve(x1,y1,x2,y2) — rectangular subtraction for irregular ledges
+    and varied silhouettes (design-variety: ops, not prompt coaching)."""
+
+    def test_carve_clears_rect_and_leaves_neighbors(self) -> None:
+        result = stamp(
+            "floor(0,47)\nledge(10,20,9)\ncarve(12,9,14,9)\n"
+            "spawn(2)\nexit(45)",
+            W, H,
+        )
+        assert (result.grid[9, 12:15] == 0).all()
+        assert result.grid[9, 10] != 0 and result.grid[9, 20] != 0
+
+    def test_carve_swaps_reversed_corners(self) -> None:
+        a = stamp(
+            "floor(0,47)\nledge(10,20,9)\ncarve(14,9,12,9)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        b = stamp(
+            "floor(0,47)\nledge(10,20,9)\ncarve(12,9,14,9)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert (a.grid == b.grid).all()
+
+    def test_carve_cannot_cut_ground_or_bedrock(self) -> None:
+        with pytest.raises(DslError, match="carve: rows"):
+            stamp(
+                f"floor(0,47)\ncarve(5,{H - 2},6,{H - 2})\nspawn(2)\nexit(45)",
+                W, H,
+            )
+
+    def test_carve_drops_cleared_hazard_records(self) -> None:
+        """Records must mirror the FINAL grid: a carve over a spike strip
+        removes both the cells and their sparse hazard records."""
+        result = stamp(
+            "floor(0,47)\nspike(20,24)\ncarve(22,13,22,13)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert int(result.grid[13, 22]) == 0
+        spike_xs = sorted(
+            h.x for h in result.hazards if h.type.startswith("floor_")
+        )
+        assert spike_xs == [20, 21, 23, 24]
+
+
+class TestPerLevelView:
+    """Deliberate per-level framing exceptions (T1): the stage plan tags a
+    level intimate/vista; everything else stays on the game-global scale."""
+
+    def test_vista_finale_lands_on_level_and_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _run_slice(tmp_path / "run")
+        levels = ctx.bible.levels
+        # Canned stage plan: standard, standard, vista finale.
+        assert levels["l1"].view_cells is None
+        assert levels["l2"].view_cells is None
+        assert levels["l3"].view_cells == 30
+        level_doc = json.loads(
+            (tmp_path / "run/level/ashen_depths/l3/level.json").read_text()
+        )
+        assert level_doc["view_cells"] == 30
+
+    def test_view_presets_clamp_and_default(self) -> None:
+        from examples.platformer_pack.graphics import GraphicsSpec
+
+        gfx = GraphicsSpec(view_presets={"vista": 300, "intimate": 2})
+        assert gfx.view_for("vista") == 60
+        assert gfx.view_for("intimate") == 8
+        assert gfx.view_for("standard") is None
+        assert gfx.view_for("") is None

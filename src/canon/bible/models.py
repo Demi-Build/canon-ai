@@ -29,10 +29,14 @@ from pydantic import BaseModel, Field
 # serializes the full subclass schema (not just the base Layout fields).
 from canon.bible.artifacts import ArtifactStatus, PhaseStatus  # noqa: E402
 from canon.bible.platformer import (  # noqa: E402
+    Backdrop,
     BossDefinition,
     EnemyDefinition,
     Level,
+    PlayerDefinition,
     Stage,
+    StageAudio,
+    StageProps,
     Tileset,
     World,
 )
@@ -110,6 +114,12 @@ class BibleMetadata(BaseModel):
     # Fine per-node status (PRD §7.3) — the orchestrator's resume state.
     # Keyed by node/artifact id; state-on-Bible, no separate state file.
     node_status: dict[str, ArtifactStatus] = Field(default_factory=dict)
+    # Pinned artifact ids (`canon pin`): deliberately protected content —
+    # the stale cascade halts at a pin and art phases skip the asset.
+    # Orthogonal to lifecycle status (a pinned artifact stays DONE), so
+    # unpinning restores nothing because nothing was destroyed. Sorted
+    # for stable serialization; treated as a set in code.
+    pinned: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +416,10 @@ class Bible(BaseModel):
     enemy_definitions: dict[str, EnemyDefinition] = Field(default_factory=dict)
     boss_definitions: dict[str, BossDefinition] = Field(default_factory=dict)
     tilesets: dict[str, Tileset] = Field(default_factory=dict)
+    backdrops: dict[str, Backdrop] = Field(default_factory=dict)
+    audio: dict[str, StageAudio] = Field(default_factory=dict)
+    props: dict[str, StageProps] = Field(default_factory=dict)
+    player: PlayerDefinition | None = None
 
     # ------------------------------------------------------------------ #
     # Factories

@@ -36,8 +36,9 @@ class GodotExportPhase:
             written += 1
 
         logger.info(
-            "GodotExportPhase wrote %d project files — open the output "
-            "directory in Godot 4.3+ and press Play.", written,
+            "GodotExportPhase wrote %d project files — play with: "
+            "godot --path %s", written,
+            ctx.adapter.resolve_path(".").resolve(),
         )
         if not isinstance(getattr(ctx.bible, "metadata", None), BibleMetadata):
             ctx.bible.metadata = BibleMetadata()

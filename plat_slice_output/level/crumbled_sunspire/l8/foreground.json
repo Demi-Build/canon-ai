@@ -1,0 +1,32 @@
+[
+  {
+    "x": 5,
+    "y": 1,
+    "type": "stalactite"
+  },
+  {
+    "x": 23,
+    "y": 0,
+    "type": "stalactite"
+  },
+  {
+    "x": 41,
+    "y": 1,
+    "type": "stalactite"
+  },
+  {
+    "x": 12,
+    "y": 22,
+    "type": "moss"
+  },
+  {
+    "x": 57,
+    "y": 20,
+    "type": "vine"
+  },
+  {
+    "x": 34,
+    "y": 23,
+    "type": "moss"
+  }
+]

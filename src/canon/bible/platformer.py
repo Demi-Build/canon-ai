@@ -24,7 +24,7 @@ user-editable schemas (§4), not hardcoded in the models.
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -141,10 +141,18 @@ class Stage(ArtifactMeta):
 
     stage_id: str
     theme: str = ""
+    #: One-word biome name ("forest", "caves", ...) — the world-map area
+    #: this stage's levels cluster under, and the habitat vocabulary the
+    #: enemy ecology filters on. Empty on pre-multi-stage bibles.
+    biome: str = ""
     enemy_refs: list[str] = Field(default_factory=list)  # "enemy:<id>"
     boss_ref: str = ""  # "boss:<id>"
     level_ids: list[str] = Field(default_factory=list)
     tileset_ref: str = ""  # "tileset:<stage_id>"
+    #: Ambient effect records ``{"name": ..., "params": {...}}`` — values
+    #: are data (LLM-chosen from the effect vocabulary); the KINDS are
+    #: code interpreters in the play surfaces. Unknown names ride inert.
+    effects: list[dict] = Field(default_factory=list)
 
 
 class Level(ArtifactMeta):
@@ -160,10 +168,20 @@ class Level(ArtifactMeta):
     grid_width: int = 0  # cells
     grid_height: int = 0
     pixels_per_cell: int | None = None  # None → ProjectConfig global (§4.2)
+    #: Deliberate per-level camera framing override (cells across), set
+    #: from the stage plan's view hint — None means the game-global
+    #: GraphicsSpec.view_cells. Sparse by design: scale stays consistent
+    #: within a game except where zooming out should instill emotion.
+    view_cells: int | None = None
     #: The stage-planning brief this level was generated against. Persisted
     #: so per-step REGENERATION (placement/decor re-rolls on a loaded
     #: Bible) prompts with the same context the original run had.
     brief: str = ""
+    #: True when every layout attempt failed validation and the flat
+    #: guaranteed-valid fallback was stamped instead of generated content —
+    #: a fallback level must stay queryable, not pass as a success. The
+    #: attempt trace lands in review/<stage>/<level>_layout_attempts.json.
+    layout_fallback: bool = False
 
     # First-class point markers (standing-cell grid coords). These are level
     # structure, not gameplay triggers — every consumer (validators, render,
@@ -205,10 +223,29 @@ class EnemyDefinition(ArtifactMeta):
     enemy_id: str
     name: str = ""
     archetype: str = ""  # closed set via EnemySchema
+    #: Body scale in CELLS — schema-rolled from a discrete set (v4:
+    #: {1.0, 1.5, 2.0}); typed here because placement validation, touch
+    #: boxes, and render scale all read it (combat v1). The EFFECTIVE
+    #: size everywhere is ``definition.size * variant.size`` (the variant
+    #: multiplier rides on the placement). Code tolerates any positive
+    #: float so hand-edited definitions stay loadable.
+    size: float = 1.0
+    #: Ecology (multi-stage worlds): how often this creature should be
+    #: met ("common" | "uncommon" | "rare" — schema v5 rolls it; rarity
+    #: caps in GameRules bound per-level placements) and which biomes it
+    #: inhabits (["*"] = the whole world; else stage-biome names). Both
+    #: default to the pre-v5 behavior: everywhere, uncapped tier.
+    rarity: str = "common"
+    habitats: list[str] = Field(default_factory=lambda: ["*"])
     stats: dict[str, Any] = Field(default_factory=dict)
     behavior: dict[str, Any] = Field(default_factory=dict)
     rig: RigManifest | None = None
     portrait_path: str = ""  # output_dir-relative
+    #: Generated sprite (art track). Addressed sprite/enemy/<id>/base.png —
+    #: the /base leaf reserves the namespace for future SKINS (variants,
+    #: powerups) and rigged animation frames beside it, no migration.
+    sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
+    sprite_hash: str = ""
 
 
 class BossDefinition(EnemyDefinition):
@@ -217,6 +254,71 @@ class BossDefinition(EnemyDefinition):
 
     phases: list[dict] = Field(default_factory=list)
     arena: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlayerDefinition(ArtifactMeta):
+    """The player character. Addressed ``player`` (one per game). Created
+    by the sprite art phase to own ``sprite/player/base.png`` — before
+    this entity existed the player sprite was untracked (no hash, no
+    edit detection, unpinnable, re-rolled on every sprite_art run).
+    Combat-era fields (hearts, movement extras) land here later."""
+
+    sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
+    sprite_hash: str = ""
+
+
+class StageProps(ArtifactMeta):
+    """A stage's generated gameplay-prop sprites (checkpoint flag, exit
+    goal). Addressed ``props:<stage_id>`` — its own artifact so a prop
+    re-roll never cascades through levels, and one artifact per stage so
+    props stay themed to the stage that shows them.
+
+    ``prop_paths`` maps prop name → output-relative file; ``prop_hashes``
+    maps each file path to its content hash (multi-file artifact, one
+    owner — the ``field:key`` adoption pattern backdrop bands proved).
+    The prop NAME set is closed in code (consumers interpret each name);
+    absent entries mean the consumer draws its placeholder shape.
+    """
+
+    stage_id: str
+    prop_paths: dict[str, str] = Field(default_factory=dict)
+    prop_hashes: dict[str, str] = Field(default_factory=dict)
+
+
+class StageAudio(ArtifactMeta):
+    """A stage's generated audio: one looping music theme + a small SFX
+    set. Addressed ``audio:<stage_id>`` — its own artifact (like
+    Backdrop) so a re-rolled theme never cascades staleness through the
+    stage's levels.
+
+    ``sfx_paths`` maps event name → output-relative file; ``sfx_hashes``
+    maps each file path to its content hash (multi-file artifact, one
+    owner — the ``field:key`` adoption pattern backdrop bands proved).
+    """
+
+    stage_id: str
+    music_path: str = ""
+    music_hash: str = ""
+    sfx_paths: dict[str, str] = Field(default_factory=dict)
+    sfx_hashes: dict[str, str] = Field(default_factory=dict)
+
+
+class Backdrop(ArtifactMeta):
+    """A stage's parallax scenery bands. Addressed ``backdrop:<stage_id>``
+    — its OWN artifact (not fields on Stage) so a hand-edited band PNG
+    marks only the backdrop user-edited instead of cascading staleness
+    through every level under the stage.
+
+    ``band_hashes`` maps each band's output-relative path to its content
+    hash (multi-file artifact, one owner). Bands are ordered far → near;
+    ``depths`` are the parallax scroll factors consumers apply (0 = fixed
+    to camera, 1 = moves with the world).
+    """
+
+    stage_id: str
+    band_paths: list[str] = Field(default_factory=list)
+    band_hashes: dict[str, str] = Field(default_factory=dict)
+    depths: list[float] = Field(default_factory=list)
 
 
 class Tileset(ArtifactMeta):
@@ -232,3 +334,6 @@ class Tileset(ArtifactMeta):
     tilesheet_hash: str = ""
     slots: list[TileSlot] = Field(default_factory=list)
     palette: dict[str, str] = Field(default_factory=dict)
+    #: GraphicsSpec category consumers map to texture sampling: "crisp"
+    #: → nearest-neighbor (pixel art stays chunky), "smooth" → linear.
+    render_filter: Literal["crisp", "smooth"] = "crisp"

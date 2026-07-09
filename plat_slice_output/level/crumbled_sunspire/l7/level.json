@@ -1,0 +1,147 @@
+{
+  "artifact_id": "",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "level:crumbled_sunspire/l7/layout",
+    "tileset:crumbled_sunspire"
+  ],
+  "level_id": "l7",
+  "stage_id": "crumbled_sunspire",
+  "grid_width": 75,
+  "grid_height": 17,
+  "pixels_per_cell": null,
+  "view_cells": null,
+  "brief": "Navigate crumbling stone corridors and collapsing bridges in a long horizontal run through the citadel's outer ramparts, where armored sentinels patrol narrow ledges above deadly drops.",
+  "layout_fallback": true,
+  "spawn": [
+    2,
+    14
+  ],
+  "exit": [
+    74,
+    14
+  ],
+  "collision": "level/crumbled_sunspire/l7/collision.npz",
+  "collision_hash": "sha256:317aa2691a0fbd1f7e34281319f8f0648dea3b882c9d357fe2ceb6e03aec4fb4",
+  "terrain": "level/crumbled_sunspire/l7/terrain.npz",
+  "terrain_hash": "sha256:06f1307bd74e6b39af27961288b2915b724796366e0778cd1f43b08abd0522e2",
+  "background": "level/crumbled_sunspire/l7/background.npz",
+  "background_hash": "sha256:6b061e0b83c4f311ee574ce05bd0c4bae7d3c28cf876df8e733fb415656d6fdf",
+  "hazards": [],
+  "triggers": [],
+  "foreground": [
+    {
+      "x": 8,
+      "y": 1,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 23,
+      "y": 16,
+      "type": "vine",
+      "params": {}
+    },
+    {
+      "x": 41,
+      "y": 0,
+      "type": "stalactite",
+      "params": {}
+    },
+    {
+      "x": 57,
+      "y": 15,
+      "type": "moss",
+      "params": {}
+    },
+    {
+      "x": 68,
+      "y": 1,
+      "type": "stalactite",
+      "params": {}
+    }
+  ],
+  "hazards_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "triggers_hash": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "foreground_hash": "sha256:bb20380eba760768f3b1f690ab0886e67739cf68e1c11cf192f7da7674e495a0",
+  "entities_hash": "sha256:89bc39715f2bd8519b5f72d30e4e814547836e65af86c2f82a3fa2cf1e304dc2",
+  "entities": [
+    {
+      "ref": "enemy:pebble_trudger",
+      "pos": [
+        12,
+        14
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:tumble_snout",
+      "pos": [
+        30,
+        14
+      ],
+      "overrides": {}
+    },
+    {
+      "ref": "enemy:boing_bug",
+      "pos": [
+        50,
+        14
+      ],
+      "overrides": {
+        "variant": "elite"
+      }
+    },
+    {
+      "ref": "enemy:gilt_wanderer",
+      "pos": [
+        68,
+        14
+      ],
+      "overrides": {}
+    }
+  ],
+  "step_parents": {
+    "collision": [
+      "level:crumbled_sunspire/l7/layout"
+    ],
+    "hazards": [
+      "level:crumbled_sunspire/l7/collision"
+    ],
+    "triggers": [
+      "level:crumbled_sunspire/l7/collision"
+    ],
+    "terrain": [
+      "level:crumbled_sunspire/l7/collision",
+      "tileset:crumbled_sunspire"
+    ],
+    "background": [
+      "level:crumbled_sunspire/l7/collision",
+      "tileset:crumbled_sunspire"
+    ],
+    "entities": [
+      "level:crumbled_sunspire/l7/collision",
+      "level:crumbled_sunspire/l7/hazards",
+      "enemy:boing_bug",
+      "enemy:clover_roller",
+      "enemy:gilt_wanderer",
+      "enemy:pebble_trudger",
+      "enemy:puddle_drifter",
+      "enemy:tumble_snout"
+    ],
+    "foreground": [
+      "level:crumbled_sunspire/l7/collision",
+      "tileset:crumbled_sunspire"
+    ],
+    "level": [
+      "level:crumbled_sunspire/l7/collision",
+      "level:crumbled_sunspire/l7/hazards",
+      "level:crumbled_sunspire/l7/triggers",
+      "level:crumbled_sunspire/l7/terrain",
+      "level:crumbled_sunspire/l7/background",
+      "level:crumbled_sunspire/l7/entities",
+      "level:crumbled_sunspire/l7/foreground"
+    ]
+  }
+}

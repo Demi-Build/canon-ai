@@ -180,6 +180,53 @@ def enforce_contrast(
     return out, adjusted
 
 
+#: Minimum luminance distance BETWEEN structural roles (ground/platform/
+#: wall). The first real palette put all three within ~15 of each other —
+#: readable against the background, indistinguishable from one another.
+MIN_ROLE_SEPARATION = 22.0
+
+
+def separate_structural_roles(
+    palette: dict[str, str], tiles: TileRegistry
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Repair TOOL: push STRUCTURAL roles (solid + one_way tile roles)
+    apart to ``MIN_ROLE_SEPARATION`` luminance, hue kept — walkable
+    surfaces must be tellable apart at a glance, and pairwise spacing is
+    arithmetic, not a design choice. Shifts away from the background's
+    side where possible so the readability bar survives; run
+    :func:`enforce_contrast` after to re-assert it. Returns
+    ``(palette, {role: old_hex})``."""
+    bg_role = background_role(tiles)
+    structural = [
+        spec["role"]
+        for spec in role_specs(tiles)
+        if spec["role"] != bg_role
+        and any(c in ("solid", "one_way") for c in spec["categories"])
+    ]
+    if len(structural) < 2:
+        return palette, {}
+    out = dict(palette)
+    adjusted: dict[str, str] = {}
+    bg_lum = _luminance(out[bg_role])
+    # Walk roles from nearest-to-background outward, pushing each at
+    # least MIN_ROLE_SEPARATION past the previous one, away from the bg.
+    ordered = sorted(structural, key=lambda r: abs(_luminance(out[r]) - bg_lum))
+    direction = 1.0 if _luminance(out[ordered[0]]) >= bg_lum else -1.0
+    previous = _luminance(out[ordered[0]])
+    for role in ordered[1:]:
+        lum = _luminance(out[role])
+        if abs(lum - previous) >= MIN_ROLE_SEPARATION:
+            previous = lum
+            continue
+        target = previous + direction * MIN_ROLE_SEPARATION
+        if not 0.0 <= target <= 255.0:  # no room on that side: flip
+            target = previous - direction * MIN_ROLE_SEPARATION
+        adjusted[role] = out[role]
+        out[role] = _shift_luminance(out[role], min(255.0, max(0.0, target)))
+        previous = _luminance(out[role])
+    return out, adjusted
+
+
 def fallback_palette(tiles: TileRegistry) -> dict[str, str]:
     """The hardcoded placeholder palette, as hex, for this registry's
     roles — the loud fallback when the LLM never validates."""
@@ -194,10 +241,10 @@ def fallback_palette(tiles: TileRegistry) -> dict[str, str]:
 
 
 class StyleGuidePhase:
-    """Theme → palette, validated for coverage and readability. The
-    palette lands in ``ctx.artifacts["palette"]`` (consumed by the
-    tileset phase, recorded on the Tileset artifact) and in
-    ``style/<stage>/style.json`` (the future diffusion seed)."""
+    """Theme → palette, PER STAGE (each biome owns its look). Palettes
+    land in ``ctx.artifacts["palettes"][stage_id]`` (consumed by the
+    tileset phase, recorded on each Tileset artifact) and in
+    ``style/<stage>/style.json`` (the diffusion seed)."""
 
     name = "plat:style"
 
@@ -205,7 +252,14 @@ class StyleGuidePhase:
         self.tiles = tiles
 
     def run(self, ctx: Any) -> None:
-        stage_id = ctx.artifacts["stage_id"]
+        ctx.artifacts.setdefault("palettes", {})
+        for stage_id in ctx.artifacts.get(
+            "stage_ids", list(ctx.bible.stages)
+        ):
+            self._run_stage(ctx, stage_id)
+        _stamp_metadata(ctx, self.name)
+
+    def _run_stage(self, ctx: Any, stage_id: str) -> None:
         stage = ctx.bible.stages[stage_id]
         specs = role_specs(self.tiles)
         fallback = {"palette": fallback_palette(self.tiles)}
@@ -216,14 +270,17 @@ class StyleGuidePhase:
         # dark dusk sky before this split (code-for-computation).
         data = llm_json(
             ctx,
-            self.name,
+            f"{self.name}:{stage_id}",
             lambda fb: ctx.prompts.style_generation(
                 ctx.bible.world.title if ctx.bible.world else "",
                 stage.theme,
-                ctx.artifacts.get("stage_brief", ""),
+                ctx.artifacts.get("stage_briefs", {}).get(
+                    stage_id, ctx.artifacts.get("stage_brief", "")
+                ),
                 specs,
                 background_role(self.tiles),
                 feedback=fb,
+                stage_id=stage_id,
             ),
             required_keys=("palette",),
             fallback=fallback,
@@ -239,15 +296,27 @@ class StyleGuidePhase:
         if palette == {k: v.lower() for k, v in fallback["palette"].items()}:
             warn(
                 ctx,
-                "style: LLM palette never validated; tiles use the "
-                "PLACEHOLDER palette, not generated style.",
+                f"style: LLM palette for stage {stage_id!r} never "
+                "validated; tiles use the PLACEHOLDER palette, not "
+                "generated style.",
+            )
+        palette, separated = separate_structural_roles(palette, self.tiles)
+        if separated:
+            logger.info(
+                "StyleGuidePhase separation tool spread %d structural "
+                "role(s) for %s: %s (hue kept, spacing computed).",
+                len(separated), stage_id,
+                ", ".join(
+                    f"{role} {old}->{palette[role]}"
+                    for role, old in separated.items()
+                ),
             )
         palette, adjusted = enforce_contrast(palette, self.tiles)
         if adjusted:
             logger.info(
-                "StyleGuidePhase readability tool adjusted %d role(s): %s "
-                "(hue kept, lightness computed).",
-                len(adjusted),
+                "StyleGuidePhase readability tool adjusted %d role(s) "
+                "for %s: %s (hue kept, lightness computed).",
+                len(adjusted), stage_id,
                 ", ".join(
                     f"{role} {old}->{palette[role]}"
                     for role, old in adjusted.items()
@@ -259,10 +328,9 @@ class StyleGuidePhase:
             f"style/{stage_id}/style.json",
             {"stage_id": stage_id, "palette": palette, "roles": specs},
         )
-        ctx.artifacts["palette"] = palette
+        ctx.artifacts["palettes"][stage_id] = palette
         logger.info(
-            "StyleGuidePhase palette for %r: %s",
-            stage.theme,
+            "StyleGuidePhase palette for %s (%r): %s",
+            stage_id, stage.theme,
             ", ".join(f"{role}={hex_}" for role, hex_ in palette.items()),
         )
-        _stamp_metadata(ctx, self.name)

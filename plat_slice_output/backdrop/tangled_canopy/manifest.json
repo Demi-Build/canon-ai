@@ -1,0 +1,22 @@
+{
+  "artifact_id": "backdrop:tangled_canopy",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:tangled_canopy",
+    "phase:plat:style"
+  ],
+  "stage_id": "tangled_canopy",
+  "band_paths": [
+    "backdrop/tangled_canopy/band_0.png",
+    "backdrop/tangled_canopy/band_1.png"
+  ],
+  "band_hashes": {
+    "backdrop/tangled_canopy/band_0.png": "sha256:7f1eb09fd70210f1aa9d37ba27880bd091ed29a5e32b2031b485ca521ad3d00c",
+    "backdrop/tangled_canopy/band_1.png": "sha256:12f22a7ded599837f0d664a90d7815179af1bea558cba2e23aba9cead6c0b909"
+  },
+  "depths": [
+    0.2,
+    0.5
+  ]
+}

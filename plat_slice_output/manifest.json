@@ -1,0 +1,360 @@
+{
+  "game": "platformer_slice",
+  "seed": "sunny green-hill kingdom, cheerful and colorful, gentle water pools and spike pits, playful bouncy enemies",
+  "world": "Sunny Crown Kingdom",
+  "stages": [
+    {
+      "stage_id": "rolling_meadows",
+      "biome": "meadow",
+      "theme": "sunny grasslands",
+      "levels": [
+        "l1",
+        "l2",
+        "l3"
+      ]
+    },
+    {
+      "stage_id": "tangled_canopy",
+      "biome": "forest",
+      "theme": "Gnarled Woodland Canopy",
+      "levels": [
+        "l4",
+        "l5",
+        "l6"
+      ]
+    },
+    {
+      "stage_id": "crumbled_sunspire",
+      "biome": "ruins",
+      "theme": "sun-scorched ruined citadel",
+      "levels": [
+        "l7",
+        "l8",
+        "l9"
+      ]
+    }
+  ],
+  "levels": [
+    "l1",
+    "l2",
+    "l3",
+    "l4",
+    "l5",
+    "l6",
+    "l7",
+    "l8",
+    "l9"
+  ],
+  "world_map": {
+    "nodes": [
+      {
+        "level_id": "l1",
+        "display_name": "1-1",
+        "stage_id": "rolling_meadows",
+        "pos": [
+          0.05,
+          0.3355
+        ]
+      },
+      {
+        "level_id": "l2",
+        "display_name": "1-2",
+        "stage_id": "rolling_meadows",
+        "pos": [
+          0.15,
+          0.6222
+        ]
+      },
+      {
+        "level_id": "l3",
+        "display_name": "1-3",
+        "stage_id": "rolling_meadows",
+        "pos": [
+          0.25,
+          0.3672
+        ]
+      },
+      {
+        "level_id": "l4",
+        "display_name": "2-1",
+        "stage_id": "tangled_canopy",
+        "pos": [
+          0.4,
+          0.6346
+        ]
+      },
+      {
+        "level_id": "l5",
+        "display_name": "2-2",
+        "stage_id": "tangled_canopy",
+        "pos": [
+          0.5,
+          0.3506
+        ]
+      },
+      {
+        "level_id": "l6",
+        "display_name": "2-3",
+        "stage_id": "tangled_canopy",
+        "pos": [
+          0.6,
+          0.6292
+        ]
+      },
+      {
+        "level_id": "l7",
+        "display_name": "3-1",
+        "stage_id": "crumbled_sunspire",
+        "pos": [
+          0.75,
+          0.3575
+        ]
+      },
+      {
+        "level_id": "l8",
+        "display_name": "3-2",
+        "stage_id": "crumbled_sunspire",
+        "pos": [
+          0.85,
+          0.6345
+        ]
+      },
+      {
+        "level_id": "l9",
+        "display_name": "3-3",
+        "stage_id": "crumbled_sunspire",
+        "pos": [
+          0.95,
+          0.3469
+        ]
+      }
+    ],
+    "edges": [
+      [
+        "l1",
+        "l2"
+      ],
+      [
+        "l2",
+        "l3"
+      ],
+      [
+        "l3",
+        "l4"
+      ],
+      [
+        "l4",
+        "l5"
+      ],
+      [
+        "l5",
+        "l6"
+      ],
+      [
+        "l6",
+        "l7"
+      ],
+      [
+        "l7",
+        "l8"
+      ],
+      [
+        "l8",
+        "l9"
+      ]
+    ]
+  },
+  "unlock": {
+    "type": "linear"
+  },
+  "enemies": [
+    "boing_bug",
+    "clover_roller",
+    "gilt_wanderer",
+    "pebble_trudger",
+    "puddle_drifter",
+    "puff_sprite",
+    "tumble_snout"
+  ],
+  "movement": {
+    "run_speed": 8.0,
+    "jump_height": 3,
+    "jump_width": 4,
+    "gravity": 40.0
+  },
+  "rules": {
+    "water_containment": "contained",
+    "enemy_water_policy": "swimmers_only",
+    "platform_drop_through": true,
+    "variant_caps": {
+      "elite": 1,
+      "champion": 1
+    },
+    "checkpoint_enemy_reset": true,
+    "spawn_grace": "until_move",
+    "rarity_caps": {
+      "rare": 1,
+      "uncommon": 2
+    },
+    "_doc": "Per-game behavior policy (PRD Appendix E.7). Known keys are enforced by validators/prompts/play surfaces; unknown keys are carried into manifest.json but INERT until enforcement code exists. Copy this file to make a different game and point the runner at it with --rules."
+  },
+  "combat": {
+    "player_max_hearts": 3,
+    "stomp_damage": 6,
+    "stomp_bounce_factor": 0.7,
+    "hurt_iframes_s": 1.0,
+    "spawn_grace_s": 1.0,
+    "spawn_safety_columns": 3,
+    "_doc": "Per-game combat tuning (combat v1): numeric values only \u2014 policy toggles (checkpoint enemy reset, spawn grace) live in game_rules.json. Ships in manifest.json under \"combat\"; read by the placement validator and both play surfaces. Copy this file to make a different game and point the runner at it with --combat."
+  },
+  "tiles": [
+    {
+      "id": 0,
+      "name": "empty",
+      "category": "empty",
+      "color_role": "background",
+      "params": {}
+    },
+    {
+      "id": 1,
+      "name": "floor",
+      "category": "solid",
+      "color_role": "ground",
+      "params": {}
+    },
+    {
+      "id": 2,
+      "name": "platform",
+      "category": "one_way",
+      "color_role": "platform",
+      "params": {}
+    },
+    {
+      "id": 3,
+      "name": "wall",
+      "category": "solid",
+      "color_role": "wall",
+      "params": {}
+    },
+    {
+      "id": 10,
+      "name": "spike",
+      "category": "hazard",
+      "color_role": "danger",
+      "params": {}
+    },
+    {
+      "id": 20,
+      "name": "water",
+      "category": "volume",
+      "color_role": "water",
+      "params": {
+        "speed_factor": 0.55,
+        "gravity": 8.0,
+        "impulse": 5.0
+      }
+    }
+  ],
+  "palettes": {
+    "rolling_meadows": {
+      "background": "#a8d4f0",
+      "ground": "#5a8c2e",
+      "platform": "#c4a431",
+      "wall": "#7a5c3a",
+      "danger": "#d42010",
+      "water": "#2060c8"
+    },
+    "tangled_canopy": {
+      "background": "#2d4a1e",
+      "ground": "#81674a",
+      "platform": "#4e7a3c",
+      "wall": "#928159",
+      "danger": "#d75035",
+      "water": "#2f7895"
+    },
+    "crumbled_sunspire": {
+      "background": "#a8895a",
+      "ground": "#5c3d1e",
+      "platform": "#dab464",
+      "wall": "#3b2710",
+      "danger": "#cc1f1f",
+      "water": "#1a6b9e"
+    }
+  },
+  "variants": [
+    {
+      "name": "elite",
+      "stat_mults": {
+        "hp": 2.0
+      },
+      "speed_mult": 1.0,
+      "size": 1.0,
+      "visual": "outline",
+      "behavior": {}
+    },
+    {
+      "name": "champion",
+      "stat_mults": {
+        "hp": 4.0,
+        "damage": 2.0
+      },
+      "speed_mult": 0.8,
+      "size": 1.3,
+      "visual": "outline_scale",
+      "behavior": {}
+    }
+  ],
+  "graphics": {
+    "tile_px": 32,
+    "art_style": "crisp 16-bit pixel art, clean dithering, hard pixel edges",
+    "render_filter": "crisp",
+    "gen_px": 512,
+    "posterize_levels": 16,
+    "sprite_px": null,
+    "backdrop_bands": 2,
+    "view_cells": 20,
+    "view_presets": {
+      "intimate": 14,
+      "vista": 30
+    },
+    "actor_scale": 1.4
+  },
+  "audio": {
+    "rolling_meadows": {
+      "music": "music/rolling_meadows/theme.mp3",
+      "sfx": {}
+    },
+    "tangled_canopy": {
+      "music": "music/tangled_canopy/theme.mp3",
+      "sfx": {}
+    },
+    "crumbled_sunspire": {
+      "music": "music/crumbled_sunspire/theme.mp3",
+      "sfx": {}
+    }
+  },
+  "props": {
+    "rolling_meadows": {
+      "checkpoint": "sprite/prop/rolling_meadows/checkpoint.png",
+      "exit": "sprite/prop/rolling_meadows/exit.png"
+    },
+    "tangled_canopy": {
+      "checkpoint": "sprite/prop/tangled_canopy/checkpoint.png",
+      "exit": "sprite/prop/tangled_canopy/exit.png"
+    },
+    "crumbled_sunspire": {
+      "checkpoint": "sprite/prop/crumbled_sunspire/checkpoint.png",
+      "exit": "sprite/prop/crumbled_sunspire/exit.png"
+    }
+  },
+  "warnings": [
+    "layout l2: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/rolling_meadows/l2_layout_attempts.json",
+    "layout l3: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/rolling_meadows/l3_layout_attempts.json",
+    "layout l5: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/tangled_canopy/l5_layout_attempts.json",
+    "layout l6: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/tangled_canopy/l6_layout_attempts.json",
+    "layout l7: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/crumbled_sunspire/l7_layout_attempts.json",
+    "layout l9: LLM output never validated; level is the flat FALLBACK layout, not generated content. Attempt trace: review/crumbled_sunspire/l9_layout_attempts.json",
+    "placement l1: kept 3 valid placement(s), dropped invalid ones: puddle_drifter at (38, 13) (size 1.5) needs water for 2 rows, but cell (38, 12) is EMPTY \u2014 that located cell blocks its body; move it to more open ground. Its size-1.5 body spans columns 38-38 and 2 row(s) up.",
+    "placement l4: kept 3 valid placement(s), dropped invalid ones: puddle_drifter at (22, 15) (size 1.5) needs water for 2 rows, but cell (22, 14) is FLOOR \u2014 that located cell blocks its body; move it to more open ground. Its size-1.5 body spans columns 22-22 and 2 row(s) up."
+  ]
+}

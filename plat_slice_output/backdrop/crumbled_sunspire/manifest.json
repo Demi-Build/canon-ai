@@ -1,0 +1,22 @@
+{
+  "artifact_id": "backdrop:crumbled_sunspire",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:crumbled_sunspire",
+    "phase:plat:style"
+  ],
+  "stage_id": "crumbled_sunspire",
+  "band_paths": [
+    "backdrop/crumbled_sunspire/band_0.png",
+    "backdrop/crumbled_sunspire/band_1.png"
+  ],
+  "band_hashes": {
+    "backdrop/crumbled_sunspire/band_0.png": "sha256:ca48332b7053736feaa801f57097c412607be5b6e5dac48f554c97b47d7287a7",
+    "backdrop/crumbled_sunspire/band_1.png": "sha256:bf68acca7897475465cdf9d546db9ca432d3de655aa286e67358a436a4397c29"
+  },
+  "depths": [
+    0.2,
+    0.5
+  ]
+}

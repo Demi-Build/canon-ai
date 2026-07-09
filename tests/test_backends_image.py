@@ -53,6 +53,18 @@ class TestFakeImageBackendGenerate:
         assert isinstance(result, bytes)
         assert len(result) > 0
 
+    def test_generate_returns_fully_decodable_png(self) -> None:
+        """Full DECODE, not just open: PIL's lazy Image.open() accepted the
+        old truncated-IDAT placeholder, then every real consumer blew up
+        at convert()/load() time with 'broken data stream'."""
+        import io
+
+        from PIL import Image
+
+        raw = FakeImageBackend().generate("anything", 512, 512)
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        assert img.size == (1, 1)
+
     def test_generate_records_call(self) -> None:
         fake = FakeImageBackend()
         fake.generate("a red dragon", 512, 512)

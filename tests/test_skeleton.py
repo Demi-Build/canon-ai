@@ -538,3 +538,79 @@ def test_context_defaults_to_empty_and_does_not_break_plain_specs():
     a = roll_skeleton(spec, random.Random(7))
     b = roll_skeleton(spec, random.Random(7), context={"room_level": 5})
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# lookup_ranges — banded ranges keyed off another roll (design-variety)
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_ranges_rolls_two_int_values_inclusively():
+    spec = SkeletonSpec(
+        entity_type="x",
+        fields={
+            "difficulty": SkeletonField(
+                lookup={1: 1, 2: 2}, depends_on_context="level_number"
+            ),
+            "width": SkeletonField(
+                lookup={1: [40, 52], 2: [52, 66]},
+                depends_on="difficulty",
+                lookup_ranges=True,
+            ),
+        },
+    )
+    seen = set()
+    for seed in range(40):
+        rolled = roll_skeleton(
+            spec, random.Random(seed), context={"level_number": 1}
+        )
+        assert 40 <= rolled["width"] <= 52
+        seen.add(rolled["width"])
+    assert len(seen) > 1  # actually a range, not a constant
+
+
+def test_lookup_ranges_off_returns_pair_verbatim():
+    """Without the opt-in, a pair-shaped lookup value stays a value —
+    packs whose lookup values are legitimately pairs are untouched."""
+    spec = SkeletonSpec(
+        entity_type="x",
+        fields={
+            "kind": SkeletonField(choices=[("a", 1)]),
+            "hp_range": SkeletonField(lookup={"a": [6, 24]}, depends_on="kind"),
+        },
+    )
+    rolled = roll_skeleton(spec, random.Random(0))
+    assert rolled["hp_range"] == [6, 24]
+
+
+def test_lookup_ranges_ignores_non_pair_values():
+    spec = SkeletonSpec(
+        entity_type="x",
+        fields={
+            "kind": SkeletonField(choices=[("a", 1)]),
+            "label": SkeletonField(
+                lookup={"a": "constant"}, depends_on="kind", lookup_ranges=True
+            ),
+        },
+    )
+    assert roll_skeleton(spec, random.Random(0))["label"] == "constant"
+
+
+def test_lookup_ranges_without_lookup_rejected():
+    with pytest.raises(ValueError, match="lookup_ranges"):
+        SkeletonField(range=(1, 2), lookup_ranges=True)
+
+
+def test_lookup_ranges_deterministic_per_seed():
+    spec = SkeletonSpec(
+        entity_type="x",
+        fields={
+            "kind": SkeletonField(choices=[("a", 1)]),
+            "w": SkeletonField(
+                lookup={"a": [10, 90]}, depends_on="kind", lookup_ranges=True
+            ),
+        },
+    )
+    a = roll_skeleton(spec, random.Random(42))
+    b = roll_skeleton(spec, random.Random(42))
+    assert a == b

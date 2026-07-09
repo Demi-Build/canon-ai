@@ -35,6 +35,22 @@ v1 enforced policies:
 - ``variant_caps`` (3b): per-level at-most-N caps per enemy-variant name
   (variants.json vocabulary). Enforced at placement validation and offered
   in the placement prompt. A variant name absent from this map is uncapped.
+- ``checkpoint_enemy_reset`` (combat v1): killed enemies come back (alive,
+  at their placement) when the player dies and respawns at a checkpoint.
+  Enforced in both play surfaces' respawn paths.
+- ``spawn_grace`` (combat v1): "until_move" — after level start or a
+  respawn the player takes no damage and blinks, and chaser-archetype
+  enemies hold still, until the player's first movement input; that
+  first input then starts a full-invincibility SHIELD window
+  (``CombatSpec.spawn_grace_s`` — the number lives in combat.json) so
+  respawning beside a checkpoint-camping enemy stays fair; "off" — no
+  grace at all. Enforced in both play surfaces (damage gates + chaser
+  AI gate).
+- ``rarity_caps`` (multi-stage ecology): per-level at-most-N caps per
+  enemy RARITY tier ("rare"/"uncommon"/... — schema v5 rolls the tier
+  onto the definition). Enforced at placement validation and stated in
+  the placement prompt; an absent tier is uncapped. This is what makes
+  rares actually rare on the ground, not just in the fiction.
 """
 
 from __future__ import annotations
@@ -57,7 +73,10 @@ class GameRules(BaseModel):
         "swimmers_only"
     )
     platform_drop_through: bool = True
-    variant_caps: dict[str, int] = {"elite": 1, "champion": 1}
+    variant_caps: dict[str, int] = {"elite": 1, "champion": 1, "relentless": 1}
+    checkpoint_enemy_reset: bool = True
+    spawn_grace: Literal["until_move", "off"] = "until_move"
+    rarity_caps: dict[str, int] = {"rare": 1, "uncommon": 2}
 
 
 def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:

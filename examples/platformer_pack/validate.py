@@ -18,6 +18,12 @@ from __future__ import annotations
 from collections import deque
 
 from canon.bible.platformer import SparseMaskEntry
+from examples.platformer_pack.combat import (
+    DEFAULT_COMBAT,
+    CombatSpec,
+    effective_size,
+    occupancy,
+)
 from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
@@ -138,10 +144,12 @@ def check_level(
     rules: GameRules = DEFAULT_RULES,
     tiles: TileRegistry = DEFAULT_TILES,
     triggers: list[SparseMaskEntry] | None = None,
+    free_volume: set | None = None,
 ) -> list[str]:
     """Return problem strings (empty = valid). Messages are written to be
     fed back to the Layout Agent verbatim. ``triggers`` (checkpoints) are
-    validated like spawn/exit: standable and reachable."""
+    validated like spawn/exit: standable and reachable. ``free_volume``
+    cells (deliberate water FEATURES) skip the containment rule."""
     problems: list[str] = []
     stand = standable_cells(grid, tiles)
     if spawn not in stand:
@@ -157,7 +165,9 @@ def check_level(
                 _diagnose_unstandable(grid, cell, "checkpoint", tiles)
             )
     if rules.water_containment == "contained":
-        problems.extend(check_volume_containment(grid, tiles))
+        problems.extend(
+            check_volume_containment(grid, tiles, exempt=free_volume)
+        )
     if not problems:
         reached = reachable_cells(grid, spawn, movement, tiles)
         if exit_ not in reached:
@@ -178,16 +188,22 @@ def check_level(
 
 
 def check_volume_containment(
-    grid, tiles: TileRegistry = DEFAULT_TILES
+    grid, tiles: TileRegistry = DEFAULT_TILES,
+    exempt: frozenset | set | None = None,
 ) -> list[str]:
     """Under the 'contained' rule, every volume cell's sides must be held
     by solid tiles, more volume, or the level edge — pools sit in basins,
     they don't spill sideways. ('free' games skip this — waterfalls.)
-    One-way platforms don't hold liquid; any volume cell continues a pool."""
+    One-way platforms don't hold liquid; any volume cell continues a pool.
+    ``exempt`` cells (the free-water FEATURE ops: water_wall/water_block)
+    are deliberately uncontained and skipped."""
     height, width = grid.shape
     holds = tiles.ids("solid") | tiles.ids("volume")
+    exempt = exempt or frozenset()
     problems: list[str] = []
     for x, y in sorted(volume_cells(grid, tiles)):
+        if (x, y) in exempt:
+            continue
         for nx in (x - 1, x + 1):
             if nx < 0 or nx >= width:
                 continue  # level edge holds the pool
@@ -222,28 +238,57 @@ def _suggest_bridge(
     frontier: tuple[int, int],
     nearest: tuple[int, int],
     movement: PlayerMovementSpec,
-) -> str:
+) -> str | None:
     """A concrete platform op that bridges from the frontier toward the
     unreachable foothold — the arithmetic is ours, never the model's
-    (code-for-computation: LLMs choose designs, tools compute)."""
-    width = grid.shape[1]
+    (code-for-computation: LLMs choose designs, tools compute).
+
+    Candidates are verified against the GRID: the platform's two cells
+    AND the standing cells above them must be open air, and standing on
+    it must be arc-jumpable from the frontier. The first real run's
+    fallback levels traced to the old blind formula: with a foothold
+    directly above the frontier (dx=0, rise 4) it proposed a platform
+    whose standing cell was the foothold's own supporting solid — a
+    structurally dead op that auto_bridge re-emitted until its bound.
+    Returns None when no valid bridge exists (a design problem)."""
+    height, width = grid.shape
     fx, fy = frontier
     nx, ny = nearest
-    dx = abs(nx - fx)
-    rise = fy - ny
-    if rise > movement.jump_height:
-        # Vertical break: a step at max jump rise, at/toward the frontier.
-        row = fy - movement.jump_height + 1  # stand atop = fy - jump_height
-        col = fx if dx <= 1 else fx + (1 if nx > fx else -2)
-    else:
-        # Horizontal break: a step midway across the gap.
-        row = fy - 1
-        col = (fx + nx) // 2
-        if abs(col - fx) >= movement.jump_width:
-            col = fx + (movement.jump_width - 1) * (1 if nx > fx else -1)
-    row = max(1, row)
-    col = max(0, min(col, width - 2))
-    return f"platform({col},{row},2)"
+
+    def _free(x: int, y: int) -> bool:
+        return 0 <= x < width and 0 <= y < height and int(grid[y, x]) == 0
+
+    def _ok(col: int, row: int) -> bool:
+        if not (1 <= row <= height - 3) or not (0 <= col <= width - 2):
+            return False
+        # Platform cells and the cells stood in above them: open air.
+        if not all(_free(col + i, row) and _free(col + i, row - 1) for i in range(2)):
+            return False
+        stand_rise = fy - (row - 1)
+        if stand_rise > movement.jump_height:
+            return False
+        # Reachable from the frontier under the arc rule (falling is free).
+        reach = max(1, max_dx_for_rise(movement, max(stand_rise, 0)))
+        return min(abs(col - fx), abs(col + 1 - fx)) <= reach
+
+    # Rows whose STANDING level lands closest to the foothold's row first
+    # (flat gaps get flat steps, tiers get risers), columns spiralling
+    # out from between frontier and target.
+    mid = (fx + nx) // 2
+    cols = sorted(
+        range(max(0, min(fx, nx) - 2), min(width - 2, max(fx, nx) + 2) + 1),
+        key=lambda c: (abs(c - mid), abs(c - fx)),
+    )
+    top = max(1, fy - movement.jump_height + 1)
+    rows = sorted(
+        range(top, min(height - 3, fy - 1) + 1),
+        key=lambda r: abs((r - 1) - ny),
+    )
+    for row in rows:
+        for col in cols:
+            if _ok(col, row):
+                return f"platform({col},{row},2)"
+    return None
 
 
 def _describe_reachability_break(
@@ -288,16 +333,230 @@ def _describe_reachability_break(
             )
         )
     detail = " and ".join(constraints) or "no standable path connects them"
-    bridge = _suggest_bridge(grid, frontier, nearest, movement)
-    return (
+    base = (
         f"{label} at {target} is not reachable from spawn {spawn}. The player "
         f"gets as far as {frontier} but cannot reach the next foothold at "
-        f"{nearest}: {detail}. Fix: ADD THIS ONE LINE to your layout, "
+        f"{nearest}: {detail}."
+    )
+    bridge = _suggest_bridge(grid, frontier, nearest, movement)
+    if bridge is None:
+        # No platform placement can bridge this — a DESIGN problem: the
+        # surrounding geometry must change, not just gain a step.
+        return (
+            f"{base} No stepping platform fits here — open up the "
+            f"terrain between {frontier} and {nearest} (widen the "
+            f"passage or lower the ledge) so a path can exist."
+        )
+    return (
+        f"{base} Fix: ADD THIS ONE LINE to your layout, "
         f"changing nothing else: {bridge} — it is jumpable from "
         f"{frontier} and bridges toward {nearest}. "
         f"Remember: a flat gap wider than {movement.jump_width - 1} columns "
         "is impossible to cross without a stepping platform."
     )
+
+
+def swimmer_spot_exists(
+    grid,
+    size: float,
+    swim_style: str = "",
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> bool:
+    """True if ANY cell in the level can seat a swimmer of ``size`` with
+    this ``swim_style`` — the env-feasibility question the roster
+    pre-filter asks (an enemy the terrain can't sustain is never offered
+    to the placement agent; the first multi-stage run burned all three
+    retries per level trying to seat a 1.5-body swimmer in 1-deep
+    pools). Mirrors ``check_placements``' footprint rules; the parity
+    test cross-checks them."""
+    from examples.platformer_pack.combat import occupancy
+
+    volume = volume_cells(grid, tiles)
+    if not volume:
+        return False
+    height, width = grid.shape
+    empty_id = tiles.empty_id
+    cols, rows = occupancy(size)
+
+    def _fits(x: int, y: int) -> bool:
+        for cx in range(x, x + cols):
+            if not (0 <= cx < width and 0 <= y < height):
+                return False
+            if (cx, y) not in volume:
+                return False
+            if swim_style == "surface" and (cx, y - 1) in volume:
+                return False
+            for cy in range(y - 1, y - rows, -1):
+                if cy < 0:
+                    return False
+                if swim_style == "surface":
+                    if int(grid[cy, cx]) != empty_id:
+                        return False
+                elif (cx, cy) not in volume:
+                    return False
+        if swim_style == "float":
+            return any(
+                all(
+                    (px_, py_) in volume
+                    for px_ in (bx, bx + 1)
+                    for py_ in (by, by + 1)
+                )
+                for bx in (x - 1, x)
+                for by in (y - 1, y)
+            )
+        return True
+
+    return any(_fits(x, y) for x, y in volume)
+
+
+#: How far a checkpoint may be snapped to the nearest valid column — a
+#: checkpoint's exact column within a few tiles carries no design intent.
+MAX_CHECKPOINT_SNAP = 8
+
+
+def snap_checkpoints(
+    text: str,
+    width: int,
+    height: int,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> tuple[str, list[str]]:
+    """Repair TOOL for misplaced checkpoints: rewrite ``checkpoint(x)``
+    ops whose column has no floor beneath it (or whose standing cell is
+    occupied, e.g. by a spike) to the nearest valid column within
+    ``MAX_CHECKPOINT_SNAP``.
+
+    Code-for-computation: the second real run's l3 burned all three
+    attempts on checkpoint placement while the validator recited the
+    exact list of valid columns — a lookup code can do. WHERE roughly a
+    checkpoint goes is the agent's design; WHICH exact column has floor
+    under it is arithmetic. Ops with no valid column nearby are left
+    untouched so the informative stamp error reaches the agent.
+
+    Returns ``(text, moves)`` — ``moves`` describes each snap for the log.
+    """
+    import re
+
+    from examples.platformer_pack.dsl import DslError, parse_dsl, stamp
+
+    ops = parse_dsl(text)  # may raise DslError — caller's feedback path
+    checkpoint_xs = [args[0] for name, args in ops if name == "checkpoint"]
+    if not checkpoint_xs:
+        return text, []
+    without = "\n".join(
+        line
+        for line in text.splitlines()
+        if not re.match(r"\s*checkpoint\(", line)
+    )
+    try:
+        result = stamp(without, width, height, tiles=tiles)
+    except DslError:
+        return text, []  # deeper problems; let the real stamp explain
+    grid = result.grid
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = next(t.id for t in tiles.tiles if t.name == "floor")
+
+    def _valid(col: int, taken: set[int]) -> bool:
+        return (
+            0 <= col < width
+            and col not in taken
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    moves: list[str] = []
+    taken: set[int] = set()
+    for x in checkpoint_xs:
+        if _valid(x, taken):
+            taken.add(x)
+            continue
+        snapped = next(
+            (
+                c
+                for d in range(1, MAX_CHECKPOINT_SNAP + 1)
+                for c in (x - d, x + d)
+                if _valid(c, taken)
+            ),
+            None,
+        )
+        if snapped is None:
+            taken.add(x)  # unfixable here — stamp's error is the feedback
+            continue
+        taken.add(snapped)
+        text = re.sub(
+            rf"checkpoint\(\s*{x}\s*\)", f"checkpoint({snapped})", text, count=1
+        )
+        moves.append(f"checkpoint({x}) -> checkpoint({snapped})")
+    return text, moves
+
+
+#: How far the spawn may be snapped to the nearest valid column. Wider
+#: than the checkpoint bound: the first real multi-stage run lost THREE
+#: levels to fallback where the final attempt failed ONLY on spawn
+#: placement (the agent kept building terrain over its own spawn; the
+#: nearest floored column was up to 8 away). The spawn's exact column
+#: carries little design intent — the level flows left→right regardless.
+MAX_SPAWN_SNAP = 16
+
+
+def snap_spawn(
+    text: str,
+    width: int,
+    height: int,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> tuple[str, list[str]]:
+    """Repair TOOL for a misplaced spawn: rewrite ``spawn(x)`` when its
+    standing cell is occupied or its column has no ground floor, to the
+    nearest valid column within ``MAX_SPAWN_SNAP`` (skipping the exit's
+    column — spawning on the exit would insta-win the level).
+
+    Same contract as :func:`snap_checkpoints`: WHERE roughly the level
+    starts is the agent's design; WHICH exact column is standable is
+    arithmetic. An unfixable spawn is left untouched so the informative
+    stamp error reaches the agent. Returns ``(text, moves)``.
+    """
+    import re
+
+    from examples.platformer_pack.dsl import DslError, parse_dsl, stamp
+
+    ops = parse_dsl(text)  # may raise DslError — caller's feedback path
+    spawn_xs = [args[0] for name, args in ops if name == "spawn"]
+    exit_xs = {args[0] for name, args in ops if name == "exit"}
+    if len(spawn_xs) != 1:
+        return text, []  # missing/duplicated spawn: stamp's error explains
+    try:
+        # Terrain-only probe (markers unvalidated): the point is to see
+        # what the program BUILT so a valid spawn column can be chosen.
+        result = stamp(text, width, height, tiles=tiles, validate_markers=False)
+    except DslError:
+        return text, []  # deeper problems; let the real stamp explain
+    grid = result.grid
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = next(t.id for t in tiles.tiles if t.name == "floor")
+
+    def _valid(col: int) -> bool:
+        return (
+            0 <= col < width
+            and col not in exit_xs
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    x = spawn_xs[0]
+    if _valid(x):
+        return text, []
+    snapped = next(
+        (
+            c
+            for d in range(1, MAX_SPAWN_SNAP + 1)
+            for c in (x - d, x + d)
+            if _valid(c)
+        ),
+        None,
+    )
+    if snapped is None:
+        return text, []
+    text = re.sub(rf"spawn\(\s*{x}\s*\)", f"spawn({snapped})", text, count=1)
+    return text, [f"spawn({x}) -> spawn({snapped})"]
 
 
 #: Bound on deterministic bridge insertions per level — far above any
@@ -336,6 +595,7 @@ def auto_bridge(
         problems = check_level(
             result.grid, result.spawn, result.exit, movement,
             rules=rules, tiles=tiles, triggers=result.triggers,
+            free_volume=result.free_volume,
         )
         if not problems:
             return text, added, []
@@ -352,86 +612,274 @@ def auto_bridge(
         if nearest is None:  # pragma: no cover — guarded by check_level
             return text, added, problems
         op = _suggest_bridge(result.grid, frontier, nearest, movement)
+        if op is None or op in added:
+            # No valid bridge exists, or the last one changed nothing —
+            # give the problems to the agent instead of burning the bound
+            # on a dead op (the first real run's l1/l3 failure mode).
+            return text, added, problems
         text = f"{text}\n# auto-bridge\n{op}"
         added.append(op)
+
+
+#: How far a spawn-crowding placement may be column-nudged to the nearest
+#: valid cell — WHERE an enemy roughly goes is design; the exact clear
+#: column is arithmetic (the snap_checkpoints precedent).
+MAX_PLACEMENT_NUDGE = 8
 
 
 def check_placements(
     grid,
     placements: list[dict],
     spawn: tuple[int, int],
-    archetypes: dict[str, str],
+    enemies: dict[str, dict],
     rules: GameRules = DEFAULT_RULES,
     tiles: TileRegistry = DEFAULT_TILES,
     variants: VariantSet = DEFAULT_VARIANTS,
-) -> tuple[list[dict], list[str]]:
-    """Split proposed placements into (accepted, problem strings).
+    combat: CombatSpec = DEFAULT_COMBAT,
+) -> tuple[list[dict], list[str], list[str]]:
+    """Split proposed placements into (accepted, problems, repairs).
 
+    ``enemies`` maps enemy id → ``{"archetype": str, "size": float}``
+    plus optional ecology keys ``"swim_style"`` ("within"/"surface"/
+    "float" — swimmer sub-behavior: surface-riders anchor on the water's
+    TOP row with open air above, floaters need a 2x2 water pocket to
+    drift in) and ``"rarity"`` (per-level at-most-N caps from
+    ``GameRules.rarity_caps`` — what makes rares rare on the ground).
     Rules: known enemy id; the game's ``enemy_water_policy`` decides who
-    may occupy volume cells; not within 3 columns of spawn on the spawn
-    row (no spawn-camping). ``variant`` names must come from the game's
-    variant vocabulary and respect ``GameRules.variant_caps`` (per level).
-    A legacy boolean ``elite`` maps to ``variant: "elite"``.
+    may occupy volume cells; the FULL footprint of the effective size
+    (definition size × variant size — ``combat.occupancy``: two supported
+    columns at 2.0, ``ceil(size)`` rows of clearance) must fit, with
+    failures naming the located cell; ``variant`` names must come from
+    the game's variant vocabulary and respect ``GameRules.variant_caps``
+    (per level). A legacy boolean ``elite`` maps to ``variant: "elite"``.
+
+    Spawn safety (no enemy within ``combat.spawn_safety_columns`` of the
+    spawn column on the spawn row) is a CODE REPAIR, never LLM feedback:
+    violators are column-nudged to the nearest cell that fits their whole
+    body outside the radius (up to ``MAX_PLACEMENT_NUDGE``), recorded in
+    ``repairs``; only an un-nudgeable placement kicks back.
     """
     stand = standable_cells(grid, tiles)
     volume = volume_cells(grid, tiles)
+    height, width = grid.shape
+    empty_id = tiles.empty_id
     accepted: list[dict] = []
     problems: list[str] = []
+    repairs: list[str] = []
     variant_counts: dict[str, int] = {}
+    rarity_counts: dict[str, int] = {}
+
+    def _cell_name(cx: int, cy: int) -> str:
+        tile = tiles.by_id.get(int(grid[cy, cx]))
+        return tile.name.upper() if tile else str(int(grid[cy, cx]))
+
+    def _footprint_problem(
+        eid: str, x: int, y: int, archetype: str, eff: float,
+        swim_style: str = "",
+    ) -> str | None:
+        """None if a body of effective size ``eff`` fits anchored at
+        (x, y) — anchor row cells per column, clearance rows above.
+        Messages name the LOCATED failing cell."""
+        cols, rows = occupancy(eff)
+        cell = (x, y)
+        is_swimmer = archetype == "swimmer"
+        is_surface = is_swimmer and swim_style == "surface"
+        policy = rules.enemy_water_policy
+        if is_surface:
+            # Surface-riders anchor ON the water's top row (open above).
+            for cx in range(x, x + cols):
+                if not (0 <= cx < width and 0 <= y < height):
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) does not fit: "
+                        f"column {cx} is outside the level."
+                    )
+                if (cx, y) not in volume or (cx, y - 1) in volume:
+                    return (
+                        f"{eid} is a SURFACE swimmer — it rides the top row "
+                        f"of the water, but ({cx}, {y}) is not a water "
+                        "surface cell (water with open air above). Place it "
+                        "on the water's top row."
+                    )
+                for cy in range(y - 1, y - rows, -1):
+                    if cy < 0 or int(grid[cy, cx]) != empty_id:
+                        return (
+                            f"{eid} at {cell} (size {eff:g}) rides the "
+                            f"surface and needs open air above, but cell "
+                            f"({cx}, {max(cy, 0)}) blocks it."
+                        )
+            return None
+        if is_swimmer and swim_style == "float" and policy != "forbidden":
+            # Floaters drift diagonally — they need a 2x2 water pocket
+            # around the anchor, plus the normal full-body-in-water rule
+            # below.
+            has_pocket = any(
+                all(
+                    (px_, py_) in volume
+                    for px_ in (bx, bx + 1)
+                    for py_ in (by, by + 1)
+                )
+                for bx in (x - 1, x)
+                for by in (y - 1, y)
+            )
+            if not has_pocket:
+                return (
+                    f"{eid} is a FLOATING swimmer — it drifts diagonally "
+                    f"and needs a 2x2 pocket of water around {cell}, but "
+                    "the water there is too shallow or narrow. Place it in "
+                    "a deeper, wider body of water."
+                )
+        big = f" Its size-{eff:g} body spans columns {x}-{x + cols - 1}" \
+              f" and {rows} row(s) up." if (cols, rows) != (1, 1) else ""
+        for cx in range(x, x + cols):
+            if not (0 <= cx < width and 0 <= y < height):
+                return (
+                    f"{eid} at {cell} (size {eff:g}) does not fit: column "
+                    f"{cx} is outside the {width}x{grid.shape[0]} level."
+                )
+            base = (cx, y)
+            if policy == "forbidden" and base in volume:
+                return (
+                    f"{eid} at {cell} is in water and this game forbids "
+                    "enemies in water — place it on land." + big
+                )
+            if policy == "swimmers_only" and is_swimmer:
+                if base not in volume:
+                    where = (
+                        ""
+                        if base == cell
+                        else f" (cell ({cx}, {y}) of its body)"
+                    )
+                    return (
+                        f"{eid} is a swimmer and {cell} is not a water "
+                        f"cell{where} — swimmers must be placed inside "
+                        "water, with room for their whole body." + big
+                    )
+            elif policy in ("swimmers_only", "forbidden"):
+                if base not in stand:
+                    hint = (
+                        " (that's a water cell — only swimmers go in water)"
+                        if base in volume
+                        else ""
+                    )
+                    where = (
+                        ""
+                        if base == cell
+                        else f" — its size needs column {cx} standable too,"
+                        f" and ({cx}, {y}) is {_cell_name(cx, y)}"
+                    )
+                    return (
+                        f"{eid} at {cell} is not a standable cell{hint}"
+                        f"{where} — land enemies need solid ground below "
+                        "and a free cell to occupy." + big
+                    )
+            elif base not in stand and base not in volume:
+                return (
+                    f"{eid} at {cell} is neither standable nor in water."
+                    + big
+                )
+            # Clearance rows above the anchor row, this column.
+            for cy in range(y - 1, y - rows, -1):
+                if cy < 0:
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) needs {rows} rows "
+                        f"of clearance and column {cx} runs off the top of "
+                        "the level — place it lower."
+                    )
+                val = int(grid[cy, cx])
+                if policy == "amphibious":
+                    clear = val == empty_id or (cx, cy) in volume
+                elif is_swimmer and policy == "swimmers_only":
+                    clear = (cx, cy) in volume
+                else:
+                    clear = val == empty_id
+                if not clear:
+                    need = (
+                        "water"
+                        if is_swimmer and policy == "swimmers_only"
+                        else "open air"
+                    )
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) needs {need} for "
+                        f"{rows} rows, but cell ({cx}, {cy}) is "
+                        f"{_cell_name(cx, cy)} — that located cell blocks "
+                        "its body; move it to more open ground." + big
+                    )
+        return None
+
     for p in placements:
         eid, x, y = p.get("enemy_id"), p.get("x"), p.get("y")
-        if eid not in archetypes:
+        if eid not in enemies:
             problems.append(
-                f"unknown enemy_id {eid!r}; roster: {sorted(archetypes)!r}."
+                f"unknown enemy_id {eid!r}; roster: {sorted(enemies)!r}."
             )
             continue
         if not isinstance(x, int) or not isinstance(y, int):
             problems.append(f"{eid} placement needs integer x and y; got {p!r}.")
             continue
         cell = (x, y)
-        is_swimmer = archetypes[eid] == "swimmer"
-        if rules.enemy_water_policy == "forbidden" and cell in volume:
-            problems.append(
-                f"{eid} at {cell} is in water and this game forbids enemies "
-                "in water — place it on land."
-            )
-            continue
-        if rules.enemy_water_policy == "swimmers_only":
-            if is_swimmer and cell not in volume:
-                problems.append(
-                    f"{eid} is a swimmer and {cell} is not a water cell — "
-                    "swimmers must be placed inside water."
-                )
-                continue
-            if not is_swimmer and cell not in stand:
-                hint = (
-                    " (that's a water cell — only swimmers go in water)"
-                    if cell in volume
-                    else ""
-                )
-                problems.append(
-                    f"{eid} at {cell} is not a standable cell{hint} — land "
-                    "enemies need solid ground below and a free cell to occupy."
-                )
-                continue
-        elif cell not in stand and cell not in volume:
-            problems.append(
-                f"{eid} at {cell} is neither standable nor in water."
-            )
-            continue
-        if y == spawn[1] and abs(x - spawn[0]) <= 3:
-            problems.append(f"{eid} at {cell} is too close to spawn {spawn}.")
-            continue
+        archetype = str(enemies[eid].get("archetype", ""))
+        swim_style = str(enemies[eid].get("swim_style", "") or "")
         variant = str(p.get("variant") or "")
         if not variant and p.get("elite"):
             variant = "elite"  # pre-3b spelling rides through
-        if variant:
-            if variant not in variants.by_name:
+        if variant and variant not in variants.by_name:
+            problems.append(
+                f"{eid} at {cell} names unknown variant {variant!r}; "
+                f"this game's variants: {sorted(variants.by_name)!r}."
+            )
+            continue
+        eff = effective_size(
+            float(enemies[eid].get("size", 1.0) or 1.0),
+            variants.by_name[variant].size if variant else 1.0,
+        )
+        issue = _footprint_problem(eid, x, y, archetype, eff, swim_style)
+        if issue is not None:
+            problems.append(issue)
+            continue
+        rarity = str(enemies[eid].get("rarity", "") or "")
+        rarity_cap = getattr(rules, "rarity_caps", {}).get(rarity)
+        if rarity_cap is not None and rarity_counts.get(rarity, 0) >= rarity_cap:
+            problems.append(
+                f"{eid} at {cell}: at most {rarity_cap} {rarity!r} "
+                "enemy placement(s) allowed per level (rarity cap) — "
+                "pick a more common creature for this spot."
+            )
+            continue
+        if rarity:
+            rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+        radius = combat.spawn_safety_columns
+        if y == spawn[1] and abs(x - spawn[0]) <= radius:
+            # Column nudge outward on the side the agent chose, falling
+            # back to the other side — the first column where the WHOLE
+            # body fits outside the radius wins.
+            direction = 1 if x >= spawn[0] else -1
+            nudged = next(
+                (
+                    nx
+                    for d in range(1, MAX_PLACEMENT_NUDGE + 1)
+                    for nx in (x + direction * d, x - direction * d)
+                    if 0 <= nx < width
+                    and abs(nx - spawn[0]) > radius
+                    and _footprint_problem(eid, nx, y, archetype, eff, swim_style)
+                    is None
+                ),
+                None,
+            )
+            if nudged is None:
                 problems.append(
-                    f"{eid} at {cell} names unknown variant {variant!r}; "
-                    f"this game's variants: {sorted(variants.by_name)!r}."
+                    f"{eid} at {cell} is within {radius} columns of the "
+                    f"player spawn {spawn} and no clear column within "
+                    f"{MAX_PLACEMENT_NUDGE} fits its size-{eff:g} body — "
+                    "place it further from spawn."
                 )
                 continue
+            repairs.append(
+                f"{eid}: ({x}, {y}) -> ({nudged}, {y}) — spawn-safety "
+                f"nudge (enemies keep {radius} columns clear of spawn; "
+                "the spot was the agent's, the column is arithmetic)."
+            )
+            x = nudged
+        if variant:
             cap = rules.variant_caps.get(variant)
             if cap is not None and variant_counts.get(variant, 0) >= cap:
                 problems.append(
@@ -444,4 +892,4 @@ def check_placements(
         accepted.append(
             {"enemy_id": eid, "x": x, "y": y, "variant": variant}
         )
-    return accepted, problems
+    return accepted, problems, repairs

@@ -334,6 +334,7 @@ def _orchestrated_run(
     phases_spec: str | None,
     max_concurrency: int | None,
     skip_edit_check: bool,
+    extra_payload: dict | None = None,
 ) -> None:
     """Shared body of `canon run` and `canon resume` — resume IS run:
     completed nodes are skipped from bible.metadata.node_status."""
@@ -389,6 +390,7 @@ def _orchestrated_run(
             "report": report.to_dict(),  # type: ignore[possibly-unbound]
             "edit_detection": edit_report,
             "bible": str(path),
+            **(extra_payload or {}),
         }
     )
     if not report.ok:  # type: ignore[possibly-unbound]
@@ -417,6 +419,104 @@ def run_pipeline_cmd(
     _orchestrated_run(path, pipeline, phases, max_concurrency, skip_edit_check)
 
 
+@app.command("regen")
+def regen_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+    targets: list[str] = typer.Argument(
+        ...,
+        help="What to regenerate: a level id (l2 — every step of that "
+        "level), a step artifact id (level:<stage>/<lid>/entities), or a "
+        "phase node id (phase:plat:style). Descendants re-run via the "
+        "stale cascade; user-edited artifacts are never destroyed by the "
+        "cascade (only an explicit target overrides an edit).",
+    ),
+    pipeline: str | None = typer.Option(None, "--pipeline"),
+    phases: str | None = typer.Option(None, "--phases"),
+    max_concurrency: int | None = typer.Option(None, "--max-concurrency"),
+    mark_only: bool = typer.Option(
+        False, "--mark-only",
+        help="Mark targets stale and persist, but don't run — inspect "
+        "with `canon status`, then `canon resume`.",
+    ),
+    field_ops: str | None = typer.Option(
+        None, "--field-ops",
+        help="module:attr resolving to a callable(ctx, target) -> dict "
+        "for FIELD targets (parts of rows, '<artifact_id>#<field>' — "
+        "e.g. enemy:ashwalker#flavor).",
+    ),
+) -> None:
+    """Re-roll specific artifacts (mark stale + resume — only they
+    re-run, PRD §7.5) or FIELDS within one ('#' targets, via --field-ops)."""
+    try:
+        from canon.pipeline.orchestrator import mark_stale
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    node_targets = [t for t in targets if "#" not in t]
+    field_targets = [t for t in targets if "#" in t]
+
+    field_results: list[dict] = []
+    if field_targets:
+        if not pipeline:
+            _emit_error("Field targets need --pipeline (LLM + adapter).")
+        if not field_ops:
+            _emit_error(
+                "Field targets need --field-ops (module:attr -> "
+                "callable(ctx, target) -> dict).",
+                field_targets=field_targets,
+            )
+        try:
+            handler = _resolve_module_attr(field_ops)  # type: ignore[arg-type]
+            ctx = _resolve_module_attr(pipeline)(bible)  # type: ignore[arg-type,misc]
+        except Exception as e:
+            _emit_error(f"Failed to build field-regen context: {e}")
+        for target in field_targets:
+            try:
+                field_results.append(handler(ctx, target))  # type: ignore[possibly-unbound]
+            except KeyError as e:
+                _emit_error(
+                    str(e.args[0]) if e.args else str(e), target=target
+                )
+            except Exception as e:
+                _emit_error(
+                    f"Field regen failed for {target!r}: {e}",
+                    traceback=traceback.format_exc(),
+                )
+
+    plan = None
+    if node_targets:
+        try:
+            plan = mark_stale(bible, node_targets)  # type: ignore[possibly-unbound]
+        except KeyError as e:
+            _emit_error(
+                str(e.args[0]) if e.args else str(e), targets=node_targets
+            )
+    try:
+        bible.persist(path)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to persist regen state: {e}")
+
+    regen_payload = {
+        "regen": plan.to_dict() if plan else None,
+        "fields": field_results or None,
+    }
+    if mark_only or not node_targets:
+        result = "marked" if (mark_only and node_targets) else "ok"
+        _emit({"result": result, **regen_payload, "bible": str(path)})
+        return
+    _orchestrated_run(
+        path, pipeline, phases, max_concurrency, skip_edit_check=False,
+        extra_payload=regen_payload,
+    )
+
+
 @app.command("resume")
 def resume_cmd(
     path: Path = typer.Argument(..., help="Path to bible JSON file."),
@@ -427,6 +527,115 @@ def resume_cmd(
 ) -> None:
     """Alias for `run` — resume after a failure, edit, or gate pause."""
     _orchestrated_run(path, pipeline, phases, max_concurrency, skip_edit_check)
+
+
+@app.command("pin")
+def pin_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+    artifact_ids: list[str] | None = typer.Argument(
+        None,
+        help="ART artifact ids to protect (tileset:<stage>, enemy:<id>, "
+        "backdrop:<stage>, player). Pinned content is skipped by regen "
+        "cascades AND by the art phases — a paid asset you like stays "
+        "exactly as it is. Level steps are not pinnable: hand-edit the "
+        "layer file instead (USER_EDITED protection).",
+    ),
+    list_only: bool = typer.Option(
+        False, "--list", help="Show what's pinned and what's pinnable.",
+    ),
+) -> None:
+    """Protect artifacts from regeneration (`canon unpin` reverses)."""
+    try:
+        from canon.bible.artifacts import ArtifactStatus
+        from canon.pipeline.orchestrator import pinnable_ids, pinned_ids
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    pinned = pinned_ids(bible)  # type: ignore[possibly-unbound]
+    pinnable = pinnable_ids(bible)  # type: ignore[possibly-unbound]
+    if list_only or not artifact_ids:
+        _emit({
+            "pinned": sorted(pinned),
+            "pinnable": sorted(pinnable),
+            "bible": str(path),
+        })
+        return
+
+    unknown = sorted(set(artifact_ids) - pinnable)
+    if unknown:
+        # Atomic: reject the whole request before any mutation.
+        _emit_error(
+            f"not pinnable: {unknown} — pinnable ids are the hash-tracked "
+            "artifacts (see `canon pin <bible> --list`).",
+            pinnable=sorted(pinnable),
+        )
+
+    added = sorted(set(artifact_ids) - pinned)
+    already = sorted(set(artifact_ids) & pinned)
+    stale_cleared: list[str] = []
+    status = bible.metadata.node_status  # type: ignore[possibly-unbound]
+    for aid in added:
+        # A stale mark would still reschedule the owning phase via `owns`
+        # and defeat the pin — pinning an already-marked artifact clears it.
+        if status.get(aid) is ArtifactStatus.STALE:  # type: ignore[possibly-unbound]
+            status[aid] = ArtifactStatus.DONE  # type: ignore[possibly-unbound]
+            stale_cleared.append(aid)
+    bible.metadata.pinned = sorted(pinned | set(added))  # type: ignore[possibly-unbound]
+    try:
+        bible.persist(path)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to persist pins: {e}")
+    _emit({
+        "result": "pinned",
+        "pinned": added,
+        "already_pinned": already,
+        "stale_cleared": stale_cleared,
+        "bible": str(path),
+    })
+
+
+@app.command("unpin")
+def unpin_cmd(
+    path: Path = typer.Argument(..., help="Path to bible JSON file."),
+    artifact_ids: list[str] = typer.Argument(
+        ..., help="Pinned artifact ids to release (idempotent).",
+    ),
+) -> None:
+    """Release pinned artifacts. Status is untouched — nothing re-rolls
+    until explicitly targeted or reached by a future cascade."""
+    try:
+        from canon.pipeline.orchestrator import pinned_ids
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+
+    if not path.exists():
+        _emit_error(f"File not found: {path}", path=str(path))
+    try:
+        bible = Bible.load(path)
+    except Exception as e:
+        _emit_error(f"Failed to load bible: {e}", path=str(path))
+
+    pinned = pinned_ids(bible)  # type: ignore[possibly-unbound]
+    removed = sorted(pinned & set(artifact_ids))
+    not_pinned = sorted(set(artifact_ids) - pinned)
+    bible.metadata.pinned = sorted(pinned - set(removed))  # type: ignore[possibly-unbound]
+    try:
+        bible.persist(path)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(f"Failed to persist pins: {e}")
+    _emit({
+        "result": "unpinned",
+        "unpinned": removed,
+        "not_pinned": not_pinned,
+        "bible": str(path),
+    })
 
 
 @app.command("status")
@@ -447,6 +656,7 @@ def status_cmd(
     counts: dict[str, int] = {}
     for value in node_status.values():
         counts[value] = counts.get(value, 0) + 1
+    pinned = set(getattr(bible.metadata, "pinned", None) or ())  # type: ignore[possibly-unbound]
     _emit(
         {
             "phases_run": bible.metadata.phases_run,  # type: ignore[possibly-unbound]
@@ -455,9 +665,13 @@ def status_cmd(
             },
             "node_counts": counts,
             "node_status": node_status,
+            "pinned": sorted(pinned),
+            # Pinned ids are deliberate state, not attention items —
+            # unless the file was hand-edited under the pin.
             "attention": sorted(
                 nid for nid, s in node_status.items()
                 if s in ("escalated", "stale", "user_edited", "awaiting_review")
+                and (nid not in pinned or s == "user_edited")
             ),
         }
     )

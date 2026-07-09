@@ -1,0 +1,31 @@
+{
+  "artifact_id": "enemy:gilt_wanderer",
+  "status": "pending",
+  "provenance_hash": "sha256:0c333d1c7873f29cc80fb3126f5e5ad55d520d14e6cdebc38389b873a8d926ed",
+  "parents": [
+    "world"
+  ],
+  "enemy_id": "gilt_wanderer",
+  "name": "Gilt Wanderer",
+  "archetype": "patroller",
+  "size": 1.5,
+  "rarity": "uncommon",
+  "habitats": [
+    "*"
+  ],
+  "stats": {
+    "hp": 9,
+    "damage": 1,
+    "speed": 2,
+    "flavor": "A plump, gilded beetle that ambles unhurriedly across every corner of the kingdom, its polished shell catching sunlight as it patrols back and forth with self-important dignity.",
+    "placeholder_color": "#5cf235"
+  },
+  "behavior": {
+    "patrol_range": 4,
+    "aggro_range": 0
+  },
+  "rig": null,
+  "portrait_path": "",
+  "sprite_path": "sprite/enemy/gilt_wanderer/base.png",
+  "sprite_hash": "sha256:0dea762590c80bf1072a4d998411b6a5c225c63f765c758ec1ddcd32514a5da2"
+}

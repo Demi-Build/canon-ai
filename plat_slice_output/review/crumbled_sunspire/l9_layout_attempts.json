@@ -1,0 +1,34 @@
+{
+  "level_id": "l9",
+  "stage_id": "crumbled_sunspire",
+  "grid_width": 82,
+  "grid_height": 21,
+  "difficulty": 3,
+  "fallback": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "failed_validation",
+      "reasons": [
+        "volume: column 5 at surface row 18 is occupied by floor \u2014 the surface row must be open air. Pick an open surface row above the terrain."
+      ],
+      "content": "floor(0,81)\ngap(10,12)\ngap(28,30)\nstairs_up(3,9)\nstairs_down(31,37)\nplatform(13,14,4)\nplatform(20,13,5)\nledge(40,50,16)\nledge(52,62,13)\nledge(64,74,16)\ncarve(40,14,50,15)\ncarve(52,11,62,12)\ncarve(64,14,74,15)\nwall(39,16,19)\nwall(51,13,19)\nwall(63,16,19)\nhazard_strip(spike,42,45)\nhazard_strip(spike,55,58)\nhazard_strip(spike,67,70)\npool(water,5,8)\nwall(4,17,19)\nwall(9,17,19)\nvolume(water,5,8,18)\npool(water,76,79)\nwall(75,17,19)\nwall(80,17,19)\nvolume(water,76,79,18)\ncheckpoint(38)\nspawn(1)\nexit(80)"
+    },
+    {
+      "attempt": 2,
+      "outcome": "failed_validation",
+      "reasons": [
+        "volume: column 5 at surface row 17 is occupied by floor \u2014 the surface row must be open air. Pick an open surface row above the terrain."
+      ],
+      "content": "floor(0,81)\ngap(10,12)\ngap(28,30)\nstairs_up(3,9)\nstairs_down(31,37)\nplatform(13,14,4)\nplatform(20,13,5)\nledge(40,50,16)\nledge(52,62,13)\nledge(64,74,16)\ncarve(40,14,50,15)\ncarve(52,11,62,12)\ncarve(64,14,74,15)\nwall(39,16,19)\nwall(51,13,19)\nwall(63,16,19)\nhazard_strip(spike,42,45)\nhazard_strip(spike,55,58)\nhazard_strip(spike,67,70)\nwall(4,17,19)\nwall(9,17,19)\nvolume(water,5,8,17)\nwall(75,17,19)\nwall(80,17,19)\nvolume(water,76,79,17)\ncheckpoint(38)\nspawn(1)\nexit(80)"
+    },
+    {
+      "attempt": 3,
+      "outcome": "failed_validation",
+      "reasons": [
+        "volume: column 5 at surface row 17 is occupied by floor \u2014 the surface row must be open air. Pick an open surface row above the terrain."
+      ],
+      "content": "floor(0,81)\ngap(10,12)\ngap(28,30)\nstairs_up(3,9)\nstairs_down(31,37)\nplatform(13,14,4)\nplatform(20,13,5)\nledge(40,50,16)\nledge(52,62,13)\nledge(64,74,16)\ncarve(40,14,50,15)\ncarve(52,11,62,12)\ncarve(64,14,74,15)\nwall(39,16,19)\nwall(51,13,19)\nwall(63,16,19)\nhazard_strip(spike,42,45)\nhazard_strip(spike,55,58)\nhazard_strip(spike,67,70)\nwall(4,17,19)\nwall(9,17,19)\nwall(75,17,19)\nwall(80,17,19)\nvolume(water,5,8,17)\nvolume(water,76,79,17)\ncheckpoint(38)\nspawn(1)\nexit(80)"
+    }
+  ]
+}

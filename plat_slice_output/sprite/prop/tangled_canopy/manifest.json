@@ -1,0 +1,18 @@
+{
+  "artifact_id": "props:tangled_canopy",
+  "status": "pending",
+  "provenance_hash": "",
+  "parents": [
+    "stage:tangled_canopy",
+    "phase:plat:style"
+  ],
+  "stage_id": "tangled_canopy",
+  "prop_paths": {
+    "checkpoint": "sprite/prop/tangled_canopy/checkpoint.png",
+    "exit": "sprite/prop/tangled_canopy/exit.png"
+  },
+  "prop_hashes": {
+    "sprite/prop/tangled_canopy/checkpoint.png": "sha256:4767d4aac0e722a807f0b1c22eae2690037f49dea440c584e9d0071f70dd71d3",
+    "sprite/prop/tangled_canopy/exit.png": "sha256:d66c3fb7f6afa2377f15325a4c187095bd90f6e071748acb54bf1925bf9a7bfc"
+  }
+}

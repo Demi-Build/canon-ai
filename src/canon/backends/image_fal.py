@@ -14,6 +14,8 @@ Code that only needs to check availability can use the lazy re-export from
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,7 +25,37 @@ if TYPE_CHECKING:
 
 # TODO(v0.2.x): track per-call cost when fal exposes it; today self.last_cost stays 0
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "fal-ai/nano-banana"
+
+#: nano-banana takes an ``aspect_ratio`` enum and IGNORES ``image_size``
+#: (unknown arguments pass silently) — discovered on the first real
+#: backdrop run: a 512x256 band request came back 1024x1024, a square
+#: scene whose white misty bottom stretched into a bar behind every
+#: playfield. Values from the published input schema.
+NANO_BANANA_RATIOS: dict[str, float] = {
+    "21:9": 21 / 9,
+    "16:9": 16 / 9,
+    "3:2": 3 / 2,
+    "4:3": 4 / 3,
+    "5:4": 5 / 4,
+    "1:1": 1.0,
+    "4:5": 4 / 5,
+    "3:4": 3 / 4,
+    "2:3": 2 / 3,
+    "9:16": 9 / 16,
+}
+
+
+def closest_aspect_ratio(width: int, height: int) -> str:
+    """The supported enum value nearest the requested aspect (log-scale,
+    so 2:1 compares fairly against both 16:9 and 21:9)."""
+    target = math.log(width / height)
+    return min(
+        NANO_BANANA_RATIOS,
+        key=lambda name: abs(math.log(NANO_BANANA_RATIOS[name]) - target),
+    )
 
 
 class FalImageBackend:
@@ -64,6 +96,19 @@ class FalImageBackend:
             pass
         self.last_cost: float = 0.0
 
+    def _arguments(self, prompt: str, width: int, height: int) -> dict:
+        """Request arguments per model dialect: ``image_size`` for models
+        that honor it; nano-banana additionally gets the closest
+        ``aspect_ratio`` enum value (its only size control — it silently
+        ignores ``image_size``)."""
+        arguments: dict = {
+            "prompt": prompt,
+            "image_size": {"width": width, "height": height},
+        }
+        if "nano-banana" in self.model:
+            arguments["aspect_ratio"] = closest_aspect_ratio(width, height)
+        return arguments
+
     def generate(self, prompt: str, width: int, height: int) -> bytes:
         """Sync image generation.
 
@@ -73,14 +118,16 @@ class FalImageBackend:
             height: Image height in pixels.
 
         Returns:
-            Raw image bytes (typically PNG or JPEG depending on model).
+            Raw image bytes, conformed to exactly ``width`` x ``height``
+            (models are advisory about size; the contract is enforced here
+            in code — see ``_conform_size``).
         """
         result = self._fal.subscribe(
             self.model,
-            arguments={"prompt": prompt, "image_size": {"width": width, "height": height}},
+            arguments=self._arguments(prompt, width, height),
         )
         url = self._extract_image_url(result)
-        return self._download_url(url)
+        return self._conform_size(self._download_url(url), width, height)
 
     async def generate_async(self, prompt: str, width: int, height: int) -> bytes:
         """Async image generation via ``fal_client.subscribe_async``.
@@ -91,15 +138,15 @@ class FalImageBackend:
             height: Image height in pixels.
 
         Returns:
-            Raw image bytes.
+            Raw image bytes, conformed to exactly ``width`` x ``height``.
         """
         result = await self._fal.subscribe_async(
             self.model,
-            arguments={"prompt": prompt, "image_size": {"width": width, "height": height}},
+            arguments=self._arguments(prompt, width, height),
         )
         url = self._extract_image_url(result)
         # NOTE: download is sync via urllib; could be async with httpx in v0.3
-        return self._download_url(url)
+        return self._conform_size(self._download_url(url), width, height)
 
     def generate_and_save(
         self, prompt: str, filepath: str, width: int, height: int
@@ -145,6 +192,43 @@ class FalImageBackend:
             img = result["image"]
             return img.get("url", "") if isinstance(img, dict) else img
         raise ValueError(f"Unexpected fal response shape: {list(result.keys())}")
+
+    @staticmethod
+    def _conform_size(data: bytes, width: int, height: int) -> bytes:
+        """Enforce the ``ImageBackend`` size contract in code: models treat
+        the request as advisory (nano-banana returns ~1MP at an enum
+        aspect), so any mismatch is center-cropped to the requested aspect
+        and resized to exactly ``width`` x ``height``. Undecodable bytes
+        pass through untouched — the consumer's per-asset fallback owns
+        that failure, with its existing loud warning."""
+        import io
+
+        try:
+            from PIL import Image
+        except ImportError:  # pragma: no cover — pack installs Pillow
+            return data
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        except Exception:  # noqa: BLE001 — non-image payload: pass through
+            return data
+        if img.size == (width, height):
+            return data
+        src_w, src_h = img.size
+        scale = min(src_w / width, src_h / height)
+        crop_w, crop_h = round(width * scale), round(height * scale)
+        left = (src_w - crop_w) // 2
+        top = (src_h - crop_h) // 2
+        img = img.crop((left, top, left + crop_w, top + crop_h)).resize(
+            (width, height), Image.LANCZOS
+        )
+        logger.info(
+            "fal image conformed from %dx%d to requested %dx%d "
+            "(center-crop + resize).", src_w, src_h, width, height,
+        )
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     @staticmethod
     def _download_url(url: str) -> bytes:

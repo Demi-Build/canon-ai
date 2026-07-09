@@ -1,0 +1,9 @@
+{
+  "_doc": "Per-game combat tuning (combat v1): numeric values only — policy toggles (checkpoint enemy reset, spawn grace) live in game_rules.json. Ships in manifest.json under \"combat\"; read by the placement validator and both play surfaces. Copy this file to make a different game and point the runner at it with --combat.",
+  "player_max_hearts": 3,
+  "stomp_damage": 6,
+  "stomp_bounce_factor": 0.7,
+  "hurt_iframes_s": 1.0,
+  "spawn_grace_s": 1.0,
+  "spawn_safety_columns": 3
+}
