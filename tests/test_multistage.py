@@ -4,6 +4,7 @@ world map layout, and the multi-stage DAG."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -382,6 +383,19 @@ class TestManifestV2:
         assert set(manifest["palettes"]) == set(STAGES)
         assert set(manifest["audio"]) == set(STAGES)
         assert set(manifest["props"]) == set(STAGES)
+
+    def test_world_id_keys_the_save_on_content_not_seed(self, world) -> None:
+        # The Godot save is keyed on world_id so a freshly generated world
+        # starts from level 1 instead of inheriting a same-seed run's
+        # progress. It must be content-derived, NOT the input-seed hash.
+        _, out = world
+        manifest = json.loads((out / "manifest.json").read_text())
+        wid = manifest["world_id"]
+        assert wid and len(wid) == 12
+        seed_hash = hashlib.md5(
+            manifest["seed"].encode("utf-8")
+        ).hexdigest()[:12]
+        assert wid != seed_hash, "world_id must not key on the seed"
 
     def test_per_stage_trees_on_disk(self, world) -> None:
         _, out = world

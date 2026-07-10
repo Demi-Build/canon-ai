@@ -10,6 +10,7 @@ three so play surfaces resolve the same vocabulary the validators used.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -166,10 +167,29 @@ class SliceManifestPhase:
         from examples.platformer_pack.level import world_stages
 
         stages = world_stages(ctx)
+        world_title = ctx.bible.world.title if ctx.bible.world else ""
+        # Play progress is keyed on the WORLD's CONTENT identity, not the
+        # input seed: two paid runs of the same seed produce DIFFERENT worlds
+        # (names, biomes, rosters), and each fresh world must start from
+        # level 1 rather than inherit the previous run's save (playtest —
+        # plat_kingdom3 opened on world 3 with the first levels beaten).
+        # Content-derived so it stays deterministic: a byte-identical
+        # regeneration of the SAME world keeps its save (correct for resume).
+        world_key = "|".join(
+            [
+                world_title,
+                *(s.stage_id for s in stages),
+                *(lid for s in stages for lid in s.level_ids),
+                *sorted(ctx.bible.enemy_definitions),
+            ]
+        )
+        world_id = hashlib.md5(world_key.encode("utf-8")).hexdigest()[:12]
         manifest = {
             "game": "platformer_slice",
             "seed": str(getattr(ctx.config, "seed", "")),
-            "world": ctx.bible.world.title if ctx.bible.world else "",
+            "world": world_title,
+            # Save-file key (see world_key above) — the runtime reads this.
+            "world_id": world_id,
             # World structure (multi-stage): biome stages in play order,
             # every level flattened in that same order, and the code-laid
             # map the world-map screen draws. Unlock policy is data.

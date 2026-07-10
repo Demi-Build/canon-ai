@@ -27,7 +27,10 @@ from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
 from examples.platformer_pack.effects import sanitize_effects  # noqa: E402
 from examples.platformer_pack.tileset_art import (  # noqa: E402
+    _CUTOUT_CATEGORIES,
     DiffusionSheetProducer,
+    _bottom_align,
+    conform_to_palette,
     remove_background,
 )
 from examples.run_platformer_slice import make_fake_responder  # noqa: E402
@@ -73,6 +76,83 @@ class TestRemoveBackground:
         out = remove_background(img)
         assert out.getpixel((1, 1))[3] == 0  # border transparent
         assert out.getpixel((32, 32))[3] == 255  # blob opaque
+
+    def test_only_hazards_are_cut_out(self) -> None:
+        # Only object-like tiles get their backdrop keyed; fill tiles must
+        # NOT be cut (that would punch holes in seamless terrain).
+        assert "hazard" in _CUTOUT_CATEGORIES
+        assert not (_CUTOUT_CATEGORIES & {"solid", "one_way", "volume", "empty"})
+
+    def test_conform_preserves_alpha_and_recolors_only_visible(self) -> None:
+        # A hazard drawn as an object on a backdrop (the 'spike yellow box'
+        # playtest bug): once the backdrop is cut, conform must leave it
+        # transparent AND land the VISIBLE pixels on the role hex — not the
+        # discarded backdrop.
+        img = Image.new("RGB", (64, 64), (230, 220, 120))  # yellow backdrop
+        px = img.load()
+        for y in range(20, 60):
+            for x in range(28, 36):
+                px[x, y] = (120, 30, 25)  # the spike body
+        keyed = remove_background(img)
+        out = conform_to_palette(keyed, "#d42818", levels=None)
+        assert out.mode == "RGBA"
+        assert out.getpixel((1, 1))[3] == 0  # backdrop stays transparent
+        opaque = [p for p in out.get_flattened_data() if p[3] > 0]
+        assert opaque, "the subject must survive the cut"
+        n = len(opaque)
+        mean = tuple(sum(p[i] for p in opaque) // n for i in range(3))
+        # #d42818 == (212, 40, 24); the visible mean must land on it, well
+        # inside the QA palette tolerance (48).
+        dist = sum((a - b) ** 2 for a, b in zip(mean, (212, 40, 24))) ** 0.5
+        assert dist < 48
+
+    def test_conform_opaque_fill_stays_fully_opaque(self) -> None:
+        # An RGB fill tile (no backdrop) must come out fully opaque — the
+        # alpha support must not change fill-tile behavior.
+        fill = Image.new("RGB", (32, 32), (90, 140, 60))
+        out = conform_to_palette(fill, "#5a8c3c", levels=None)
+        assert out.mode == "RGBA"
+        assert all(p[3] == 255 for p in out.get_flattened_data())
+
+    def test_bottom_align_seats_feet_on_the_frame_bottom(self) -> None:
+        # Generated sprites frame the creature with empty space below it, and
+        # the consumers bottom-anchor the frame to the floor — so enemies
+        # HOVERED (plat_kingdom3). Bottom-align must drop the content so its
+        # lowest opaque row is the frame's last row.
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for y in range(10, 31):  # a blob floating in the upper-middle
+            for x in range(24, 40):
+                img.putpixel((x, y), (200, 50, 50, 255))
+        out = _bottom_align(img)
+        alpha = out.getchannel("A")
+        assert alpha.getbbox()[3] == out.height  # content reaches the bottom
+        # x-centered and no taller than before (content preserved, not scaled).
+        assert out.size == img.size
+        # A fully-transparent frame (empty fake) is returned untouched.
+        empty = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        assert _bottom_align(empty).getchannel("A").getbbox() is None
+
+
+class TestArtDescriptors:
+    def test_sentry_sprite_reads_as_stationary(self) -> None:
+        from examples.platformer_pack.art_phases import _enemy_art_descriptor
+
+        d = _enemy_art_descriptor("sentry", "a plump spring-legged guardian")
+        assert "planted" in d and "immobile" in d
+        assert "a plump spring-legged guardian" in d
+        # A patroller reads as moving, never planted.
+        p = _enemy_art_descriptor("patroller", "a round critter")
+        assert "walk" in p and "planted" not in p
+
+    def test_player_is_a_weaponless_mascot(self) -> None:
+        from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+
+        low = PLAYER_DESCRIPTOR.lower()
+        assert "mascot" in low
+        assert "not a knight" in low
+        assert "weapon" in low
+        # 'heroic' is the term that pulled the generator toward armored knights.
+        assert "heroic" not in low
 
 
 class TestSpriteArt:

@@ -165,10 +165,14 @@ func _ready() -> void:
 	camera.make_current()
 	_load_enemy_defs()
 	map_nodes = manifest.get("world_map", {}).get("nodes", [])
-	# Progress is per-seed user state (never part of the generated tree).
-	save_path = "user://plat_save_%s.json" % str(
-		manifest.get("seed", "")
-	).md5_text().substr(0, 12)
+	# Progress is per-WORLD user state (never part of the generated tree):
+	# keyed on the manifest's content-derived world_id so a freshly generated
+	# world starts from level 1 instead of inheriting a same-seed run's save.
+	# Fall back to the old seed hash for manifests generated before world_id.
+	var world_key := str(manifest.get("world_id", ""))
+	if world_key == "":
+		world_key = str(manifest.get("seed", "")).md5_text().substr(0, 12)
+	save_path = "user://plat_save_%s.json" % world_key
 	_load_progress()
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
 	# DIRECTLY (no map, no start overlay — frame-capture runs verify any

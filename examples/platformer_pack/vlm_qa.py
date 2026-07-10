@@ -82,6 +82,17 @@ def qa_report_rel(stage_id: str) -> str:
 def _mean_rgb(region: Any) -> tuple[int, int, int]:
     from PIL import Image
 
+    if region.mode == "RGBA":
+        lo, hi = region.getchannel("A").getextrema()
+        if lo == 0 and hi > 0:
+            # Partially transparent (a cut-out hazard): average only the
+            # VISIBLE pixels, so the discarded backdrop under alpha 0 does
+            # not drag the region mean off the palette hex. Fully-opaque
+            # regions fall through to the fast path (byte-identical).
+            px = list(region.get_flattened_data())
+            opaque = [(r, g, b) for r, g, b, a in px if a > 0]
+            n = len(opaque)
+            return tuple(sum(c[i] for c in opaque) // n for i in range(3))
     return region.convert("RGB").resize((1, 1), Image.BILINEAR).getpixel((0, 0))
 
 

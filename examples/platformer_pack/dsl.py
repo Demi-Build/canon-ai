@@ -93,6 +93,35 @@ _SIGNATURES: dict[str, str] = {
     "exit": "i",
 }
 
+#: Human parameter templates for the arg-count error. The model conflated
+#: wall (3 args) with the 4-arg rectangle ops (carve/water_block) and
+#: emitted a fourth argument three times into fallback — a rejection that
+#: recites the EXACT signature (not just the count) is what breaks the loop.
+_ARG_NAMES: dict[str, str] = {
+    "floor": "x1, x2",
+    "gap": "x1, x2",
+    "pit": "x1, x2",
+    "platform": "x, y, len",
+    "ledge": "x1, x2, y",
+    "wall": "x, y1, y2",
+    "stairs_up": "x1, x2",
+    "stairs_down": "x1, x2",
+    "pyramid": "x1, x2",
+    "spike": "x1, x2",
+    "carve": "x1, y1, x2, y2",
+    "water": "x1, x2, y_surface",
+    "volume": "name, x1, x2, y_surface",
+    "pool": "name, x1, x2",
+    "water_wall": "x1, x2, y_top",
+    "volume_wall": "name, x1, x2, y_top",
+    "water_block": "x1, y1, x2, y2",
+    "volume_block": "name, x1, y1, x2, y2",
+    "hazard_strip": "name, x1, x2",
+    "checkpoint": "x",
+    "spawn": "x",
+    "exit": "x",
+}
+
 
 class DslError(ValueError):
     """A DSL string failed to parse or stamp. Message names the line.
@@ -154,7 +183,9 @@ def parse_dsl(text: str) -> list[tuple[str, list]]:
         args = [a.strip() for a in argstr.split(",")] if argstr.strip() else []
         if len(args) != len(signature):
             raise DslError(
-                f"line {lineno}: {name} takes {len(signature)} args, got {len(args)}."
+                f"line {lineno}: {name} takes {len(signature)} args "
+                f"({_ARG_NAMES.get(name, '...')}), got {len(args)}. Emit "
+                f"exactly {len(signature)} — do not add or drop an argument."
             )
         parsed: list = []
         for kind, arg in zip(signature, args):
@@ -301,6 +332,26 @@ def stamp(
                     f"columns {x1}-{x2}: {where}. Move the pool span or "
                     "clear those cells; they cannot share the surface."
                 )
+        # General terrain snap (playtest l4: the model poured a surface onto
+        # a hill/wall, three rejects into fallback). Finding the first row
+        # that is open air across the whole span is arithmetic, so the tool
+        # lifts the surface there instead of burning retries — as long as
+        # such a row exists below the ceiling. (The ground_row case above
+        # already resolved; an empty surface row falls straight through.)
+        if any(int(grid[y_surface, x]) != empty_id for x in range(x1, x2 + 1)):
+            lifted = y_surface
+            while lifted >= 1 and any(
+                int(grid[lifted, x]) != empty_id for x in range(x1, x2 + 1)
+            ):
+                lifted -= 1
+            if lifted >= 1 and lifted != y_surface:
+                result.repairs.append(
+                    f"{op}({tile.name},{x1},{x2},{y_surface}): surface row "
+                    f"{y_surface} was blocked by terrain — snapped up to the "
+                    f"first open row {lifted}."
+                )
+                y_surface = lifted
+
         for x in range(x1, x2 + 1):
             # Fill EMPTY cells from the surface down until solid ground.
             # A volume over a gap/pit would drain — demand a basin.

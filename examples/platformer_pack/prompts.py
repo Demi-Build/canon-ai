@@ -22,10 +22,46 @@ from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
-_SYSTEM = (
+# Per-task system prompts: every generator is TOLD what artifact it is
+# producing and its exact field/arg contract, so the model stops inventing
+# extra fields or arguments (the first paid run lost l8 to a 4-arg wall()
+# and l4 to water poured on terrain). Kept as constants so a generator's
+# system prompt never changes between its base and feedback calls.
+_SYSTEM_BASE = (
     "You are a level and content designer for a 2D side-scrolling platformer. "
-    "You respond ONLY in the exact format requested — JSON object or DSL "
-    "lines — with no prose, no markdown fences, no commentary."
+    "You respond ONLY in the exact format the task requests — a JSON object or "
+    "DSL lines — with no prose, no markdown fences, and no commentary."
+)
+_SYSTEM_WORLD = _SYSTEM_BASE + (
+    " This task designs the WORLD and its stages. Return ONLY the JSON keys "
+    "the task names — invent no extra fields."
+)
+_SYSTEM_STAGE = _SYSTEM_BASE + (
+    " This task plans ONE stage and its levels. Return ONLY the JSON keys the "
+    "task names — invent no extra fields."
+)
+_SYSTEM_ENEMY = _SYSTEM_BASE + (
+    " This task NAMES and FLAVORS one creature whose mechanics are already "
+    "rolled and fixed. Return ONLY the JSON keys the task names — never change "
+    "or restate the rolled stats, and add no other fields."
+)
+_SYSTEM_STYLE = _SYSTEM_BASE + (
+    " This task chooses a color palette. Return ONLY the JSON keys the task "
+    "names — one hex per role, and no extra fields."
+)
+_SYSTEM_LAYOUT = _SYSTEM_BASE + (
+    " This task emits a LEVEL as DSL op lines, one per line. Every op has a "
+    "FIXED name and argument COUNT: emit exactly the arguments its signature "
+    "lists — never more, never fewer — and never invent an op or an argument "
+    "the vocabulary does not define."
+)
+_SYSTEM_PLACEMENT = _SYSTEM_BASE + (
+    " This task PLACES entities on an already-built level. Return ONLY the "
+    "JSON the task names, using only the ids and columns it offers."
+)
+_SYSTEM_DECOR = _SYSTEM_BASE + (
+    " This task PLACES decorative pieces. Return ONLY the JSON the task names, "
+    "using only the offered kinds and cells."
 )
 
 
@@ -49,7 +85,7 @@ class PlatformerPrompts:
         self, pitch: str, seed: str, num_stages: int = 1
     ) -> LLMRequest:
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_WORLD,
             user_message=(
                 "### TASK: world\n"
                 f"Pitch: {pitch}\nSeed flavor: {seed}\n\n"
@@ -76,7 +112,7 @@ class PlatformerPrompts:
         stage_number: int = 1, num_stages: int = 1,
     ) -> LLMRequest:
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_STAGE,
             user_message=(
                 "### TASK: stage\n"
                 f"### STAGE: {stage_id}\n"
@@ -131,7 +167,7 @@ class PlatformerPrompts:
         if habitat_desc:
             ecology += f"Habitat: {habitat_desc}\n"
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_ENEMY,
             user_message=(
                 "### TASK: enemy\n"
                 f"### INDEX: {index}\n"
@@ -167,7 +203,7 @@ class PlatformerPrompts:
             else ""
         )
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_ENEMY,
             user_message=(
                 "### TASK: enemy_flavor\n"
                 f"### NAME: {name}\n"
@@ -206,7 +242,7 @@ class PlatformerPrompts:
         )
         stage_marker = f"### STAGE: {stage_id}\n" if stage_id else ""
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_STYLE,
             user_message=(
                 "### TASK: style\n"
                 f"{stage_marker}"
@@ -274,6 +310,14 @@ class PlatformerPrompts:
             ops.append("water_wall(x1,x2,y_top)")
             ops.append("water_block(x1,y1,x2,y2)")
         vocab_lines = [
+            # The model conflated wall (3 args) with the 4-arg rectangle ops
+            # (l8 emitted a 4-arg wall three times into fallback): show wall
+            # ISOLATED with a worked example and the explicit contrast.
+            "wall(x, y1, y2): ONE solid column x filled from row y1 to row "
+            "y2 — exactly THREE numbers (a single column, two row bounds). "
+            "It is NOT a rectangle: carve and water_block take four numbers, "
+            "wall takes three. Example: wall(19, 12, 13) fills column 19 at "
+            "rows 12-13, a 2-tall pillar.",
             # Shape variety is op work, not coaching: carve notches
             # silhouettes, ledge stacks build tiers — both fully validated.
             "carve(x1,y1,x2,y2): clears a rectangle back to empty air "
@@ -334,7 +378,7 @@ class PlatformerPrompts:
                 + " (touching one kills — they sit on floor)."
             )
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_LAYOUT,
             user_message=(
                 "### TASK: layout\n"
                 f"### LEVEL: {level_id}\n"
@@ -436,7 +480,7 @@ class PlatformerPrompts:
                 "chokepoint reads as a mini-boss. "
             )
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_PLACEMENT,
             user_message=(
                 "### TASK: placement\n"
                 f"### LEVEL: {level_id}\n"
@@ -487,7 +531,7 @@ class PlatformerPrompts:
             else ""
         )
         return LLMRequest(
-            system=_SYSTEM,
+            system=_SYSTEM_DECOR,
             user_message=(
                 "### TASK: decor\n"
                 f"### LEVEL: {level_id}\n"

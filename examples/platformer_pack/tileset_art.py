@@ -59,6 +59,17 @@ CATEGORY_ART = {
     ),
 }
 
+#: Categories the generator draws as an OBJECT on an invented backdrop (not
+#: a seamless fill). Cut that backdrop to transparency so the tile sits ON
+#: the terrain instead of an opaque square (playtest: 'spikes have a yellow
+#: box'). Fill categories must NEVER be cut — flood-keying a seamless
+#: texture would eat the whole tile and punch holes in the level.
+_CUTOUT_CATEGORIES = {"hazard"}
+
+#: Below this visible fraction the cut ate the subject too (a hazard the
+#: same color as its backdrop) — keep the original opaque tile instead.
+MIN_TILE_OPAQUE_FRACTION = 0.04
+
 
 def tile_prompt(
     tile: Any, role_hex: str, theme: str, world_title: str, graphics: Any
@@ -104,16 +115,29 @@ def conform_to_palette(img: Any, role_hex: str, levels: int | None = None) -> An
 
     rgb = img.convert("RGB")
     pixels = list(rgb.get_flattened_data())
+    alphas = (
+        list(img.getchannel("A").get_flattened_data())
+        if img.mode == "RGBA"
+        else [255] * len(pixels)
+    )
     hsv = [colorsys.rgb_to_hsv(r / 255, g / 255, b / 255) for r, g, b in pixels]
     values = [v for _h, _s, v in hsv]
-    mean_v = sum(values) / len(values)
+    # Aim the recolour using only VISIBLE pixels: a cut-out hazard keeps
+    # its discarded backdrop's RGB under alpha 0, which must not drag the
+    # means. Fully-opaque tiles (every seamless fill) use every pixel, so
+    # their output stays byte-identical to before this alpha support.
+    vis = [i for i, a in enumerate(alphas) if a > 0] or list(range(len(pixels)))
+    mean_v = sum(values[i] for i in vis) / len(vis)
     if mean_v <= 0:  # all-black generation: nothing to scale, fill flat
-        return Image.new("RGBA", img.size, (tr, tg, tb, 255))
+        flat = Image.new("RGBA", img.size, (tr, tg, tb, 255))
+        if img.mode == "RGBA":
+            flat.putalpha(img.getchannel("A"))
+        return flat
 
     # Mean hue is CIRCULAR, weighted by chroma (gray pixels carry no hue
     # information); a colorless source leaves hue/sat forced to target.
-    sin_sum = sum(math.sin(h * math.tau) * s * v for h, s, v in hsv)
-    cos_sum = sum(math.cos(h * math.tau) * s * v for h, s, v in hsv)
+    sin_sum = sum(math.sin(hsv[i][0] * math.tau) * hsv[i][1] * hsv[i][2] for i in vis)
+    cos_sum = sum(math.cos(hsv[i][0] * math.tau) * hsv[i][1] * hsv[i][2] for i in vis)
     weight = math.hypot(sin_sum, cos_sum)
     if weight < 1.0:
         hues = [th] * len(hsv)
@@ -121,7 +145,7 @@ def conform_to_palette(img: Any, role_hex: str, levels: int | None = None) -> An
     else:
         mean_h = (math.atan2(sin_sum, cos_sum) / math.tau) % 1.0
         dh = th - mean_h
-        mean_s = sum(s for _h, s, _v in hsv) / len(hsv)
+        mean_s = sum(hsv[i][1] for i in vis) / len(vis)
         ds = ts - mean_s
         hues = [(h + dh) % 1.0 for h, _s, _v in hsv]
         sats = [min(1.0, max(0.0, s + ds)) for _h, s, _v in hsv]
@@ -136,7 +160,7 @@ def conform_to_palette(img: Any, role_hex: str, levels: int | None = None) -> An
         scaled = [min(1.0, v * scale) for v in values]
         if levels:
             scaled = [round(v * (levels - 1)) / (levels - 1) for v in scaled]
-        mean = sum(scaled) / len(scaled)
+        mean = sum(scaled[i] for i in vis) / len(vis)
         err = abs(mean - tv)
         if err < best_err:
             best, best_err = scaled, err
@@ -146,14 +170,14 @@ def conform_to_palette(img: Any, role_hex: str, levels: int | None = None) -> An
 
     # Recenter exactly: a constant brightness shift keeps the posterized
     # level structure (shifted, not re-spread) and lands the mean on tv.
-    delta = tv - sum(best) / len(best)
+    delta = tv - sum(best[i] for i in vis) / len(vis)
     final = [min(1.0, max(0.0, v + delta)) for v in best]
 
     out = Image.new("RGBA", img.size)
     out.putdata(
         [
-            tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)) + (255,)
-            for h, s, v in zip(hues, sats, final)
+            tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)) + (a,)
+            for h, s, v, a in zip(hues, sats, final, alphas)
         ]
     )
     return out
@@ -177,6 +201,38 @@ def sprite_prompt(
         f"side view facing right, centered, isolated on a plain solid "
         f"white background. No shadow, no ground, no text, no border."
     )
+
+
+def _opaque_fraction(img: Any) -> float:
+    """Fraction of pixels still visible after a background cut."""
+    if img.mode != "RGBA":
+        return 1.0
+    alpha = list(img.getchannel("A").get_flattened_data())
+    return sum(1 for a in alpha if a > 0) / len(alpha)
+
+
+def _bottom_align(img: Any) -> Any:
+    """Slide the cut-out subject down so its feet sit on the frame bottom.
+
+    Generated sprites frame the creature with empty space BELOW it (the fal
+    art centers the body), but the consumers bottom-anchor the sprite frame
+    to the floor — so that gap made enemies HOVER above the ground
+    (playtest, plat_kingdom3). Re-seat the content x-centered at the frame
+    bottom; the empty margin moves to the TOP, above the head, out of play.
+    Runs at full generation resolution before downscaling, like the cut."""
+    from PIL import Image
+
+    if img.mode != "RGBA":
+        return img
+    bbox = img.getchannel("A").getbbox()
+    if bbox is None:  # fully transparent (empty fake) — nothing to seat
+        return img
+    content = img.crop(bbox)
+    framed = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    framed.paste(
+        content, ((img.width - content.width) // 2, img.height - content.height)
+    )
+    return framed
 
 
 def remove_background(img: Any) -> Any:
@@ -383,6 +439,14 @@ class DiffusionSheetProducer:
         )
         raw = self._generate(prompt, sanitized, graphics.gen_px, graphics.gen_px)
         img = Image.open(io.BytesIO(raw)).convert("RGB")
+        if tile.category in _CUTOUT_CATEGORIES:
+            # Cut the invented backdrop at full resolution (halo-safe),
+            # then keep it only if the subject actually survived. conform
+            # preserves this alpha; the QA sampler measures only the
+            # visible pixels.
+            keyed = remove_background(img)
+            if _opaque_fraction(keyed) >= MIN_TILE_OPAQUE_FRACTION:
+                img = keyed
         resample = (
             Image.NEAREST if graphics.render_filter == "crisp" else Image.LANCZOS
         )
@@ -415,6 +479,7 @@ class DiffusionSheetProducer:
         raw = self._generate(prompt, sanitized, graphics.gen_px, graphics.gen_px)
         img = Image.open(io.BytesIO(raw))
         img = remove_background(img)
+        img = _bottom_align(img)  # feet on the frame bottom, not floating
         resample = (
             Image.NEAREST if graphics.render_filter == "crisp" else Image.LANCZOS
         )

@@ -186,6 +186,41 @@ class TilesetArtPhase:
         _stamp_metadata(ctx, self.name)
 
 
+#: Behavior must READ in the still sprite — a stationary sentry looked
+#: broken in the first paid run. Each archetype maps to a visual stance the
+#: diffusion model can draw, so a sentry looks planted and a chaser fast.
+ARCHETYPE_LOOK = {
+    "patroller": "ambling mid-stride, built to walk a beat back and forth",
+    "chaser": "alert and lunging forward, lean and built for a fast chase",
+    "sentry": (
+        "rooted and planted in place — a squat, immobile, turret-like "
+        "guardian with no legs for walking, clearly a creature that holds "
+        "its ground rather than roams"
+    ),
+    "swimmer": "sleek and aquatic, finned or gilled for gliding through water",
+}
+
+#: The player is a platformer MASCOT, not the diffusion default fantasy
+#: knight (first paid run: 'we keep getting knights with swords'). Kept
+#: theme-light so one sprite reads across every biome, and explicitly
+#: weaponless.
+PLAYER_DESCRIPTOR = (
+    "a friendly platformer mascot hero: a small, round-bodied cartoon "
+    "adventurer with a big expressive head, large readable eyes, and simple "
+    "stubby limbs in a bouncy, ready pose — a bold, clear silhouette that "
+    "reads at a small size. NOT a knight, no armor, no helmet, and no sword "
+    "or any weapon"
+)
+
+
+def _enemy_art_descriptor(archetype: str, flavor: str) -> str:
+    """Fold the archetype's visual stance into the sprite descriptor so the
+    generated art matches the behavior (planted sentry, lunging chaser)."""
+    look = ARCHETYPE_LOOK.get(archetype)
+    base = f"a {archetype} enemy" + (f" that is {look}" if look else "")
+    return f"{base} — {flavor}".strip(" —")
+
+
 class SpriteArtPhase:
     """Generated sprites for every enemy definition + the player.
     Definitions keep their placeholder color and variant markers — the
@@ -245,9 +280,8 @@ class SpriteArtPhase:
                 )
                 continue
             color_hex = str(enemy.stats.get("placeholder_color", "#ff00ff"))
-            descriptor = (
-                f"a {enemy.archetype} enemy — "
-                f"{enemy.stats.get('flavor', '')}".strip(" —")
+            descriptor = _enemy_art_descriptor(
+                enemy.archetype, str(enemy.stats.get("flavor", ""))
             )
             sprite = self._generate(
                 ctx, enemy.name or enemy_id, descriptor, color_hex,
@@ -291,7 +325,7 @@ class SpriteArtPhase:
             logger.info("SpriteArtPhase: player is pinned — sprite kept.")
         else:
             player = self._generate(
-                ctx, "the player", "the heroic player character", "#f0f0f0",
+                ctx, "the player", PLAYER_DESCRIPTOR, "#f0f0f0",
                 theme, world_title, (size, size),
             )
             if player is not None:
