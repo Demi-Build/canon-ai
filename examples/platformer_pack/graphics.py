@@ -75,6 +75,10 @@ class GraphicsSpec(BaseModel):
     #: (uniform, feet-anchored, physics untouched) — the SNES trick of
     #: heroes taller than a tile. 1.0 = sprites stay inside their cell.
     actor_scale: float = Field(default=1.4, ge=1.0, le=2.5)
+    #: Per-frame duration (ms) for VLM-authored sprite animation. Per-game
+    #: feel knob (data): lower = snappier cycles. The state frame COUNTS come
+    #: from the VLM spec (clamped 2-6); this only sets playback tempo.
+    anim_frame_ms: int = Field(default=120, ge=16, le=2000)
 
     def sprite_size(self) -> int:
         return self.sprite_px if self.sprite_px is not None else self.tile_px

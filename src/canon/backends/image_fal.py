@@ -14,6 +14,7 @@ Code that only needs to check availability can use the lazy re-export from
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
@@ -28,6 +29,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "fal-ai/nano-banana"
+
+#: nano-banana's img2img (edit) endpoint — takes ``image_urls`` + ``prompt``
+#: and returns the same ``{"images": [{"url": ...}]}`` shape as generation.
+#: Confirmed working against a real sprite-sheet spike (2026-07-10).
+DEFAULT_EDIT_MODEL = "fal-ai/nano-banana/edit"
 
 #: nano-banana takes an ``aspect_ratio`` enum and IGNORES ``image_size``
 #: (unknown arguments pass silently) — discovered on the first real
@@ -79,6 +85,7 @@ class FalImageBackend:
         self,
         model: str = DEFAULT_MODEL,
         api_key: str | None = None,
+        edit_model: str = DEFAULT_EDIT_MODEL,
     ) -> None:
         try:
             import fal_client
@@ -89,6 +96,7 @@ class FalImageBackend:
             ) from e
         self._fal = fal_client
         self.model = model
+        self.edit_model = edit_model
         if api_key:
             os.environ["FAL_KEY"] = api_key
         elif "FAL_KEY" not in os.environ:
@@ -175,6 +183,40 @@ class FalImageBackend:
             return True
         except Exception:
             return False
+
+    # -- img2img (implements ``ImageEditBackend``) --------------------------
+
+    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
+        """Sync img2img: upload ``image_bytes``, edit it per ``prompt`` via
+        the ``edit_model`` endpoint, return bytes conformed to
+        ``width`` x ``height`` (same size contract as ``generate``).
+
+        Args:
+            image_bytes: PNG-encoded source image to edit.
+            prompt: Text instructions describing the desired edit.
+            width: Output width in pixels.
+            height: Output height in pixels.
+        """
+        image_url = self._fal.upload(image_bytes, "image/png")
+        result = self._fal.subscribe(
+            self.edit_model,
+            arguments={"prompt": prompt, "image_urls": [image_url]},
+        )
+        url = self._extract_image_url(result)
+        return self._conform_size(self._download_url(url), width, height)
+
+    async def edit_async(
+        self, image_bytes: bytes, prompt: str, width: int, height: int
+    ) -> bytes:
+        """Async img2img via ``fal_client.subscribe_async``. The upload is
+        sync in fal-client, so it is offloaded with ``asyncio.to_thread``."""
+        image_url = await asyncio.to_thread(self._fal.upload, image_bytes, "image/png")
+        result = await self._fal.subscribe_async(
+            self.edit_model,
+            arguments={"prompt": prompt, "image_urls": [image_url]},
+        )
+        url = self._extract_image_url(result)
+        return self._conform_size(self._download_url(url), width, height)
 
     @staticmethod
     def _extract_image_url(result: dict) -> str:

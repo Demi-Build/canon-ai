@@ -15,18 +15,35 @@ import pytest
 from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.backends.testing import FakeVLMBackend
 from canon.bible.models import Bible
+from canon.bible.platformer import EnemyDefinition
 from canon.pipeline.runner import PipelineContext
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline
 from examples.platformer_pack.vlm_qa import (
+    ANIM_DEFAULT_FRAMES,
+    ANIM_FRAMES_MAX,
+    ANIM_FRAMES_MIN,
+    ANIM_MOTION_MAX_CHARS,
+    ANIMATION_QA_DIMENSIONS,
+    ANIMATION_STATES,
     DIMENSIONS,
     SPRITE_MIN_FILL,
     VlmQaPhase,
+    _sanitize_animation_spec,
+    _sanitize_animation_verdict,
     _sanitize_verdict,
     _sprite_checks,
+    _validate_animation_spec,
+    _validate_animation_verdict,
+    animate_prompt,
+    animate_qa_prompt,
+    author_animation_spec,
     build_vlm_judge,
+    derive_animation_qa_warnings,
     derive_qa_warnings,
+    enemy_animation_subject,
     make_fake_vlm_responder,
     qa_report_rel,
+    review_animations,
     run_code_checks,
 )
 from examples.run_platformer_slice import make_fake_responder
@@ -60,11 +77,250 @@ _PROMPT_MARKERS = (
 # ---------------------------------------------------------------------------
 
 
-class TestBuildVlmJudge:
-    def test_none_and_empty_mean_no_judge(self) -> None:
-        assert build_vlm_judge(None) is None
-        assert build_vlm_judge("") is None
-        assert build_vlm_judge("none") is None
+class TestAnimationAuthoring:
+    """B2 — the VLM authors a per-state motion spec from the ACTUAL sprite.
+    Reuses the qa judge machinery; the canned fake exercises the whole path
+    (including the frame clamp) at $0."""
+
+    def _enemy(self, **kw) -> EnemyDefinition:
+        base = dict(
+            enemy_id="hop_toad",
+            name="Hop-toad",
+            archetype="patroller",
+            size=1.5,
+            stats={"flavor": "a stubby wide-eyed toad"},
+        )
+        base.update(kw)
+        return EnemyDefinition(**base)
+
+    def _subject(self) -> str:
+        return enemy_animation_subject(self._enemy())
+
+    def test_prompt_carries_task_marker_schema_and_states(self) -> None:
+        prompt = animate_prompt("enemy:hop_toad", self._subject())
+        assert "### TASK: plat_animate" in prompt
+        assert "### ACTOR: enemy:hop_toad" in prompt
+        assert "'patroller'" in prompt  # archetype is passed as a HINT
+        assert "a stubby wide-eyed toad" in prompt  # flavor grounds the model
+        assert all(f'"{state}"' in prompt for state in ANIMATION_STATES)
+
+    def test_fake_judge_authors_full_spec_with_clamp(self) -> None:
+        spec = author_animation_spec(
+            _fake_judge(), "enemy:hop_toad", self._subject(), b"png-bytes"
+        )
+        assert set(spec) == set(ANIMATION_STATES)
+        # canned death=9 clamps to the ceiling; canned idle=2 sits at the floor
+        assert spec["death"]["frames"] == ANIM_FRAMES_MAX
+        assert spec["idle"]["frames"] == ANIM_FRAMES_MIN
+        for state in ANIMATION_STATES:
+            assert ANIM_FRAMES_MIN <= spec[state]["frames"] <= ANIM_FRAMES_MAX
+            assert spec[state]["motion"]
+
+    def test_player_frame_budget_allows_more_frames(self) -> None:
+        from examples.platformer_pack.vlm_qa import (
+            PLAYER_ANIM_FRAMES_MAX,
+            PLAYER_ANIMATION_STATES,
+        )
+
+        # a fake that requests a smooth 9-frame walk + a jump state
+        smooth = FakeVLMBackend(
+            lambda prompt, images: json.dumps(
+                {s: {"frames": 9, "motion": "m"} for s in PLAYER_ANIMATION_STATES}
+            )
+        )
+        spec = author_animation_spec(
+            smooth, "player", "the hero", b"x",
+            states=PLAYER_ANIMATION_STATES, frames_max=PLAYER_ANIM_FRAMES_MAX,
+        )
+        assert set(spec) == set(PLAYER_ANIMATION_STATES)
+        assert "jump" in spec
+        assert spec["walk"]["frames"] == 9  # the enemy cap (6) would clip this
+
+    def test_judge_receives_the_sprite_bytes(self) -> None:
+        judge = _fake_judge()
+        author_animation_spec(judge, "enemy:hop_toad", self._subject(), b"12345")
+        assert judge.calls[-1]["image_sizes"] == [5]
+
+    def test_spec_persists_on_enemy_stats(self) -> None:
+        enemy = self._enemy()
+        enemy.stats["animation"] = author_animation_spec(
+            _fake_judge(), "enemy:hop_toad", self._subject(), b"x"
+        )
+        assert enemy.stats["animation"]["walk"]["frames"] == 4
+
+    def test_sanitize_clamps_and_fills_missing_states(self) -> None:
+        spec = _sanitize_animation_spec(
+            {"idle": {"frames": 99, "motion": "x"}, "walk": {"frames": 0, "motion": "y"}}
+        )
+        assert spec["idle"]["frames"] == ANIM_FRAMES_MAX  # 99 -> 6
+        assert spec["walk"]["frames"] == ANIM_FRAMES_MIN  # 0 -> 2
+        # hurt + death absent → filled with the defaults and a brief motion
+        assert set(spec) == set(ANIMATION_STATES)
+        assert spec["hurt"]["frames"] == ANIM_DEFAULT_FRAMES["hurt"]
+        assert spec["death"]["motion"]
+
+    def test_sanitize_rounds_float_frames(self) -> None:
+        spec = _sanitize_animation_spec(
+            {s: {"frames": 3.6, "motion": "m"} for s in ANIMATION_STATES}
+        )
+        assert all(spec[s]["frames"] == 4 for s in ANIMATION_STATES)
+
+    def test_sanitize_clamps_motion_length(self) -> None:
+        spec = _sanitize_animation_spec(
+            {s: {"frames": 3, "motion": "m" * 500} for s in ANIMATION_STATES}
+        )
+        assert all(
+            len(spec[s]["motion"]) <= ANIM_MOTION_MAX_CHARS for s in ANIMATION_STATES
+        )
+
+    def test_validate_rejects_non_json(self) -> None:
+        ok, problems = _validate_animation_spec("definitely not json")
+        assert not ok and problems
+
+    def test_validate_flags_each_missing_state(self) -> None:
+        ok, problems = _validate_animation_spec(
+            json.dumps({"idle": {"frames": 3, "motion": "x"}})
+        )
+        assert not ok
+        assert len(problems) == len(ANIMATION_STATES) - 1  # 3 missing
+
+    def test_validate_flags_bad_frames_and_motion(self) -> None:
+        ok, problems = _validate_animation_spec(
+            json.dumps({s: {"frames": "lots", "motion": ""} for s in ANIMATION_STATES})
+        )
+        assert not ok
+        assert len(problems) == 2 * len(ANIMATION_STATES)  # frames + motion each
+
+    def test_author_returns_none_when_never_validates(self) -> None:
+        # a judge that always returns junk → retries exhaust → None (the
+        # loud-fallback contract: caller keeps the static sprite)
+        bad = FakeVLMBackend(lambda prompt, images: "not json ever")
+        assert author_animation_spec(
+            bad, "enemy:hop_toad", self._subject(), b"x", max_retries=2
+        ) is None
+
+    def test_animate_branch_does_not_regress_qa_branch(self) -> None:
+        # one fake judge serves BOTH tasks — a qa prompt still yields verdicts
+        reply = _fake_judge().judge(_PROMPT_MARKERS.format(lid="l1"), [b"a", b"b", b"c"])
+        assert set(DIMENSIONS) <= set(json.loads(reply))
+
+
+class TestAnimationQA:
+    """B5 — the VLM reviews the generated animation (consistency/motion/
+    readability), code checks the computable half. Warn-only; never regen."""
+
+    def _enemy(self, **kw) -> EnemyDefinition:
+        base = dict(enemy_id="hop_toad", name="Hop-toad", stats={})
+        base.update(kw)
+        return EnemyDefinition(**base)
+
+    def test_prompt_carries_task_marker_and_state_order(self) -> None:
+        prompt = animate_qa_prompt(
+            "enemy:hop_toad", "Hop-toad", ["walk", "idle", "death"]
+        )
+        assert "### TASK: plat_animate_qa" in prompt
+        assert "### ACTOR: enemy:hop_toad" in prompt
+        # states are listed in canonical order, not input order
+        assert "idle, walk, death" in prompt
+        assert all(d in prompt for d in ANIMATION_QA_DIMENSIONS)
+
+    def test_fake_responder_qa_and_authoring_branches_distinct(self) -> None:
+        # plat_animate_qa must NOT be swallowed by the plat_animate branch
+        # (substring). QA → a verdict; authoring → a motion spec.
+        resp = make_fake_vlm_responder()
+        qa = json.loads(resp("### TASK: plat_animate_qa\n### ACTOR: x\n", []))
+        assert set(ANIMATION_QA_DIMENSIONS) <= set(qa)
+        assert "walk" not in qa
+        # the authoring branch returns a spec for the states the prompt lists
+        author = json.loads(
+            resp('### TASK: plat_animate\n### ACTOR: x\n  - "walk": move', [])
+        )
+        assert "walk" in author and "consistency" not in author
+
+    def test_validate_rejects_junk_and_missing_dims(self) -> None:
+        ok, _ = _validate_animation_verdict("not json")
+        assert not ok
+        ok2, problems = _validate_animation_verdict(
+            json.dumps({"consistency": {"passed": True, "notes": "x"}})
+        )
+        assert not ok2
+        assert len(problems) == len(ANIMATION_QA_DIMENSIONS) - 1  # 2 missing
+
+    def test_sanitize_shape_and_clamp(self) -> None:
+        raw = {d: {"passed": True, "notes": "n" * 500} for d in ANIMATION_QA_DIMENSIONS}
+        raw["notes"] = "overall " * 100
+        out = _sanitize_animation_verdict(raw)
+        assert set(out["verdicts"]) == set(ANIMATION_QA_DIMENSIONS)
+        assert all(
+            len(out["verdicts"][d]["notes"]) <= 300 for d in ANIMATION_QA_DIMENSIONS
+        )
+        assert len(out["notes"]) <= 300
+
+    def test_derive_warnings_from_failing_report(self) -> None:
+        report = {
+            "actors": {
+                "enemy:toad": {
+                    "code_checks": [
+                        {"check": "animation_frames", "subject": "walk",
+                         "passed": False, "detail": "frame 2 blank"},
+                    ],
+                    "verdicts": {
+                        "consistency": {"passed": False, "notes": "morphs"},
+                        "motion": {"passed": True, "notes": ""},
+                        "readability": {"passed": True, "notes": ""},
+                    },
+                }
+            }
+        }
+        warnings = derive_animation_qa_warnings(report)
+        assert len(warnings) == 2  # one code-check + one verdict
+        assert any("animation_frames FAILED" in w for w in warnings)
+        assert any("consistency FAILED" in w and "enemy:toad" in w for w in warnings)
+
+    def test_derive_warns_for_player_too(self) -> None:
+        report = {
+            "actors": {
+                "player": {
+                    "code_checks": [],
+                    "verdicts": {
+                        "consistency": {"passed": True, "notes": ""},
+                        "motion": {"passed": False, "notes": "jump is stiff"},
+                        "readability": {"passed": True, "notes": ""},
+                    },
+                }
+            }
+        }
+        warnings = derive_animation_qa_warnings(report)
+        assert len(warnings) == 1
+        assert "player" in warnings[0] and "motion FAILED" in warnings[0]
+
+    def test_derive_no_warnings_when_all_pass(self) -> None:
+        report = {
+            "actors": {
+                "enemy:toad": {
+                    "code_checks": [
+                        {"check": "animation_strip", "subject": "walk",
+                         "passed": True, "detail": "ok"},
+                    ],
+                    "verdicts": {
+                        d: {"passed": True, "notes": ""}
+                        for d in ANIMATION_QA_DIMENSIONS
+                    },
+                }
+            }
+        }
+        assert derive_animation_qa_warnings(report) == []
+
+    def test_review_skips_actors_without_animation(self) -> None:
+        ctx = SimpleNamespace(
+            bible=SimpleNamespace(
+                enemy_definitions={"e": self._enemy()}, player=None
+            ),
+            adapter=None,
+        )
+        report = review_animations(ctx, judge=None)
+        assert report["actors"] == {}
+        assert report["vlm_model"] == "none"
 
     def test_fake_builds_deterministic_judge(self) -> None:
         judge = build_vlm_judge("fake")

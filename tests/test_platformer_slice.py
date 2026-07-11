@@ -74,6 +74,10 @@ class TestDsl:
         [
             ("flor(0,4)", "unknown op"),
             ("floor(0)", "takes 2 args"),
+            # The l8 fallback: a 4-arg wall — the rejection must name the
+            # exact signature so the model stops adding a fourth number.
+            ("floor(0,20)\nwall(5,8,12,14)\nspawn(2)\nexit(18)",
+             r"wall takes 3 args \(x, y1, y2\)"),
             ("floor(0,x)", "must be integers"),
             ("floor(0,47)\nspawn(2)", "missing exit"),
             ("floor(0,47)\nexit(45)", "missing spawn"),
@@ -266,6 +270,97 @@ class TestValidators:
             assert not check_level(
                 result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
             )
+
+    def test_arc_clear_rejects_jumps_through_solid_terrain(self) -> None:
+        """jump_ok checks only the two endpoints; a jump whose dx/rise fit
+        the envelope but whose flight path passes THROUGH a solid column is
+        physically impossible. arc_clear is the code-side guard — only
+        SOLID blocks (you fly over hazards and swim through volumes), and
+        ground continuing beneath an upward hop never blocks."""
+        import numpy as np
+
+        from examples.platformer_pack.validate import arc_clear
+
+        m = DEFAULT_MOVEMENT
+        # Floors at row 5 (standable row 4); a wall (id 3) poking up at col 3.
+        g = np.zeros((7, 7), dtype=np.int8)
+        g[5, :] = 1
+        g[6, :] = 1
+        for r in range(2, 7):
+            g[r, 3] = 3  # solid column taller than the footholds
+        assert not arc_clear(g, (1, 4), (5, 4), m)  # flies into the wall
+        # Same slot, but a HAZARD instead of solid: flown over, allowed.
+        g2 = np.zeros((7, 7), dtype=np.int8)
+        g2[5, :] = 1
+        g2[6, :] = 1
+        for r in range(2, 5):
+            g2[r, 3] = 10  # spike column — not a reachability blocker
+        assert arc_clear(g2, (1, 4), (5, 4), m)
+        # Ground continuing UNDER an upward hop must not block it.
+        g3 = np.zeros((12, 12), dtype=np.int8)
+        g3[10, :] = 1  # floor everywhere (standable row 9)
+        g3[11, :] = 1
+        assert arc_clear(g3, (4, 9), (7, 7), m)  # rise 2 over open air above
+
+    def test_l1_arc_blocked_exit_regression(self) -> None:
+        """The exact clover_hills/l1 grid from the first paid run: its exit
+        sat behind a 5-cell cliff and was 'reachable' only through jumps
+        that fly into solid rock, so check_level returned [] and the level
+        shipped UNBEATABLE. It must now report a break and be code-bridged.
+        (Encoded: . empty, F floor, p platform, W wall, ^ spike, ~ water.)"""
+        import re as _re
+
+        import numpy as np
+
+        from examples.platformer_pack.validate import (
+            _locate_break,
+            _suggest_bridge,
+            arc_clear,
+            reachable_cells,
+        )
+
+        rows = [
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "...........................................",
+            "......F.............................F......",
+            ".....FF......F......................FF.....",
+            "....FFF.ppp.FFFFFFF.................FFF....",
+            "...FFFF....FFFFF....................FFFF...",
+            "..FFFFF...FFFFFFF.............^^^...FFFFF..",
+            "FFFFFFFFFFFFFFFFFFFF~~~~~~FFFFFFFFFFFFFFFFF",
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+        ]
+        dec = {".": 0, "F": 1, "p": 2, "W": 3, "^": 10, "~": 20}
+        g = np.array([[dec[c] for c in r] for r in rows], dtype=np.int8)
+        spawn, exit_ = (1, 12), (42, 12)
+        m = DEFAULT_MOVEMENT
+
+        # The two edges that faked reachability fly into the x36 cliff.
+        assert not arc_clear(g, (35, 12), (38, 9), m)
+        assert not arc_clear(g, (35, 12), (39, 10), m)
+        # So the exit is no longer falsely reachable, and the break is seen.
+        assert exit_ not in reachable_cells(g, spawn, m)
+        problems = check_level(g, spawn, exit_, m)
+        assert problems and "not reachable" in problems[0]
+        # And it is code-bridgeable: one suggested platform reconnects it
+        # (this is one auto_bridge iteration, applied at the grid level).
+        stand = standable_cells(g)
+        reached = reachable_cells(g, spawn, m)
+        frontier, nearest = _locate_break(stand, reached)
+        op = _suggest_bridge(g, frontier, nearest, m)
+        assert op is not None, "no valid bridge found for the l1 cliff"
+        col, row, length = map(
+            int, _re.match(r"platform\((\d+),(\d+),(\d+)\)", op).groups()
+        )
+        for i in range(length):
+            g[row, col + i] = 2  # paint the one-way platform the tool chose
+        assert exit_ in reachable_cells(g, spawn, m)
 
     def test_structural_roles_get_separated(self) -> None:
         """Ground/platform/wall within a few luminance points of each
@@ -754,10 +849,42 @@ class TestEndToEnd:
             for placement in level.entities:
                 enemy_id = placement.ref.split(":", 1)[1]
                 archetype = ctx.bible.enemy_definitions[enemy_id].archetype
+                if archetype == "flyer":
+                    # Airborne: an open-air cell, never a ground stand or water.
+                    assert tuple(placement.pos) not in stand
+                    assert tuple(placement.pos) not in volume
+                    continue
                 expected = volume if archetype == "swimmer" else stand
                 assert tuple(placement.pos) in expected, (
                     f"{enemy_id} ({archetype}) at {placement.pos}"
                 )
+
+    def test_canned_fake_places_a_flyer_in_open_air(self, tmp_path: Path) -> None:
+        """The canned fake exercises the flyer path end-to-end at $0: a
+        flyer-rolling seed yields a flyer definition placed in an open-air
+        cell (never a ground stand or water) — the air-summary + fake air
+        pool + validator airborne branch all on the same path."""
+        ctx = _run_slice(tmp_path / "run", seed="zephyr")
+        flyers = {
+            eid
+            for eid, e in ctx.bible.enemy_definitions.items()
+            if e.archetype == "flyer"
+        }
+        assert flyers, "the 'zephyr' seed should roll at least one flyer"
+        placed_in_air = False
+        for level in ctx.bible.levels.values():
+            with np.load(tmp_path / "run" / level.collision) as data:
+                grid = data["collision"]
+            stand, volume = standable_cells(grid), volume_cells(grid)
+            for placement in level.entities:
+                eid = placement.ref.split(":", 1)[1]
+                if eid in flyers:
+                    pos = tuple(placement.pos)
+                    assert pos not in stand and pos not in volume, (
+                        f"flyer {eid} at {pos} is not open air"
+                    )
+                    placed_in_air = True
+        assert placed_in_air, "no flyer was placed in any level"
 
     def test_spawn_exit_first_class_fields(self, tmp_path: Path) -> None:
         """spawn/exit are Level fields (not trigger records) and land on
@@ -1409,6 +1536,25 @@ class TestGenericOps:
         assert len(result.repairs) == 1
         assert "snapped to open row 13" in result.repairs[0]
 
+    def test_pour_on_terrain_snaps_up_in_code(self) -> None:
+        """The l4 fallback: the model poured a water surface onto a hill/
+        wall, three 'surface must be open air' rejects into a flat level.
+        Lifting the surface to the first open row is arithmetic, so the
+        stamp now APPLIES it instead of burning retries."""
+        water_id = load_tiles().by_name["water"].id
+        # A wall pillar at column 20 (rows 10-14) with water aimed at row 12
+        # — that row is solid at column 20, so it must snap up above it.
+        result = stamp(
+            "floor(0,47)\nwall(20,10,14)\nwater(19,21,12)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert result.repairs and "snapped up to the first open row" in (
+            result.repairs[0]
+        )
+        # Water now sits above the pillar top (row 9), not inside it.
+        assert int(result.grid[9, 19]) == water_id
+        assert int(result.grid[12, 20]) != water_id  # the wall is intact
+
     def test_pour_on_ground_row_under_blockers_names_the_conflict(
         self,
     ) -> None:
@@ -1443,6 +1589,29 @@ class TestGenericOps:
         for message in prompts:
             assert "Pool recipe" in message
             assert "OPEN AIR" in message
+
+    def test_layout_system_prompt_states_arg_contract(self) -> None:
+        """Per-task system prompt tells the layout agent the op-argument
+        contract — the l8 4-arg-wall fix works at the system level, backed
+        by an isolated wall example in the vocab."""
+        req = PlatformerPrompts().layout_generation(
+            "l1", "a brief", {"difficulty": 1}, W, H, DEFAULT_MOVEMENT,
+        )
+        assert "argument COUNT" in req.system
+        assert "never more" in req.system.lower()
+        assert "wall(19, 12, 13)" in req.user_message  # worked example
+        assert "NOT a rectangle" in req.user_message
+
+    def test_enemy_system_prompt_forbids_extra_fields(self) -> None:
+        """Per-task system prompt: the enemy agent returns only the named
+        fields and never restates the rolled mechanics (schema-aware
+        generation — the general fix the user asked for)."""
+        req = PlatformerPrompts().enemy_generation(
+            {"archetype": "sentry", "hp": 9}, "a theme", "a roster", 0,
+        )
+        low = req.system.lower()
+        assert "return only" in low
+        assert "add no other fields" in low
 
 
 class TestCheckpoints:
@@ -2053,3 +2222,47 @@ class TestPerLevelView:
         assert gfx.view_for("intimate") == 8
         assert gfx.view_for("standard") is None
         assert gfx.view_for("") is None
+
+
+class TestAnimFramePick:
+    """The pure candidate → (state, frame-index) selector, shared in spirit
+    with main.gd's GDScript mirror. The CALLER builds the candidate priority
+    list from runtime signals (enemy: hurt>walk>idle; player: jump>walk>idle)."""
+
+    S = {
+        "idle": {"count": 2, "dur": 0.25},
+        "walk": {"count": 4, "dur": 0.10},
+        "jump": {"count": 6, "dur": 0.09},
+    }
+
+    def test_first_present_candidate_wins(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        # player airborne: jump leads the list and exists
+        assert pick_anim_frame(["jump", "walk", "idle"], 0.0, self.S)[0] == "jump"
+        # enemy hurt priority, but no hurt frames here → walk
+        assert pick_anim_frame(["hurt", "walk", "idle"], 0.0, self.S)[0] == "walk"
+        assert pick_anim_frame(["idle", "walk"], 0.0, self.S)[0] == "idle"
+
+    def test_frame_index_advances_and_wraps(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        # walk: dur 0.10, 4 frames → idx = int(t/0.10) % 4
+        assert pick_anim_frame(["walk"], 0.00, self.S)[1] == 0
+        assert pick_anim_frame(["walk"], 0.15, self.S)[1] == 1
+        assert pick_anim_frame(["walk"], 0.35, self.S)[1] == 3
+        assert pick_anim_frame(["walk"], 0.45, self.S)[1] == 0  # wraps
+
+    def test_falls_through_when_no_candidate_exists(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        only_idle = {"idle": {"count": 3, "dur": 0.2}}
+        # candidates absent → first state in the dict
+        assert pick_anim_frame(["jump", "walk"], 0.0, only_idle)[0] == "idle"
+
+    def test_deterministic(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        a = pick_anim_frame(["walk"], 0.37, self.S)
+        b = pick_anim_frame(["walk"], 0.37, self.S)
+        assert a == b

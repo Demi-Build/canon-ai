@@ -39,13 +39,15 @@ v1 enforced policies:
   at their placement) when the player dies and respawns at a checkpoint.
   Enforced in both play surfaces' respawn paths.
 - ``spawn_grace`` (combat v1): "until_move" — after level start or a
-  respawn the player takes no damage and blinks, and chaser-archetype
-  enemies hold still, until the player's first movement input; that
-  first input then starts a full-invincibility SHIELD window
+  respawn the player takes no damage and blinks until the first movement
+  input; that first input then starts a full-invincibility SHIELD window
   (``CombatSpec.spawn_grace_s`` — the number lives in combat.json) so
-  respawning beside a checkpoint-camping enemy stays fair; "off" — no
-  grace at all. Enforced in both play surfaces (damage gates + chaser
-  AI gate).
+  respawning beside a checkpoint-camping enemy stays fair. Enemies are
+  NOT frozen during grace — aggressive ones may already be closing in;
+  the untouchable window plus the spawn-safety radius are what keep the
+  respawn fair (and what let a no-input frame capture actually show the
+  chase); "off" — no grace at all. Enforced in both play surfaces
+  (damage gates).
 - ``rarity_caps`` (multi-stage ecology): per-level at-most-N caps per
   enemy RARITY tier ("rare"/"uncommon"/... — schema v5 rolls the tier
   onto the definition). Enforced at placement validation and stated in
@@ -77,6 +79,48 @@ class GameRules(BaseModel):
     checkpoint_enemy_reset: bool = True
     spawn_grace: Literal["until_move", "off"] = "until_move"
     rarity_caps: dict[str, int] = {"rare": 1, "uncommon": 2}
+    #: Enemy eyesight for aggro detection, by LOCOMOTION archetype — a data
+    #: description of each mover's field of view that BOTH play surfaces
+    #: apply. The shape KINDS are hardened code (the detection routine both
+    #: surfaces mirror); which shape each archetype uses, and the numbers,
+    #: are data here. Shapes: "omni" = 360 degrees (swimmers see any
+    #: direction); "hemisphere" = the 180-degree forward half-plane, above
+    #: AND below (flyers); "forward" = a narrow cone in front, within
+    #: "vband" rows of the enemy's own height (ground walkers only see
+    #: what's ahead at their level); "none" = blind (immobile sentries).
+    #: An archetype absent from this map falls back to "omni" in the
+    #: consumers. Aggro is gated by BOTH range and this FOV.
+    enemy_sight: dict[str, dict] = {
+        "patroller": {"fov": "forward", "vband": 2},
+        "swimmer": {"fov": "omni"},
+        "flyer": {"fov": "hemisphere"},
+        "sentry": {"fov": "none"},
+    }
+    #: Aggressive enemies (a non-passive rolled ``aggro`` tier) pursue at
+    #: this multiple of their patrol speed — the "increased speed" of a
+    #: committed chase. Patrol and the walk home stay at base speed.
+    chase_speed_mult: float = 1.5
+    #: Flight tuning for the flyer locomotion (both play surfaces read it).
+    #: An AGGRESSIVE flyer, IDLE, hovers near its spawn — a vertical bob of
+    #: ``hover_amp`` cells at ``hover_freq`` plus a slow horizontal sway of
+    #: +/-``hover_sway`` cells at ``sway_speed`` that scans its 180-degree cone
+    #: both ways. When it SPOTS the player it hunts FROM ABOVE: it never
+    #: descends to ground-chase — it stays on its altitude "plane" and
+    #: dive-bombs in committed parabolic arcs. Each ``swoop_period``-second
+    #: cycle is a ``swoop_duration``-second PLUNGE (a parabola aimed where the
+    #: player was, down and back up to the plane) then a recovery on the plane
+    #: (bob + reposition toward the player). Its horizontal reach is
+    #: leash-bounded. A PASSIVE flyer patrols horizontally and dives on the
+    #: same cycle but at a fixed ``swoop_depth``, not aimed at the player.
+    flyer: dict[str, float] = {
+        "hover_amp": 0.4,
+        "hover_freq": 3.0,
+        "hover_sway": 2.0,
+        "sway_speed": 1.5,
+        "swoop_period": 3.0,
+        "swoop_duration": 1.0,
+        "swoop_depth": 3.0,
+    }
 
 
 def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:

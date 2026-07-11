@@ -102,6 +102,55 @@ class ImageBackend(Protocol):
 
 
 @runtime_checkable
+class ImageEditBackend(Protocol):
+    """Protocol for image *editing* (img2img) provider adapters.
+
+    Editing is a strictly MORE capable surface than ``ImageBackend``'s
+    text-to-image: given an existing image plus a prompt, return a new one
+    (e.g. nano-banana's ``/edit`` endpoint). A backend that supports editing
+    implements BOTH protocols structurally; a consumer gates the edit path on
+    ``isinstance(backend, ImageEditBackend)`` and falls back loudly when it's
+    absent.
+
+    Kept SEPARATE from ``ImageBackend`` — NOT added as a method there — on
+    purpose. ``ImageBackend`` is ``@runtime_checkable``, so adding a member
+    would make ``isinstance(x, ImageBackend)`` require it, breaking every
+    existing implementor that lacks img2img (``LocalImageBackend`` has no edit
+    pipeline; third-party backends need not gain one). This is the same
+    reasoning the ``prefers_serial`` note on ``LLMBackend`` records: optional
+    capabilities stay off the required Protocol surface.
+
+    Example::
+
+        if isinstance(backend, ImageEditBackend):
+            sheet = backend.edit(base_png, "4-frame walk cycle", 2048, 512)
+        else:
+            ...  # no img2img — keep the static sprite (loud fallback)
+    """
+
+    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
+        """Edit ``image_bytes`` per ``prompt`` (img2img).
+
+        Args:
+            image_bytes: The source image (PNG-encoded) to edit.
+            prompt: Text instructions describing the desired edit.
+            width: Target width in pixels.
+            height: Target height in pixels.
+
+        Returns:
+            Raw image bytes, conformed to exactly ``width`` x ``height`` (the
+            same code-enforced size contract as ``ImageBackend.generate``).
+        """
+        ...
+
+    async def edit_async(
+        self, image_bytes: bytes, prompt: str, width: int, height: int
+    ) -> bytes:
+        """Async variant of ``edit``."""
+        ...
+
+
+@runtime_checkable
 class MusicBackend(Protocol):
     """Protocol for music-generation provider adapters (Lyria, Suno, etc.).
 

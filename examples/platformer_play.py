@@ -27,8 +27,15 @@ complete.
 from __future__ import annotations
 
 import json
+import math
+import os
 import sys
 from pathlib import Path
+
+
+def _sign(v: float) -> float:
+    """Mirror of GDScript ``signf``: 1.0 / -1.0 / 0.0 (0 for exactly 0)."""
+    return 1.0 if v > 0 else (-1.0 if v < 0 else 0.0)
 
 SCALE = 32
 FPS = 60
@@ -81,6 +88,23 @@ def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
             (1, 1), Image.BILINEAR
         ).getpixel((0, 0))
     return colors
+
+
+def pick_anim_frame(
+    candidates: list, anim_t: float, states: dict
+) -> tuple[str, int]:
+    """Pure state + frame-index selection for sprite animation (enemy OR player).
+
+    ``candidates`` is the state-priority list the caller builds from the tracked
+    runtime signals (enemy: hurt > walk > idle; player: jump > walk > idle) —
+    the first candidate that exists in ``states`` wins. ``states`` maps state →
+    ``{"count": int, "dur": float_seconds}``. The frame index is a deterministic
+    function of the accumulated clock, so the fixed-dt capture harness (and unit
+    tests) reproduce it exactly. Reference for main.gd's GDScript mirror.
+    """
+    state = next((s for s in candidates if s in states), next(iter(states)))
+    info = states[state]
+    return state, int(anim_t / info["dur"]) % max(1, int(info["count"]))
 
 
 def main() -> None:
@@ -168,6 +192,15 @@ def main() -> None:
             self.home_y = float(placement["y"])
             self.direction = 1.0
             self.dir_y = 1.0  # float-style swimmers drift diagonally
+            # Aggro lock: set when an aggressive enemy first spots the
+            # player, cleared on losing eyesight range or hitting the tether.
+            self.alerted = False
+            # Flyer clocks: vertical hover bob and the dive cycle, plus the
+            # committed dive direction + depth (ephemeral, reset on respawn).
+            self.bob_t = 0.0
+            self.swoop_t = 0.0
+            self.swoop_dir = 1.0
+            self.swoop_dep = 0.0
             self.variant = variant_defs.get(str(placement.get("variant", "")))
             speed_mult = self.variant.get("speed_mult", 1.0) if self.variant else 1.0
             self.speed = float(self.spec["stats"].get("speed", 0)) * speed_mult
@@ -209,6 +242,9 @@ def main() -> None:
             their placement, full hp (GameRules.checkpoint_enemy_reset)."""
             self.x, self.y = self.home, self.home_y
             self.direction, self.dir_y = 1.0, 1.0
+            self.alerted = False
+            self.bob_t = self.swoop_t = 0.0
+            self.swoop_dir, self.swoop_dep = 1.0, 0.0
             self.hp, self.alive, self.hurt_t = self.max_hp, True, 0.0
 
         def stomp(self) -> bool:
@@ -220,14 +256,19 @@ def main() -> None:
             self.hurt_t = 0.25
             return False
 
-        def _can_occupy(self, x: float, y: float | None = None) -> bool:
+        def _can_occupy(
+            self, x: float, y: float | None = None, swim_style: str | None = None
+        ) -> bool:
             """Terrain constraint for the NEXT step (GameRules-aware):
             swimmers stay in their volume (surface-riders on its TOP
             row); land enemies keep solid footing and — under
             swimmers_only/forbidden — never enter a volume. NO enemy
             walks into a hazard or clips through a solid — monsters
-            respect the level (behavior doctrine; jumpers are v2)."""
+            respect the level (behavior doctrine; jumpers are v2). Pass
+            ``swim_style=""`` to check plain in-water occupancy (a hunting
+            swimmer ignores its passive surface/float drift rule)."""
             y = self.y if y is None else y
+            style = self.swim_style if swim_style is None else swim_style
             cell = tile_at(x, y)
             below = tile_at(x, y + 1)
             if cell in HAZARDS:
@@ -235,77 +276,271 @@ def main() -> None:
             if self.spec.get("archetype") == "swimmer":
                 if cell not in VOLUMES:
                     return False
-                if self.swim_style == "surface":
+                if style == "surface":
                     return tile_at(x, y - 1) not in VOLUMES
                 return True
+            if self.spec.get("archetype") == "flyer":
+                # Airborne: any open-air cell — a flyer ignores ground and
+                # flies over gaps, but never through walls or into
+                # hazards/water.
+                return not (cell in BLOCKING or cell in ONE_WAY or cell in VOLUMES)
             if cell in BLOCKING or cell in ONE_WAY:
                 return False  # no clipping through terrain
             if cell in VOLUMES and water_policy != "amphibious":
                 return False
             return below in BLOCKING or below in ONE_WAY  # no cliff-walking
 
-        def update(self, dt: float, player_x: float, grace: bool) -> None:
+        def _in_sight(
+            self, rel_x: float, rel_y: float, aggro_range: float
+        ) -> bool:
+            """Is the player (rel = player - enemy) within eyesight RANGE and
+            this locomotion's field of view? FOV shapes are data
+            (rules.enemy_sight per archetype): "omni" 360, "hemisphere" the
+            180 forward half-plane, "forward" a narrow cone in front within
+            `vband` rows, "none" blind; absent archetype -> "omni". main.gd
+            mirrors this — mechanics parity."""
+            if math.hypot(rel_x, rel_y) > aggro_range:
+                return False
+            cfg = rules.get("enemy_sight", {}).get(
+                self.spec.get("archetype", "sentry"), {}
+            )
+            fov = str(cfg.get("fov", "omni"))
+            if fov == "none":
+                return False
+            if fov == "omni":
+                return True
+            if rel_x * self.direction < 0:
+                return False  # behind the enemy's facing half-plane
+            if fov == "forward":
+                return abs(rel_y) <= float(cfg.get("vband", 2))
+            return True  # "hemisphere": forward half-plane, any vertical
+
+        def _aggro_mode(self, player_x: float, player_y: float) -> str:
+            """Locomotion-agnostic aggro decision shared by ground/water/air:
+            FOV-gated detection, then an `alerted` lock that commits the chase
+            by RANGE until the player leaves eyesight range OR the tether
+            (leash_range; <=0 = no tether) snaps. Returns "chase" | "return" |
+            "patrol"; mutates self.alerted. Mirrored in main.gd."""
+            aggro = float(self.behavior.get("aggro_range", 0) or 0)
+            rel_x, rel_y = player_x - self.x, player_y - self.y
+            leash = float(self.behavior.get("leash_range", 0) or 0)
+            # A flyer's territory (leash + return threshold) is HORIZONTAL —
+            # its dives dip in Y and must not count as straying from home.
+            home_dist = (
+                abs(self.x - self.home)
+                if self.spec.get("archetype") == "flyer"
+                else math.hypot(self.x - self.home, self.y - self.home_y)
+            )
+            if self.alerted:
+                if math.hypot(rel_x, rel_y) > aggro or (
+                    leash > 0 and home_dist >= leash
+                ):
+                    self.alerted = False
+            elif self._in_sight(rel_x, rel_y, aggro):
+                self.alerted = True
+            if self.alerted:
+                return "chase"
+            if home_dist > float(self.behavior.get("patrol_range", 4)):
+                return "return"  # chased out of its beat — walk home
+            return "patrol"
+
+        def _ground_toward(self, target_x: float, step: float) -> None:
+            """Ground pursuit/return: step X toward a target, occupancy-gated
+            (halts at cliffs, walls, hazards, water). Y is locked."""
+            dir_to = _sign(target_x - self.x)
+            if dir_to != 0:
+                self.direction = dir_to
+            nx = self.x + dir_to * step
+            if abs(target_x - self.x) < step:
+                nx = target_x
+            if self._can_occupy(nx):
+                self.x = nx
+
+        def _swim_toward(
+            self, target_x: float, target_y: float, step: float
+        ) -> None:
+            """Water pursuit/return: step X and Y (independently,
+            occupancy-gated) toward a target, staying inside the volume. A
+            hunting swimmer ignores its passive swim_style drift rule
+            (swim_style "" occupancy)."""
+            dir_x = _sign(target_x - self.x)
+            if dir_x != 0:
+                self.direction = dir_x
+            nx = self.x + dir_x * step
+            if abs(target_x - self.x) < step:
+                nx = target_x
+            if self._can_occupy(nx, self.y, swim_style=""):
+                self.x = nx
+            ny = self.y + _sign(target_y - self.y) * step
+            if abs(target_y - self.y) < step:
+                ny = target_y
+            if self._can_occupy(self.x, ny, swim_style=""):
+                self.y = ny
+
+        def _fly_toward(
+            self, target_x: float, target_y: float, step: float
+        ) -> None:
+            """Airborne pursuit/return: step X and Y (independently,
+            occupancy-gated) toward a target through open air — the swoop and
+            the climb home."""
+            dir_x = _sign(target_x - self.x)
+            if dir_x != 0:
+                self.direction = dir_x
+            nx = self.x + dir_x * step
+            if abs(target_x - self.x) < step:
+                nx = target_x
+            if self._can_occupy(nx):
+                self.x = nx
+            ny = self.y + _sign(target_y - self.y) * step
+            if abs(target_y - self.y) < step:
+                ny = target_y
+            if self._can_occupy(self.x, ny):
+                self.y = ny
+
+        def update(self, dt: float, player_x: float, player_y: float) -> None:
+            # Aggro is an ORTHOGONAL tier layered on locomotion: an aggressive
+            # enemy (aggro_range > 0) chases/returns via the shared decision,
+            # otherwise runs its locomotion's patrol. main.gd mirrors every
+            # branch — mechanics parity. No spawn-grace gate: the player is
+            # untouchable during grace, so an aggressive enemy may close in
+            # (shield + spawn-safety radius keep it fair, and it makes a
+            # no-input frame capture actually show the chase).
             archetype = self.spec.get("archetype", "sentry")
             self.hurt_t = max(0.0, self.hurt_t - dt)
-            if (
-                archetype == "swimmer"
-                and self.swim_style == "float"
-                and self.speed > 0
-            ):
-                # Floating swimmer: diagonal drift, each axis bouncing
-                # off the water's boundary independently (main.gd mirrors
-                # this — mechanics parity).
-                step = self.speed * 0.7 * dt
-                new_x = self.x + self.direction * step
-                if (
-                    abs(new_x - self.home) >= self.behavior.get("patrol_range", 4)
-                    or not self._can_occupy(new_x)
-                ):
-                    self.direction *= -1.0
-                else:
-                    self.x = new_x
-                new_y = self.y + self.dir_y * step
-                if tile_at(self.x, new_y) not in VOLUMES:
-                    self.dir_y *= -1.0
-                else:
-                    self.y = new_y
-            elif archetype in ("patroller", "swimmer") and self.speed > 0:
-                new_x = self.x + self.direction * self.speed * dt
-                if (
-                    abs(new_x - self.home) >= self.behavior.get("patrol_range", 4)
-                    or not self._can_occupy(new_x)
-                ):
-                    self.direction *= -1.0
-                else:
-                    self.x = new_x
-            elif archetype == "chaser" and self.speed > 0:
-                # Spawn grace (GameRules.spawn_grace): chasers hold still
-                # until the player's first move after a (re)spawn.
-                if grace:
-                    return
-                # Leashed pursuit (behavior doctrine): chase only while
-                # the player is in aggro AND home is within leash_range;
-                # otherwise walk BACK to the home track. Only the
-                # 'relentless' variant (behavior override) chases
-                # forever. main.gd mirrors this — mechanics parity.
-                leash = float(self.behavior.get("leash_range", 0) or 0)
-                aggro = float(self.behavior.get("aggro_range", 6))
-                chasing = (
-                    abs(player_x - self.x) <= aggro
-                    and (leash <= 0 or abs(self.x - self.home) < leash)
-                )
-                if chasing:
-                    new_x = self.x + (
-                        1.0 if player_x > self.x else -1.0
-                    ) * self.speed * dt
-                    if self._can_occupy(new_x):  # halts at volume/cliff edges
+            patrol_range = float(self.behavior.get("patrol_range", 4))
+            mode = "patrol"
+            if float(self.behavior.get("aggro_range", 0) or 0) > 0 and self.speed > 0:
+                mode = self._aggro_mode(player_x, player_y)
+            chase = self.speed * float(rules.get("chase_speed_mult", 1.5)) * dt
+            walk = self.speed * dt
+            if archetype == "swimmer" and self.speed > 0:
+                if mode == "chase":
+                    self._swim_toward(player_x, player_y, chase)
+                elif mode == "return":
+                    self._swim_toward(self.home, self.home_y, walk)
+                elif self.swim_style == "float":
+                    # Passive floater: diagonal drift, each axis bouncing off
+                    # the water's boundary independently.
+                    step = self.speed * 0.7 * dt
+                    new_x = self.x + self.direction * step
+                    if abs(new_x - self.home) >= patrol_range or not self._can_occupy(
+                        new_x
+                    ):
+                        self.direction *= -1.0
+                    else:
                         self.x = new_x
-                elif abs(self.x - self.home) > 0.1:
-                    new_x = self.x + (
-                        1.0 if self.home > self.x else -1.0
-                    ) * self.speed * dt
-                    if self._can_occupy(new_x):
+                    new_y = self.y + self.dir_y * step
+                    if tile_at(self.x, new_y) not in VOLUMES:
+                        self.dir_y *= -1.0
+                    else:
+                        self.y = new_y
+                else:
+                    # Passive within/surface swimmer: x-bounce patrol.
+                    new_x = self.x + self.direction * walk
+                    if abs(new_x - self.home) >= patrol_range or not self._can_occupy(
+                        new_x
+                    ):
+                        self.direction *= -1.0
+                    else:
                         self.x = new_x
+            elif archetype == "patroller" and self.speed > 0:
+                if mode == "chase":
+                    self._ground_toward(player_x, chase)
+                elif mode == "return":
+                    self._ground_toward(self.home, walk)
+                else:
+                    # Passive / not-alerted: x-bounce patrol within its beat.
+                    new_x = self.x + self.direction * walk
+                    if abs(new_x - self.home) >= patrol_range or not self._can_occupy(
+                        new_x
+                    ):
+                        self.direction *= -1.0
+                    else:
+                        self.x = new_x
+            elif archetype == "flyer" and self.speed > 0:
+                fcfg = rules.get("flyer", {})
+                # Flyer clocks advance EVERY frame (pure frame-count) so the
+                # bob + dive phases stay deterministic across surfaces — parity.
+                self.bob_t += dt
+                self.swoop_t += dt
+                bob = math.sin(
+                    self.bob_t * float(fcfg.get("hover_freq", 3.0))
+                ) * float(fcfg.get("hover_amp", 0.4))
+                if mode == "chase":
+                    # Dive-bomb from altitude, "hunt from above": RECOVER on
+                    # the plane (bob + reposition toward the player, COMMIT the
+                    # next dive's dir+depth), then a fixed-direction parabolic
+                    # PLUNGE aimed where the player was, back up to the plane.
+                    # Never descends to ground-chase. main.gd mirrors this.
+                    period = float(fcfg.get("swoop_period", 3.0))
+                    dur = float(fcfg.get("swoop_duration", 1.0))
+                    phase = math.fmod(self.swoop_t, period)
+                    if phase < dur:  # DIVE (committed dir + depth)
+                        u = phase / dur
+                        if self._can_occupy(self.x + self.swoop_dir * chase):
+                            self.x += self.swoop_dir * chase
+                        ny = self.home_y + self.swoop_dep * 4.0 * u * (1.0 - u)
+                        if self._can_occupy(self.x, ny):
+                            self.y = ny
+                        if self.swoop_dir != 0:
+                            self.direction = self.swoop_dir
+                    else:  # RECOVER on the plane: track player, aim next dive
+                        self.swoop_dir = _sign(player_x - self.x)
+                        self.swoop_dep = max(0.0, player_y - self.home_y)
+                        nx = self.x + _sign(player_x - self.x) * walk
+                        if abs(player_x - self.x) < walk:
+                            nx = player_x
+                        if self._can_occupy(nx):
+                            self.x = nx
+                        by = self.home_y + bob
+                        if self._can_occupy(self.x, by):
+                            self.y = by
+                        if player_x != self.x:
+                            self.direction = _sign(player_x - self.x)
+                elif mode == "return":
+                    self._fly_toward(self.home, self.home_y, walk)  # climb home
+                elif float(self.behavior.get("aggro_range", 0) or 0) > 0:
+                    # AGGRESSIVE flyer idle: hover near spawn — a vertical bob
+                    # plus a horizontal sway that scans its 180 cone both ways
+                    # (and drifts back into the hover zone if it ended a chase
+                    # outside it).
+                    sway = float(fcfg.get("hover_sway", 2.0))
+                    sway_speed = float(fcfg.get("sway_speed", 1.5))
+                    nx = self.x + self.direction * sway_speed * dt
+                    if nx > self.home + sway:
+                        self.direction = -1.0
+                    elif nx < self.home - sway:
+                        self.direction = 1.0
+                    nx = self.x + self.direction * sway_speed * dt
+                    if self._can_occupy(nx):
+                        self.x = nx
+                    else:
+                        self.direction *= -1.0
+                    by = self.home_y + bob
+                    if self._can_occupy(self.x, by):
+                        self.y = by
+                else:
+                    # PASSIVE flyer: horizontal patrol at altitude + a periodic
+                    # ambient dive (swoop) that returns to altitude.
+                    new_x = self.x + self.direction * walk
+                    if abs(new_x - self.home) >= patrol_range or not self._can_occupy(
+                        new_x
+                    ):
+                        self.direction *= -1.0
+                    else:
+                        self.x = new_x
+                    dur = float(fcfg.get("swoop_duration", 1.0))
+                    phase = math.fmod(self.swoop_t, float(fcfg.get("swoop_period", 3.0)))
+                    dip = (
+                        float(fcfg.get("swoop_depth", 3.0)) * math.sin(math.pi * phase / dur)
+                        if phase < dur
+                        else 0.0
+                    )
+                    sy = self.home_y + dip
+                    if self._can_occupy(self.x, sy):
+                        self.y = sy
+                    elif self._can_occupy(self.x, self.home_y):
+                        self.y = self.home_y
             # sentry: stationary by definition
 
     pygame.init()
@@ -356,6 +591,71 @@ def main() -> None:
         eid: _sprite(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4))
         for eid, spec in enemies.items()
     }
+
+    # Per-state animation frames (art track, B4). frames.json sits beside
+    # base.png; each <state>.png is a horizontal strip sliced by frame count.
+    # No frames.json → this stays empty and the static base sprite plays (the
+    # loud fallback). Frames are pre-scaled to the base display size.
+    def _load_anim(sprite_rel: str, size: tuple) -> dict | None:
+        if not sprite_rel:
+            return None
+        meta_path = data_dir / (sprite_rel.rsplit("/", 1)[0] + "/frames.json")
+        if not meta_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            return None
+        anim: dict = {}
+        for state, m in meta.items():
+            strip = data_dir / m.get("path", "")
+            n = int(m.get("frames", 0))
+            if n < 1 or not strip.exists():
+                continue
+            sheet = pygame.image.load(str(strip)).convert_alpha()
+            fw = sheet.get_width() // n
+            cells = [
+                sheet.subsurface((i * fw, 0, fw, sheet.get_height()))
+                for i in range(n)
+            ]
+            anim[state] = {
+                "frames": [pygame.transform.smoothscale(c, size) for c in cells],
+                "dur": max(0.001, float(m.get("duration_ms", 120)) / 1000.0),
+            }
+        return anim or None
+
+    enemy_anims = {
+        eid: a
+        for eid, spec in enemies.items()
+        if (a := _load_anim(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4)))
+    }
+    # The player animates too (art track): idle/walk/JUMP, smoother (~9 frames).
+    player_anim = _load_anim("sprite/player/base.png", (SCALE - 8, SCALE - 8))
+
+    def _frame_from(anim: dict, candidates: list, anim_t: float):
+        """Pick the current frame Surface for an animation dict given the
+        state-priority candidates + the accumulated clock, or None."""
+        if not anim:
+            return None
+        states = {
+            s: {"count": len(v["frames"]), "dur": v["dur"]} for s, v in anim.items()
+        }
+        state, idx = pick_anim_frame(candidates, anim_t, states)
+        return anim[state]["frames"][idx]
+
+    def _enemy_frame(enemy) -> pygame.Surface | None:
+        """The current animation frame for an enemy's state, or None → the
+        caller draws the static base sprite (loud fallback)."""
+        candidates = (
+            (["hurt"] if enemy.hurt_t > 0 else [])
+            + (["walk"] if getattr(enemy, "_anim_moving", False) else [])
+            + ["idle", "walk", "hurt", "death"]
+        )
+        return _frame_from(
+            enemy_anims.get(enemy.spec.get("enemy_id", "")),
+            candidates,
+            getattr(enemy, "_anim_t", 0.0),
+        )
     # Gameplay props (manifest "props", keyed per biome stage): sprite
     # when the art track made one, drawn placeholder shape otherwise.
     prop_paths = manifest.get("props", {}).get(stage_id, {})
@@ -424,6 +724,8 @@ def main() -> None:
     # window is what keeps respawning next to one fair.
     spawn_shield = 0.0
     blink_t = 0.0  # deterministic blink clock (grace + shield + i-frames)
+    player_anim_t = 0.0  # player animation clock (fixed-dt in capture)
+    player_facing = 1.0  # last horizontal facing (flip the sprite left/right)
     live_enemies = [Enemy(p) for p in placements]
 
     def tile_at(cx: float, cy: float) -> int:
@@ -519,9 +821,30 @@ def main() -> None:
     # jump_height platforms unlandable (feet never cleared the top).
     jump_v = (2.0 * gravity * (float(movement["jump_height"]) + 0.4)) ** 0.5
 
+    # Headless verification capture — the pygame analog of Godot's
+    # PLAT_LEVEL + --write-movie. PLAT_CAPTURE=<dir> runs a FIXED-dt, no-input
+    # session (player holds still; spawn grace keeps it safe while aggressive
+    # enemies close in — exactly what we want to SEE), saving a frame every
+    # PLAT_CAPTURE_EVERY ticks for PLAT_CAPTURE_TICKS ticks, then quits. This
+    # is what makes the pre-art surface frame-capturable for cross-surface
+    # parity checks the same way Godot is.
+    cap_dir = os.environ.get("PLAT_CAPTURE", "")
+    # PLAT_TRAJ=<path> dumps every enemy's world position + alerted flag per
+    # tick in the SAME format main.gd emits, so the two surfaces' movement is
+    # diffable in world space (rendering-independent). Either hook runs a
+    # deterministic FIXED-dt, no-input session.
+    traj_path = os.environ.get("PLAT_TRAJ", "")
+    headless = bool(cap_dir or traj_path)
+    cap_ticks = int(os.environ.get("PLAT_CAPTURE_TICKS", "300"))
+    cap_every = int(os.environ.get("PLAT_CAPTURE_EVERY", "30"))
+    cap_i = 0
+    if cap_dir:
+        Path(cap_dir).mkdir(parents=True, exist_ok=True)
+    traj_file = open(traj_path, "w") if traj_path else None  # noqa: SIM115
+
     running = True
     while running:
-        dt = clock.tick(FPS) / 1000.0
+        dt = (1.0 / FPS) if headless else clock.tick(FPS) / 1000.0
         volume = volume_params_at(px, py)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -563,10 +886,12 @@ def main() -> None:
         )
         if dx:
             note_move()  # walking ends the grace, starts the shield
+            player_facing = dx  # face the direction of travel
         grace = spawn_grace and not moved
         iframes = max(0.0, iframes - dt)
         spawn_shield = max(0.0, spawn_shield - dt)
         blink_t += dt
+        player_anim_t += dt
         speed = run_speed * (
             float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
         )
@@ -606,7 +931,16 @@ def main() -> None:
                 hurt(int(hazard.get("damage", 1)))
                 break
         for enemy in live_enemies:
-            enemy.update(dt, px, grace)
+            enemy.update(dt, px, py)
+            # Animation state (presentation): moving = it changed position
+            # this tick (patrol/chase/swoop → walk; a still sentry → idle).
+            # The clock advances on the fixed-dt capture too → deterministic.
+            enemy._anim_moving = (
+                abs(enemy.x - getattr(enemy, "_anim_px", enemy.x))
+                + abs(enemy.y - getattr(enemy, "_anim_py", enemy.y))
+            ) > 1e-4
+            enemy._anim_px, enemy._anim_py = enemy.x, enemy.y
+            enemy._anim_t = getattr(enemy, "_anim_t", 0.0) + dt
             if not enemy.alive:
                 continue
             # Size-aware touch AABB: the body is `size` cells square,
@@ -629,6 +963,12 @@ def main() -> None:
                 vy = -jump_v * STOMP_BOUNCE
             else:
                 hurt(enemy.damage_hearts)
+        if traj_file is not None:
+            parts = [
+                f"{e.spec.get('enemy_id', '')}:{e.x:.3f}:{e.y:.3f}:{1 if e.alerted else 0}"
+                for e in live_enemies
+            ]
+            traj_file.write(f"{cap_i}|{','.join(parts)}\n")
         # Crossing a checkpoint moves the respawn point (3b triggers).
         for checkpoint in checkpoints:
             if (
@@ -720,14 +1060,13 @@ def main() -> None:
                 side,
             )
             sprite = enemy_sprites.get(enemy.spec.get("enemy_id", ""))
+            frame = _enemy_frame(enemy)  # animated frame, or None → base sprite
             if enemy.hurt_t > 0 and int(enemy.hurt_t * 20) % 2 == 0:
                 pygame.draw.rect(screen, (255, 255, 255), rect)  # stomp flash
-            elif sprite is not None:
-                image = sprite
+            elif (image := frame if frame is not None else sprite) is not None:
                 if enemy.size != 1.0:
                     image = pygame.transform.smoothscale(
-                        sprite,
-                        (int(rect[2]), int(rect[3])),
+                        image, (int(rect[2]), int(rect[3]))
                     )
                 if enemy.direction < 0:
                     image = pygame.transform.flip(image, True, False)
@@ -751,8 +1090,19 @@ def main() -> None:
             grace or spawn_shield > 0 or iframes > 0
         ) and int(blink_t * 8) % 2 == 0
         if not blinking:
-            if player_sprite is not None:
-                screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))
+            # airborne → jump, moving on ground → walk, else idle (loud
+            # fallback to the static base sprite when there's no animation).
+            p_candidates = (
+                (["jump"] if not on_ground else [])
+                + (["walk"] if dx else [])
+                + ["idle", "walk"]
+            )
+            frame = _frame_from(player_anim, p_candidates, player_anim_t)
+            image = frame if frame is not None else player_sprite
+            if image is not None:
+                if player_facing < 0:
+                    image = pygame.transform.flip(image, True, False)
+                screen.blit(image, (px * SCALE + 4, py * SCALE + 4))
             else:
                 pygame.draw.rect(
                     screen, (240, 240, 240),
@@ -793,6 +1143,15 @@ def main() -> None:
             )
         pygame.display.flip()
 
+        if headless:
+            if cap_dir and cap_i % cap_every == 0:
+                pygame.image.save(screen, f"{cap_dir}/frame_{cap_i:04d}.png")
+            cap_i += 1
+            if cap_i >= cap_ticks:
+                running = False
+
+    if traj_file is not None:
+        traj_file.close()
     pygame.quit()
 
 

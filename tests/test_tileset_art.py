@@ -66,9 +66,15 @@ def _textured_png(size: int = 64) -> bytes:
 
 
 def _mean_rgb(img: Image.Image) -> tuple[float, float, float]:
-    pixels = list(img.convert("RGB").get_flattened_data())
-    n = len(pixels)
-    return tuple(sum(p[i] for p in pixels) / n for i in range(3))
+    # Alpha-aware, mirroring vlm_qa._mean_rgb: object-like tiles (hazards)
+    # are cut to a transparent backdrop, so conformance is measured over
+    # the VISIBLE pixels; fully-opaque fills average every pixel as before.
+    pixels = list(img.convert("RGBA").get_flattened_data())
+    visible = [(r, g, b) for r, g, b, a in pixels if a > 0] or [
+        p[:3] for p in pixels
+    ]
+    n = len(visible)
+    return tuple(sum(p[i] for p in visible) / n for i in range(3))
 
 
 class TestConformToPalette:

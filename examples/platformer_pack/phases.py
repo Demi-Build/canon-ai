@@ -542,13 +542,30 @@ class EnemyGeneratorPhase:
                 counter += 1
             seen_ids.add(enemy_id)
 
+            # Aggro is an ORTHOGONAL behavior tier (schemas/enemy.json),
+            # rolled independently of locomotion: its aggro_mult/leash_mult
+            # scale the enemy's own patrol_range into an eyesight radius and
+            # a chase tether, so a big-territory enemy sees and chases
+            # proportionally farther. passive -> both 0 (never pursues). A
+            # negative leash_mult is the "no tether" sentinel (a 'hunter'
+            # chases across the whole level) — stored as leash_range 0, which
+            # the pursuit routine reads as unleashed. The multiply lives in
+            # code; the mults + weights stay user-editable schema data.
+            patrol_range = int(skeleton["patrol_range"])
+            aggro_mult = float(skeleton.get("aggro_mult", 0) or 0)
+            leash_mult = float(skeleton.get("leash_mult", 0) or 0)
+            aggro_range = round(aggro_mult * patrol_range)
+            leash_range = 0 if leash_mult < 0 else round(leash_mult * patrol_range)
             behavior = {
-                "patrol_range": skeleton["patrol_range"],
-                "aggro_range": skeleton["aggro_range"],
-                # Chasers pursue only this far from their home track
-                # before turning back (behavior doctrine: tracks first;
-                # only the rare 'relentless' VARIANT chases forever).
-                "leash_range": skeleton.get("leash_range", 0),
+                "patrol_range": patrol_range,
+                # Eyesight radius: how close the player gets before an
+                # aggressive enemy commits (0 = passive, never pursues).
+                "aggro_range": aggro_range,
+                # Chase tether: how far from home it pursues before breaking
+                # off and returning to its patrol (0 = no tether; the
+                # 'relentless' VARIANT is the same idea as a placement
+                # override).
+                "leash_range": leash_range,
             }
             if swim_style:
                 behavior["swim_style"] = swim_style

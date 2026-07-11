@@ -265,6 +265,10 @@ class PlayerDefinition(ArtifactMeta):
 
     sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
     sprite_hash: str = ""
+    #: VLM-authored per-state animation manifest (art track): the player's
+    #: analog of ``EnemyDefinition.stats["animation"]`` — states → {path, hash,
+    #: frames, frame_width, frame_height, duration_ms}. Empty = static sprite.
+    animation: dict[str, Any] = Field(default_factory=dict)
 
 
 class StageProps(ArtifactMeta):

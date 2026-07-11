@@ -58,7 +58,7 @@ class CombatSpec(BaseModel):
     #: Spawn SHIELD: how long the player stays untouchable AFTER the
     #: first input that ends the spawn grace. Enemies may roam across a
     #: checkpoint (that is normal gameplay) — this window is what makes
-    #: respawning next to a camping chaser fair: full invincibility
+    #: respawning next to a camping aggressor fair: full invincibility
     #: until you move, then ONE more second (playtest round 2: 4s felt
     #: like god mode). Covers contact, hazards, and volume drain.
     #: Active only while ``GameRules.spawn_grace`` is "until_move".

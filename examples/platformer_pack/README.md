@@ -183,9 +183,12 @@ Policy toggles, each enforced by validators and both play surfaces:
 - `platform_drop_through`: Down+jump drops through one-way platforms
 - `variant_caps`: per-level caps by variant name (`{"champion": 1}`)
 - `checkpoint_enemy_reset`: killed enemies return when you die and respawn
-- `spawn_grace`: `"until_move"` — blink untouchable at spawn, chasers hold
-  still until your first input, then `spawn_grace_s` seconds of shield —
-  or `"off"`
+- `spawn_grace`: `"until_move"` — blink untouchable at spawn until your
+  first input, then `spawn_grace_s` seconds of shield (enemies keep moving;
+  the untouchable window + spawn-safety radius keep it fair) — or `"off"`
+- `enemy_sight`: eyesight FOV per locomotion (`omni`/`hemisphere`/`forward`
+  +`vband`/`none`); `chase_speed_mult`: aggressive-chase speed multiplier;
+  `flyer`: hover/swoop tuning (bob, scan-sway, dive period/depth)
 - `rarity_caps`: per-level at-most-N caps per enemy rarity tier
   (`{"rare": 1, "uncommon": 2}`) — what keeps rares rare on the ground
 
@@ -229,22 +232,28 @@ definition's size), `visual` (`outline` / `scale` / `outline_scale`),
 mini-boss story; the `relentless` variant overrides the chase leash —
 the ONE enemy per level that never gives up.
 
-**Behavior doctrine** (enforced in both play surfaces): most enemies
-patrol fixed tracks; chasers pursue only within their `leash_range`
-(schema-rolled) and walk back to their home track after — only
-`relentless` chases forever. No enemy walks into a hazard tile or clips
-through solids; swimmers respect their swim style (`within`, `surface`,
-`float`). Enemies the terrain can't sustain are never offered to the
-placement agent (a swimmer needs water its whole body fits).
+**Behavior doctrine** (enforced in both play surfaces): every mover patrols
+its beat. **Aggro is an orthogonal behavior tier** (not an enemy type): an
+aggressive enemy — of ANY locomotion — spots the player in its FOV cone
+(`enemy_sight`), commits a chase up to its `leash_range` (= a multiple of its
+patrol beat; a `hunter` has no tether), then returns to patrol. The old
+`chaser` is just a patroller + aggressive; `relentless` is the
+one-per-level hunter-grade variant. No enemy walks into a hazard tile or
+clips through solids; swimmers respect their swim style (`within`, `surface`,
+`float`); flyers stay airborne (hover+swoop or altitude-patrol+dive).
+Enemies the terrain can't sustain are never offered to the placement agent
+(a swimmer needs water its body fits; a flyer needs open airspace).
 
 ### Enemy stats — `schemas/enemy.json`
 
 Skeleton schema: mechanical properties are **pre-rolled deterministically**
-from these tables; the LLM only invents name + flavor. As shipped:
-archetypes (`patroller`/`chaser`/`sentry`/`swimmer`, weighted), body
-`size` rolled from {1.0, 1.5, 2.0} (weighted 4/2/1), hp and contact
-damage looked up by size tier (small 4–6 hp / 1 heart … big 13–18 hp /
-2 hearts), speed and aggro by archetype. Edit the weights and bands to
+from these tables; the LLM only invents name + flavor. As shipped: LOCOMOTION
+`archetype` (`patroller`/`swimmer`/`flyer`/`sentry`, weighted) and an
+orthogonal `aggro` tier (`passive`/`stalker`/`pursuer`/`hunter`, 80/12/6/2)
+whose `aggro_mult`/`leash_mult` scale the enemy's `patrol_range` into eyesight
+and tether; body `size` rolled from {1.0, 1.5, 2.0} (weighted 4/2/1), hp and
+contact damage looked up by size tier (small 4–6 hp / 1 heart … big 13–18 hp /
+2 hearts), speed by locomotion. Edit the weights and bands to
 reshape your bestiary; sizes are real — a 2.0 body needs two supported
 columns and two rows of clearance at placement, collides at full size,
 and renders at full size everywhere.
@@ -319,8 +328,8 @@ placement and in both play surfaces.
 ## Checkpoint flags & the exit goal
 
 Every level shows its gameplay props: a **checkpoint flag** per trigger
-(grey pennant until claimed, gold after — chasers may still camp it, the
-spawn shield is the fairness fix) and an **exit goal doorway** on the
+(grey pennant until claimed, gold after — aggressive enemies may still camp
+it, the spawn shield is the fairness fix) and an **exit goal doorway** on the
 exit cell, so the level visibly ends instead of teleporting you off the
 right edge (the exit zone is still the whole column).
 

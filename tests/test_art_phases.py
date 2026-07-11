@@ -17,19 +17,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 
-from canon.backends.testing import FakeImageBackend, FakeLLMBackend  # noqa: E402
+from canon.backends.testing import (  # noqa: E402
+    FakeImageBackend,
+    FakeLLMBackend,
+    FakeVLMBackend,
+)
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
 from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
 from examples.platformer_pack.effects import sanitize_effects  # noqa: E402
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS  # noqa: E402
 from examples.platformer_pack.tileset_art import (  # noqa: E402
+    _CUTOUT_CATEGORIES,
     DiffusionSheetProducer,
+    _bottom_align,
+    build_sheet_reference,
+    conform_to_palette,
+    frames_to_strip,
+    normalize_frames,
     remove_background,
+    segment_frames,
 )
+from examples.platformer_pack.vlm_qa import make_fake_vlm_responder  # noqa: E402
 from examples.run_platformer_slice import make_fake_responder  # noqa: E402
 
 SEED = "emberfall_001"
@@ -73,6 +86,83 @@ class TestRemoveBackground:
         out = remove_background(img)
         assert out.getpixel((1, 1))[3] == 0  # border transparent
         assert out.getpixel((32, 32))[3] == 255  # blob opaque
+
+    def test_only_hazards_are_cut_out(self) -> None:
+        # Only object-like tiles get their backdrop keyed; fill tiles must
+        # NOT be cut (that would punch holes in seamless terrain).
+        assert "hazard" in _CUTOUT_CATEGORIES
+        assert not (_CUTOUT_CATEGORIES & {"solid", "one_way", "volume", "empty"})
+
+    def test_conform_preserves_alpha_and_recolors_only_visible(self) -> None:
+        # A hazard drawn as an object on a backdrop (the 'spike yellow box'
+        # playtest bug): once the backdrop is cut, conform must leave it
+        # transparent AND land the VISIBLE pixels on the role hex — not the
+        # discarded backdrop.
+        img = Image.new("RGB", (64, 64), (230, 220, 120))  # yellow backdrop
+        px = img.load()
+        for y in range(20, 60):
+            for x in range(28, 36):
+                px[x, y] = (120, 30, 25)  # the spike body
+        keyed = remove_background(img)
+        out = conform_to_palette(keyed, "#d42818", levels=None)
+        assert out.mode == "RGBA"
+        assert out.getpixel((1, 1))[3] == 0  # backdrop stays transparent
+        opaque = [p for p in out.get_flattened_data() if p[3] > 0]
+        assert opaque, "the subject must survive the cut"
+        n = len(opaque)
+        mean = tuple(sum(p[i] for p in opaque) // n for i in range(3))
+        # #d42818 == (212, 40, 24); the visible mean must land on it, well
+        # inside the QA palette tolerance (48).
+        dist = sum((a - b) ** 2 for a, b in zip(mean, (212, 40, 24))) ** 0.5
+        assert dist < 48
+
+    def test_conform_opaque_fill_stays_fully_opaque(self) -> None:
+        # An RGB fill tile (no backdrop) must come out fully opaque — the
+        # alpha support must not change fill-tile behavior.
+        fill = Image.new("RGB", (32, 32), (90, 140, 60))
+        out = conform_to_palette(fill, "#5a8c3c", levels=None)
+        assert out.mode == "RGBA"
+        assert all(p[3] == 255 for p in out.get_flattened_data())
+
+    def test_bottom_align_seats_feet_on_the_frame_bottom(self) -> None:
+        # Generated sprites frame the creature with empty space below it, and
+        # the consumers bottom-anchor the frame to the floor — so enemies
+        # HOVERED (plat_kingdom3). Bottom-align must drop the content so its
+        # lowest opaque row is the frame's last row.
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for y in range(10, 31):  # a blob floating in the upper-middle
+            for x in range(24, 40):
+                img.putpixel((x, y), (200, 50, 50, 255))
+        out = _bottom_align(img)
+        alpha = out.getchannel("A")
+        assert alpha.getbbox()[3] == out.height  # content reaches the bottom
+        # x-centered and no taller than before (content preserved, not scaled).
+        assert out.size == img.size
+        # A fully-transparent frame (empty fake) is returned untouched.
+        empty = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        assert _bottom_align(empty).getchannel("A").getbbox() is None
+
+
+class TestArtDescriptors:
+    def test_sentry_sprite_reads_as_stationary(self) -> None:
+        from examples.platformer_pack.art_phases import _enemy_art_descriptor
+
+        d = _enemy_art_descriptor("sentry", "a plump spring-legged guardian")
+        assert "planted" in d and "immobile" in d
+        assert "a plump spring-legged guardian" in d
+        # A patroller reads as moving, never planted.
+        p = _enemy_art_descriptor("patroller", "a round critter")
+        assert "walk" in p and "planted" not in p
+
+    def test_player_is_a_weaponless_mascot(self) -> None:
+        from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+
+        low = PLAYER_DESCRIPTOR.lower()
+        assert "mascot" in low
+        assert "not a knight" in low
+        assert "weapon" in low
+        # 'heroic' is the term that pulled the generator toward armored knights.
+        assert "heroic" not in low
 
 
 class TestSpriteArt:
@@ -347,3 +437,169 @@ class TestSkinnedRender:
             assert image.size == (
                 level.grid_width * tile_px, level.grid_height * tile_px,
             )
+
+
+# ---------------------------------------------------------------------------
+# Frame segmentation helpers (B3) — content-aware, robust to N
+# ---------------------------------------------------------------------------
+
+
+def _blob_sheet(n: int, w: int = 800, h: int = 200) -> Image.Image:
+    """A white sheet of ``n`` evenly-spaced opaque blobs — a stand-in for a
+    generated animation sheet."""
+    img = Image.new("RGB", (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    cell = w // n
+    for i in range(n):
+        cx = i * cell + cell // 2
+        draw.ellipse([cx - 40, h // 2 - 40, cx + 40, h // 2 + 40], fill=(40, 60, 200))
+    return img
+
+
+class TestFrameSegmentation:
+    def test_recovers_actual_blob_count(self) -> None:
+        # content-aware: whatever N the model drew, not what was asked for
+        assert len(segment_frames(_blob_sheet(5))) == 5
+        assert len(segment_frames(_blob_sheet(3))) == 3
+        assert len(segment_frames(_blob_sheet(2))) == 2
+
+    def test_normalize_makes_uniform_square_frames(self) -> None:
+        frames = normalize_frames(segment_frames(_blob_sheet(4)))
+        assert len(frames) == 4
+        assert all(f.size == frames[0].size for f in frames)
+        assert frames[0].width == frames[0].height  # square, like base.png
+
+    def test_blank_sheet_yields_nothing(self) -> None:
+        assert segment_frames(Image.new("RGB", (200, 80), (255, 255, 255))) == []
+        assert normalize_frames([]) == []
+        assert frames_to_strip([]) is None
+
+    def test_strip_concatenates_frames(self) -> None:
+        frames = normalize_frames(segment_frames(_blob_sheet(4)))
+        strip = frames_to_strip(frames)
+        assert strip.size == (frames[0].width * 4, frames[0].height)
+
+    def test_reference_seeds_frame_one_in_wide_canvas(self) -> None:
+        base = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        base.putpixel((16, 16), (255, 0, 0, 255))
+        ref = build_sheet_reference(base, 4, 128)
+        assert ref.size == (128 * 4, 128)  # n cells wide, one cell tall
+
+
+# ---------------------------------------------------------------------------
+# SpriteAnimationPhase (B3) — VLM-authored sheet animation
+# ---------------------------------------------------------------------------
+
+
+def _run_animated(output_dir: Path, tmp_path: Path) -> PipelineContext:
+    """Full fake pipeline with placeholder-backed sprites (so SpriteArtPhase
+    writes real base.png) AND a fake VLM judge (so B3 authors + generates)."""
+    ctx = PipelineContext(
+        bible=Bible.empty(seed=SEED),
+        config=CanonConfig(seed=SEED, output_dir=output_dir),
+        rng=random.Random(SEED),
+        llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+        prompts=PlatformerPrompts(),
+    )
+    run_pipeline(
+        compose_pipeline(
+            image_producer=_producer(tmp_path),
+            vlm_judge=FakeVLMBackend(make_fake_vlm_responder()),
+        ),
+        ctx,
+    )
+    return ctx
+
+
+class TestSpriteAnimation:
+    def test_every_enemy_gets_per_state_strips_and_frames_json(
+        self, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "out"
+        _run_animated(out, tmp_path)
+        enemy_dirs = sorted((out / "sprite" / "enemy").glob("*"))
+        assert enemy_dirs, "SpriteArtPhase produced no base sprites"
+        for d in enemy_dirs:
+            assert (d / "base.png").exists()
+            frames = json.loads((d / "frames.json").read_text())
+            assert set(frames) == {"idle", "walk", "hurt", "death"}
+            for state, meta in frames.items():
+                assert (d / f"{state}.png").exists()
+                assert meta["frames"] >= 2
+                assert meta["frame_width"] == meta["frame_height"]
+                assert meta["duration_ms"] == DEFAULT_GRAPHICS.anim_frame_ms
+
+    def test_strip_width_matches_frame_count(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        _run_animated(out, tmp_path)
+        d = sorted((out / "sprite" / "enemy").glob("*"))[0]
+        meta = json.loads((d / "frames.json").read_text())["walk"]
+        assert Image.open(d / "walk.png").width == meta["frame_width"] * meta["frames"]
+
+    def test_animation_manifest_persisted_on_enemy_stats(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _run_animated(tmp_path / "out", tmp_path)
+        enemy = next(iter(ctx.bible.enemy_definitions.values()))
+        anim = enemy.stats.get("animation")
+        assert anim and "spec" in anim and "states" in anim
+        for meta in anim["states"].values():
+            assert meta["hash"].startswith("sha256:")  # hashes stay in the Bible
+
+    def test_no_judge_keeps_sprites_static(self, tmp_path: Path) -> None:
+        # loud fallback: producer present, judge absent → no motion authored
+        out = tmp_path / "out"
+        _run(out, _producer(tmp_path))  # compose WITHOUT vlm_judge
+        d = sorted((out / "sprite" / "enemy").glob("*"))[0]
+        assert (d / "base.png").exists()
+        assert not (d / "frames.json").exists()
+        assert not (d / "walk.png").exists()
+
+    def test_spriteless_enemy_is_skipped(self, tmp_path: Path) -> None:
+        # default FakeImageBackend (1×1) → empty sprites → nothing to animate
+        out = tmp_path / "out"
+        ctx = PipelineContext(
+            bible=Bible.empty(seed=SEED),
+            config=CanonConfig(seed=SEED, output_dir=out),
+            rng=random.Random(SEED),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        run_pipeline(
+            compose_pipeline(
+                image_producer=DiffusionSheetProducer(FakeImageBackend()),
+                vlm_judge=FakeVLMBackend(make_fake_vlm_responder()),
+            ),
+            ctx,
+        )
+        assert not list((out / "sprite" / "enemy").glob("*/frames.json"))
+        for enemy in ctx.bible.enemy_definitions.values():
+            assert "animation" not in enemy.stats
+
+
+class TestAnimationQaEndToEnd:
+    """B5 — with a placeholder-backed tree + fake judge, the VLM QA phase
+    writes a global animation review report over the animated enemies."""
+
+    def test_animation_qa_report_written_with_checks_and_verdicts(
+        self, tmp_path: Path
+    ) -> None:
+        import json as _json
+
+        out = tmp_path / "out"
+        _run_animated(out, tmp_path)  # placeholder sprites + fake vlm judge
+        report_path = out / "review" / "animation_qa.json"
+        assert report_path.exists(), "animation QA report not written"
+        report = _json.loads(report_path.read_text())
+        assert report["vlm_model"] == "fake-vlm"
+        assert report["actors"], "no actors reviewed"
+        # both enemies (enemy:<id>) and the player are reviewed
+        assert "player" in report["actors"]
+        assert any(k.startswith("enemy:") for k in report["actors"])
+        for entry in report["actors"].values():
+            # code checks ran (strip + frames) and passed on the fake frames
+            checks = {c["check"] for c in entry["code_checks"]}
+            assert {"animation_strip", "animation_frames"} <= checks
+            assert all(c["passed"] for c in entry["code_checks"])
+            # the fake judge's canned verdict passed all dimensions
+            assert all(v["passed"] for v in entry["verdicts"].values())

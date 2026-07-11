@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from canon.backends import BackendRegistry, FakeImageBackend, ImageBackend
+from canon.backends import (
+    BackendRegistry,
+    FakeImageBackend,
+    ImageBackend,
+    ImageEditBackend,
+)
 
 # ---------------------------------------------------------------------------
 # Protocol compliance
@@ -39,6 +44,108 @@ class TestImageBackendProtocol:
 
         # Missing generate_async, generate_and_save, generate_and_save_async
         assert not isinstance(PartialBackend(), ImageBackend)
+
+
+# ---------------------------------------------------------------------------
+# ImageEditBackend — the SEPARATE img2img capability protocol
+# ---------------------------------------------------------------------------
+
+
+class TestImageEditBackendProtocol:
+    """edit() lives on its own protocol, NOT on ImageBackend — so adding it
+    never forces a text-to-image-only backend to fail isinstance(ImageBackend).
+    A backend that supports editing satisfies BOTH protocols structurally."""
+
+    def test_fake_satisfies_edit_protocol(self) -> None:
+        assert isinstance(FakeImageBackend(), ImageEditBackend)
+
+    def test_fake_still_satisfies_base_protocol(self) -> None:
+        # The two protocols are independent; the fake satisfies both.
+        fake = FakeImageBackend()
+        assert isinstance(fake, ImageBackend)
+        assert isinstance(fake, ImageEditBackend)
+
+    def test_generate_only_backend_is_not_an_edit_backend(self) -> None:
+        class GenerateOnly:
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                return b""
+
+            async def generate_async(self, prompt: str, width: int, height: int) -> bytes:
+                return b""
+
+            def generate_and_save(
+                self, prompt: str, filepath: str, width: int, height: int
+            ) -> bool:
+                return True
+
+            async def generate_and_save_async(
+                self, prompt: str, filepath: str, width: int, height: int
+            ) -> bool:
+                return True
+
+        backend = GenerateOnly()
+        # A full text-to-image backend is still an ImageBackend...
+        assert isinstance(backend, ImageBackend)
+        # ...but NOT an edit backend — this is the whole point of the split
+        # (LocalImageBackend has no img2img; consumers gate on this).
+        assert not isinstance(backend, ImageEditBackend)
+
+
+class TestFakeImageBackendEdit:
+    def test_edit_returns_requested_size_decodable_sheet(self) -> None:
+        from io import BytesIO
+
+        from PIL import Image
+
+        fake = FakeImageBackend()
+        data = fake.edit(b"source-png-bytes", "a 4-frame walk cycle", 2048, 512)
+        img = Image.open(BytesIO(data))
+        img.load()  # must fully decode, not just open
+        assert img.size == (2048, 512)
+
+    def test_edit_records_call(self) -> None:
+        fake = FakeImageBackend()
+        fake.edit(b"abc", "walk", 800, 200)
+        assert fake.calls[-1] == {
+            "op": "edit",
+            "prompt": "walk",
+            "width": 800,
+            "height": 200,
+            "image_bytes": 3,
+        }
+
+    def test_edit_is_deterministic_across_instances(self) -> None:
+        # Byte-identity bar: the canned sheet depends only on (width, height),
+        # so two fake runs are byte-identical regardless of the source image.
+        a = FakeImageBackend().edit(b"x", "one", 1024, 256)
+        b = FakeImageBackend().edit(b"different", "two", 1024, 256)
+        assert a == b
+
+    def test_edit_sheet_is_frame_segmentable(self) -> None:
+        """The canned sheet is evenly-spaced opaque blobs on white, so a
+        content-aware slicer (the animation phase's) recovers exactly
+        ``_EDIT_SHEET_FRAMES`` frames — proving the $0 path is real."""
+        from io import BytesIO
+
+        from PIL import Image
+
+        data = FakeImageBackend().edit(b"x", "walk", 2048, 512)
+        img = Image.open(BytesIO(data)).convert("RGB")
+        w, h = img.size
+        px = list(img.get_flattened_data())
+        # "ink" column = has any clearly non-white pixel
+        ink = [
+            any(sum(px[y * w + x]) < 720 for y in range(h))
+            for x in range(w)
+        ]
+        runs = sum(1 for i, v in enumerate(ink) if v and not (i and ink[i - 1]))
+        assert runs == FakeImageBackend._EDIT_SHEET_FRAMES
+
+    def test_edit_async_matches_sync(self) -> None:
+        fake = FakeImageBackend()
+        sync = fake.edit(b"x", "walk", 512, 128)
+        got = asyncio.run(fake.edit_async(b"x", "walk", 512, 128))
+        assert got == sync
 
 
 # ---------------------------------------------------------------------------

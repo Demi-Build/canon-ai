@@ -37,6 +37,14 @@ SFX_EVENTS: tuple[tuple[str, str, float, bool], ...] = (
     ("win", "a bright short victory fanfare, level complete", 1.4, False),
 )
 
+#: SFX backends accept a bounded duration — ElevenLabs rejects anything
+#: outside [0.5, 30]s (the first paid run lost every 'jump' SFX to a 0.4s
+#: request, "invalid_generation_settings"). Clamp the vocabulary's seconds
+#: into range at the call site so a short event degrades to the floor
+#: instead of vanishing.
+SFX_MIN_SECONDS = 0.5
+SFX_MAX_SECONDS = 30.0
+
 #: Theme length. Under 60s stays on Lyria's cheaper clip model.
 MUSIC_SECONDS = 30
 
@@ -169,11 +177,12 @@ class AudioPhase:
                     )
             if self.sfx is not None:
                 for event, prompt, seconds, loop in SFX_EVENTS:
+                    clamped = min(SFX_MAX_SECONDS, max(SFX_MIN_SECONDS, seconds))
                     try:
                         data = self.sfx.generate(
                             f"{prompt} — retro platformer sound effect, "
                             f"{stage.theme}",
-                            seconds,
+                            clamped,
                             loop,
                         )
                     except Exception as e:  # noqa: BLE001

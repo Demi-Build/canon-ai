@@ -10,12 +10,14 @@ three so play surfaces resolve the same vocabulary the validators used.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
 from canon.bible.models import BibleMetadata
 from examples.platformer_pack.art_phases import (
     BackdropArtPhase,
+    SpriteAnimationPhase,
     SpriteArtPhase,
     TilesetArtPhase,
 )
@@ -137,6 +139,28 @@ def _run_warnings(ctx: Any) -> list[str]:
         for message in derive_qa_warnings(report):
             if message not in warnings:
                 warnings.append(message)
+
+    # Animation QA findings re-derive from the global on-disk report (enemies
+    # are world-wide, so this report is not per-stage) — same durability as the
+    # per-level QA above.
+    from examples.platformer_pack.vlm_qa import (
+        ANIM_QA_REPORT_REL,
+        derive_animation_qa_warnings,
+    )
+
+    anim_path = ctx.adapter.resolve_path(ANIM_QA_REPORT_REL)
+    if anim_path.exists():
+        try:
+            anim_report = _json.loads(anim_path.read_text())
+        except (OSError, ValueError):
+            warnings.append(
+                f"animation_qa: {ANIM_QA_REPORT_REL} exists but is unreadable "
+                "— re-run with --vlm-backend to regenerate it."
+            )
+        else:
+            for message in derive_animation_qa_warnings(anim_report):
+                if message not in warnings:
+                    warnings.append(message)
     return warnings
 
 
@@ -166,10 +190,29 @@ class SliceManifestPhase:
         from examples.platformer_pack.level import world_stages
 
         stages = world_stages(ctx)
+        world_title = ctx.bible.world.title if ctx.bible.world else ""
+        # Play progress is keyed on the WORLD's CONTENT identity, not the
+        # input seed: two paid runs of the same seed produce DIFFERENT worlds
+        # (names, biomes, rosters), and each fresh world must start from
+        # level 1 rather than inherit the previous run's save (playtest —
+        # plat_kingdom3 opened on world 3 with the first levels beaten).
+        # Content-derived so it stays deterministic: a byte-identical
+        # regeneration of the SAME world keeps its save (correct for resume).
+        world_key = "|".join(
+            [
+                world_title,
+                *(s.stage_id for s in stages),
+                *(lid for s in stages for lid in s.level_ids),
+                *sorted(ctx.bible.enemy_definitions),
+            ]
+        )
+        world_id = hashlib.md5(world_key.encode("utf-8")).hexdigest()[:12]
         manifest = {
             "game": "platformer_slice",
             "seed": str(getattr(ctx.config, "seed", "")),
-            "world": ctx.bible.world.title if ctx.bible.world else "",
+            "world": world_title,
+            # Save-file key (see world_key above) — the runtime reads this.
+            "world_id": world_id,
             # World structure (multi-stage): biome stages in play order,
             # every level flattened in that same order, and the code-laid
             # map the world-map screen draws. Unlock policy is data.
@@ -297,6 +340,12 @@ def compose_pipeline(
         # gameplay layer above validated; renders below see final art.
         TilesetArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         SpriteArtPhase(producer=image_producer, graphics=graphics),
+        # Sheet animation reads the base sprites SpriteArtPhase just wrote and
+        # authors motion via the same VLM judge as QA (both no-op without their
+        # backends → static sprites, the loud fallback).
+        SpriteAnimationPhase(
+            producer=image_producer, judge=vlm_judge, graphics=graphics
+        ),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderPhase(variants=variants, graphics=graphics),

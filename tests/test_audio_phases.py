@@ -107,6 +107,31 @@ class TestAudioPhase:
         for rel in files:
             assert (a / rel).read_bytes() == (b / rel).read_bytes(), rel
 
+    def test_sfx_durations_clamped_into_backend_range(
+        self, tmp_path: Path
+    ) -> None:
+        # ElevenLabs rejects duration_seconds < 0.5 (the first paid run lost
+        # every 'jump' SFX at 0.4s). The vocabulary keeps a below-floor
+        # value, so the clamp is what must keep the request valid.
+        from examples.platformer_pack.audio_phases import (
+            SFX_MAX_SECONDS,
+            SFX_MIN_SECONDS,
+        )
+
+        assert any(e[0] == "jump" and e[2] < SFX_MIN_SECONDS for e in SFX_EVENTS)
+        backend = FakeSFXBackend()
+        ctx = PipelineContext(
+            bible=Bible.empty(seed=SEED),
+            config=CanonConfig(seed=SEED, output_dir=tmp_path / "run"),
+            rng=random.Random(SEED),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        run_pipeline(compose_pipeline(sfx_producer=backend), ctx)
+        assert backend.calls, "no sfx generated"
+        for call in backend.calls:
+            assert SFX_MIN_SECONDS <= call["duration_seconds"] <= SFX_MAX_SECONDS
+
     def test_hand_edited_theme_detected_and_adopted(
         self, tmp_path: Path
     ) -> None:

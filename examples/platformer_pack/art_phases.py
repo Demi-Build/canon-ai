@@ -27,6 +27,7 @@ import io
 import logging
 from typing import Any
 
+from canon.backends.base import ImageEditBackend
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import Backdrop, PlayerDefinition, StageProps
 from canon.pipeline.orchestrator import pinned_ids
@@ -35,8 +36,12 @@ from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, w
 from examples.platformer_pack.style import background_role
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.tileset_art import (
+    build_sheet_reference,
     dominant_hue,
+    frames_to_strip,
     hue_distance,
+    normalize_frames,
+    segment_frames,
     tint_to_color,
 )
 
@@ -186,6 +191,60 @@ class TilesetArtPhase:
         _stamp_metadata(ctx, self.name)
 
 
+#: Behavior must READ in the still sprite — a stationary sentry looked
+#: broken in the first paid run. Each LOCOMOTION archetype maps to a visual
+#: stance the diffusion model can draw, so a sentry looks planted and a
+#: swimmer aquatic. Aggro is orthogonal (AGGRO_LOOK below), folded in on top.
+ARCHETYPE_LOOK = {
+    "patroller": "ambling mid-stride, built to walk a beat back and forth",
+    "sentry": (
+        "rooted and planted in place — a squat, immobile, turret-like "
+        "guardian with no legs for walking, clearly a creature that holds "
+        "its ground rather than roams"
+    ),
+    "swimmer": "sleek and aquatic, finned or gilled for gliding through water",
+    "flyer": (
+        "airborne and hovering, built to drift and swoop through open air — "
+        "wings optional (a weightless, floating body reads as a flyer too)"
+    ),
+}
+
+#: Temperament, ORTHOGONAL to locomotion (schema `aggro` tier): an
+#: aggressive enemy — a patroller, swimmer, or flyer that hunts the player —
+#: reads as a predator regardless of how it moves. Passive enemies get no
+#: extra trait (their locomotion stance is the whole story).
+AGGRO_LOOK = "alert and predatory, poised to lunge, with a sharp hunting glare"
+
+#: The player is a platformer MASCOT, not the diffusion default fantasy
+#: knight (first paid run: 'we keep getting knights with swords'). Kept
+#: theme-light so one sprite reads across every biome, and explicitly
+#: weaponless.
+PLAYER_DESCRIPTOR = (
+    "a friendly platformer mascot hero: a small, round-bodied cartoon "
+    "adventurer with a big expressive head, large readable eyes, and simple "
+    "stubby limbs in a bouncy, ready pose — a bold, clear silhouette that "
+    "reads at a small size. NOT a knight, no armor, no helmet, and no sword "
+    "or any weapon"
+)
+
+
+def _enemy_art_descriptor(
+    archetype: str, flavor: str, aggressive: bool = False
+) -> str:
+    """Fold the enemy's LOCOMOTION stance and its (orthogonal) AGGRO
+    temperament into the sprite descriptor so the generated art matches the
+    behavior — a planted sentry, a sleek swimmer, and a predatory glare on
+    anything that hunts the player, whatever its locomotion."""
+    traits = [
+        t for t in (ARCHETYPE_LOOK.get(archetype), AGGRO_LOOK if aggressive else "")
+        if t
+    ]
+    base = f"a {archetype} enemy" + (
+        f" that is {', '.join(traits)}" if traits else ""
+    )
+    return f"{base} — {flavor}".strip(" —")
+
+
 class SpriteArtPhase:
     """Generated sprites for every enemy definition + the player.
     Definitions keep their placeholder color and variant markers — the
@@ -245,9 +304,10 @@ class SpriteArtPhase:
                 )
                 continue
             color_hex = str(enemy.stats.get("placeholder_color", "#ff00ff"))
-            descriptor = (
-                f"a {enemy.archetype} enemy — "
-                f"{enemy.stats.get('flavor', '')}".strip(" —")
+            descriptor = _enemy_art_descriptor(
+                enemy.archetype,
+                str(enemy.stats.get("flavor", "")),
+                aggressive=float(enemy.behavior.get("aggro_range", 0) or 0) > 0,
             )
             sprite = self._generate(
                 ctx, enemy.name or enemy_id, descriptor, color_hex,
@@ -291,7 +351,7 @@ class SpriteArtPhase:
             logger.info("SpriteArtPhase: player is pinned — sprite kept.")
         else:
             player = self._generate(
-                ctx, "the player", "the heroic player character", "#f0f0f0",
+                ctx, "the player", PLAYER_DESCRIPTOR, "#f0f0f0",
                 theme, world_title, (size, size),
             )
             if player is not None:
@@ -392,6 +452,255 @@ class SpriteArtPhase:
         buffer = io.BytesIO()
         sprite.save(buffer, format="PNG")
         return ctx.adapter.write_binary(rel, buffer.getvalue())
+
+
+#: Minimum frames a segmented sheet must yield to count as an animation —
+#: below this it is not a cycle, so the state keeps the static base.png.
+ANIM_MIN_FRAMES = 2
+
+#: Cap the img2img reference strip width so a high-frame sheet (the player's
+#: ~9) stays a sensible aspect for the edit model — nano-banana/edit echoes the
+#: input dims, so an extreme 9:1 canvas would come back distorted. The per-cell
+#: size shrinks as the frame count grows to keep the total near this.
+MAX_SHEET_REF_WIDTH = 2560
+
+
+def _animation_sheet_prompt(state: str, motion: str, n_frames: int) -> str:
+    """The img2img sheet prompt (proven template from the B0 spike): seed
+    frame 1 with the real sprite, fill the rest with the state's cycle."""
+    return (
+        f"This image is the FIRST frame (leftmost cell) of a horizontal sprite "
+        f"sheet made of {n_frames} equal-width cells. Keep that leftmost frame "
+        f"as-is and fill the cells to its right with the {state} animation of "
+        f"the SAME character: {motion}. Every frame: identical character design, "
+        f"identical size and colors, side view facing right, exactly one "
+        f"character centered per cell, evenly spaced left-to-right, on a plain "
+        f"solid white background. No text, no numbers, no borders, no gridlines."
+    )
+
+
+class SpriteAnimationPhase:
+    """VLM-authored, sheet-based per-state animation for every enemy that has
+    a generated sprite. Runs AFTER SpriteArtPhase (it reads base.png).
+
+    Per enemy: a vision judge authors a per-state motion spec from the ACTUAL
+    sprite (``author_animation_spec``, B2), then ONE img2img SHEET per state is
+    generated (``ImageEditBackend.edit``), segmented by CONTENT — the edit model
+    ignores exact frame counts, so a fixed grid slicer would straddle frames —
+    normalized to uniform square frames, and written as a per-state frame strip
+    (``sprite/<kind>/<id>/<state>.png``) plus ``frames.json`` beside base.png.
+    The manifest is folded onto ``enemy.stats['animation']``.
+
+    LOUD FALLBACK at every step: no img2img-capable backend, no judge, a pinned
+    or sprite-less enemy, a failed edit, or a sheet that segments to <2 frames →
+    that enemy/state keeps the static base.png (consumers already fall back to
+    it). Ownership mirrors SpriteArtPhase (the same enemy ids) so a re-rolled
+    sprite re-rolls its animation; the animation is DERIVED from the sprite, so
+    it rides the enemy's provenance + pin — they cascade and pin together
+    (individual frame files are not independently edit-tracked in v1)."""
+
+    name = "plat:sprite_animation"
+
+    def __init__(
+        self,
+        producer: Any = None,
+        judge: Any = None,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
+        self.producer = producer
+        self.judge = judge
+        self.graphics = graphics
+
+    def owns(self, ctx: Any) -> list[str]:
+        # Same ids as SpriteArtPhase — a re-rolled sprite re-rolls its
+        # animation. (Prop animation is the remaining "widen" step.)
+        return [
+            *(
+                e.artifact_id or f"enemy:{eid}"
+                for eid, e in getattr(ctx.bible, "enemy_definitions", {}).items()
+            ),
+            "player",
+        ]
+
+    def run(self, ctx: Any) -> None:
+        from examples.platformer_pack.vlm_qa import (
+            ANIM_FRAMES_MAX,
+            ANIMATION_STATES,
+            PLAYER_ANIM_FRAMES_MAX,
+            PLAYER_ANIMATION_STATES,
+            enemy_animation_subject,
+        )
+
+        backend = getattr(self.producer, "backend", None)
+        if not isinstance(backend, ImageEditBackend):
+            logger.info(
+                "SpriteAnimationPhase: image backend has no img2img (edit) "
+                "capability — static sprites kept."
+            )
+            _stamp_metadata(ctx, self.name)
+            return
+        if self.judge is None:
+            logger.info(
+                "SpriteAnimationPhase: no VLM judge (explicit --vlm-backend "
+                "required to author motion) — static sprites kept."
+            )
+            _stamp_metadata(ctx, self.name)
+            return
+
+        pinned = pinned_ids(ctx.bible)
+        for enemy_id, enemy in ctx.bible.enemy_definitions.items():
+            if (enemy.artifact_id or f"enemy:{enemy_id}") in pinned:
+                logger.info(
+                    "SpriteAnimationPhase: enemy:%s is pinned — animation kept.",
+                    enemy_id,
+                )
+                continue
+            manifest = self._animate_one(
+                ctx, f"enemy:{enemy_id}", enemy.sprite_path,
+                enemy_animation_subject(enemy), ANIMATION_STATES, ANIM_FRAMES_MAX,
+            )
+            if manifest:
+                enemy.stats["animation"] = manifest
+                ctx.adapter.write_json_singleton(
+                    f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
+                )
+
+        # The player (the mascot): a smoother cycle (higher frame ceiling) and
+        # its own state set — it jumps and never plays a death cycle.
+        player = getattr(ctx.bible, "player", None)
+        if player is not None and "player" not in pinned:
+            subject = (
+                f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
+                f"bouncy platformer mascot, side view facing right."
+            )
+            manifest = self._animate_one(
+                ctx, "player", player.sprite_path, subject,
+                PLAYER_ANIMATION_STATES, PLAYER_ANIM_FRAMES_MAX,
+            )
+            if manifest:
+                player.animation = manifest
+        _stamp_metadata(ctx, self.name)
+
+    def _animate_one(
+        self,
+        ctx: Any,
+        actor_id: str,
+        sprite_path: str,
+        subject: str,
+        states: tuple[str, ...],
+        frames_max: int,
+    ) -> dict:
+        """Author (B2) + generate + segment one actor's animation. Returns
+        ``{"spec": ..., "states": ...}`` or ``{}`` — the loud fallback: no
+        sprite, a spec that never validated, or nothing generated all leave the
+        static base.png in place."""
+        from examples.platformer_pack.vlm_qa import author_animation_spec
+
+        if not sprite_path:
+            logger.info(
+                "SpriteAnimationPhase: %s has no sprite — static fallback.",
+                actor_id,
+            )
+            return {}
+        base_file = ctx.adapter.resolve_path(sprite_path)
+        if not base_file.exists():
+            return {}
+        spec = author_animation_spec(
+            self.judge, actor_id, subject, base_file.read_bytes(),
+            states=states, frames_max=frames_max,
+        )
+        if spec is None:
+            warn(
+                ctx,
+                f"animation: {actor_id} motion spec never validated; static "
+                f"sprite kept.",
+            )
+            return {}
+        state_files = self._animate_actor(ctx, sprite_path, spec, actor_id)
+        if not state_files:
+            return {}
+        logger.info(
+            "SpriteAnimationPhase animated %s (%d state(s)) via %s.",
+            actor_id, len(state_files), self.producer.model,
+        )
+        return {"spec": spec, "states": state_files}
+
+    def _animate_actor(
+        self, ctx: Any, base_rel: str, spec: dict, actor_id: str
+    ) -> dict:
+        """Generate + segment + write one frame strip per state. Writes
+        ``frames.json`` beside base.png and returns the states manifest
+        (``{state: {path, hash, frames, frame_width, frame_height,
+        duration_ms}}``). States that fail any step are simply absent (static
+        fallback)."""
+        from PIL import Image
+
+        base = Image.open(ctx.adapter.resolve_path(base_rel)).convert("RGBA")
+        sprite_dir = base_rel.rsplit("/", 1)[0]  # sprite/enemy/<id>
+        size = self.graphics.sprite_size()
+        frame_ms = self.graphics.anim_frame_ms
+        resample = (
+            Image.NEAREST if self.graphics.render_filter == "crisp" else Image.LANCZOS
+        )
+        states: dict[str, dict] = {}
+        for state, state_spec in spec.items():
+            n_frames = int(state_spec.get("frames", ANIM_MIN_FRAMES))
+            # Per-cell size shrinks as the frame count grows so a many-frame
+            # sheet (the player's ~9) stays a sane aspect (see MAX_SHEET_REF_WIDTH).
+            cell_px = min(
+                self.graphics.gen_px, max(96, MAX_SHEET_REF_WIDTH // max(1, n_frames))
+            )
+            prompt = _animation_sheet_prompt(
+                state, str(state_spec.get("motion", "")), n_frames
+            )
+            ref = build_sheet_reference(base, n_frames, cell_px)
+            ref_buf = io.BytesIO()
+            ref.save(ref_buf, format="PNG")
+            try:
+                sheet_bytes = self.producer.backend.edit(
+                    ref_buf.getvalue(), prompt, ref.width, ref.height
+                )
+                sheet = Image.open(io.BytesIO(sheet_bytes)).convert("RGBA")
+            except Exception as e:  # noqa: BLE001
+                warn(
+                    ctx,
+                    f"animation: {actor_id!r} {state!r} sheet failed "
+                    f"({type(e).__name__}: {e}); state kept static.",
+                )
+                continue
+            frames = normalize_frames(segment_frames(sheet))
+            if len(frames) < ANIM_MIN_FRAMES:
+                warn(
+                    ctx,
+                    f"animation: {actor_id!r} {state!r} sheet segmented to "
+                    f"{len(frames)} frame(s) (<{ANIM_MIN_FRAMES}); state kept "
+                    f"static.",
+                )
+                continue
+            frames = [f.resize((size, size), resample) for f in frames]
+            strip = frames_to_strip(frames)
+            rel = f"{sprite_dir}/{state}.png"
+            strip_buf = io.BytesIO()
+            strip.save(strip_buf, format="PNG")
+            states[state] = {
+                "path": rel,
+                "hash": ctx.adapter.write_binary(rel, strip_buf.getvalue()),
+                "frames": len(frames),
+                "frame_width": size,
+                "frame_height": size,
+                "duration_ms": frame_ms,
+            }
+        if states:
+            # frames.json (no hashes) is the consumers' per-actor playback
+            # manifest, loaded beside the strips; hashes stay in the Bible.
+            ctx.adapter.write_json_singleton(
+                f"{sprite_dir}/frames.json",
+                {
+                    st: {k: v for k, v in d.items() if k != "hash"}
+                    for st, d in states.items()
+                },
+            )
+        return states
 
 
 class BackdropArtPhase:

@@ -149,6 +149,87 @@ class TestFalImageBackendGenerate:
 
 
 # ---------------------------------------------------------------------------
+# edit() — img2img (implements ImageEditBackend)
+# ---------------------------------------------------------------------------
+
+
+class TestFalImageBackendEdit:
+    def test_isinstance_edit_backend(self) -> None:
+        from canon.backends.base import ImageEditBackend
+
+        assert isinstance(FalImageBackend(), ImageEditBackend)
+
+    def test_default_edit_model(self) -> None:
+        from canon.backends.image_fal import DEFAULT_EDIT_MODEL
+
+        assert DEFAULT_EDIT_MODEL == "fal-ai/nano-banana/edit"
+        assert FalImageBackend().edit_model == DEFAULT_EDIT_MODEL
+
+    def test_edit_uploads_then_subscribes_with_image_urls(self) -> None:
+        backend = FalImageBackend()
+        urlopen_mock = _make_urlopen_mock(FAKE_PNG_BYTES)
+        with (
+            patch.object(
+                backend._fal, "upload", return_value="http://cdn.fal.ai/up.png"
+            ) as mock_up,
+            patch.object(
+                backend._fal, "subscribe", return_value=FAL_RESPONSE_IMAGES
+            ) as mock_sub,
+            patch("urllib.request.urlopen", return_value=urlopen_mock),
+        ):
+            result = backend.edit(b"source-bytes", "4-frame walk cycle", 2048, 512)
+
+        mock_up.assert_called_once_with(b"source-bytes", "image/png")
+        mock_sub.assert_called_once_with(
+            "fal-ai/nano-banana/edit",
+            arguments={
+                "prompt": "4-frame walk cycle",
+                "image_urls": ["http://cdn.fal.ai/up.png"],
+            },
+        )
+        # undecodable stub passes straight through _conform_size, like generate
+        assert result == FAKE_PNG_BYTES
+
+    def test_edit_conforms_oversized_return(self) -> None:
+        import io
+
+        from PIL import Image
+
+        backend = FalImageBackend()
+        urlopen_mock = _make_urlopen_mock(_real_png(1024, 1024))
+        with (
+            patch.object(backend._fal, "upload", return_value="http://cdn.fal.ai/u.png"),
+            patch.object(backend._fal, "subscribe", return_value=FAL_RESPONSE_IMAGES),
+            patch("urllib.request.urlopen", return_value=urlopen_mock),
+        ):
+            out = backend.edit(b"src", "edit it", 512, 256)
+        assert Image.open(io.BytesIO(out)).size == (512, 256)
+
+    def test_edit_async_uploads_then_subscribes(self) -> None:
+        backend = FalImageBackend()
+        urlopen_mock = _make_urlopen_mock(FAKE_PNG_BYTES)
+        with (
+            patch.object(
+                backend._fal, "upload", return_value="http://cdn.fal.ai/u.png"
+            ) as mock_up,
+            patch.object(
+                backend._fal,
+                "subscribe_async",
+                new=AsyncMock(return_value=FAL_RESPONSE_IMAGES),
+            ) as mock_sub,
+            patch("urllib.request.urlopen", return_value=urlopen_mock),
+        ):
+            result = asyncio.run(backend.edit_async(b"src", "walk", 640, 160))
+
+        mock_up.assert_called_once_with(b"src", "image/png")
+        mock_sub.assert_awaited_once_with(
+            "fal-ai/nano-banana/edit",
+            arguments={"prompt": "walk", "image_urls": ["http://cdn.fal.ai/u.png"]},
+        )
+        assert result == FAKE_PNG_BYTES
+
+
+# ---------------------------------------------------------------------------
 # Size-contract enforcement — models are advisory, code owns the contract
 # ---------------------------------------------------------------------------
 

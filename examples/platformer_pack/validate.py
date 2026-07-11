@@ -68,6 +68,52 @@ def jump_ok(dx: int, rise: int, movement: PlayerMovementSpec) -> bool:
     return rise <= 0 or dx <= max_dx_for_rise(movement, rise)
 
 
+def arc_clear(
+    grid,
+    src: tuple[int, int],
+    dst: tuple[int, int],
+    movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> bool:
+    """Conservative jump-arc clearance: can the player travel ``src`` ->
+    ``dst`` without a SOLID column in between rising into its flight path?
+
+    ``jump_ok`` only checks the two endpoints' dx/rise, so a jump that
+    clears the envelope but flies THROUGH a cliff was wrongly called
+    reachable — the first paid run shipped an unbeatable level whose exit
+    was 'reachable' only via ``(35,12)->(38,9)``, a jump straight into a
+    5-cell wall. This is the code-side guard: for every column strictly
+    between the footholds, reject if any solid tile sits in the band from
+    the highest point the feet can reach (apex = the higher foothold minus
+    ``jump_height``) down to just above the LOWER foothold. Ground at or
+    below the lower foothold never blocks (the player is above it as it
+    travels); a protrusion into that band does. One-way platforms
+    (pass-through), hazards (flown over), and volumes (swum through) are
+    not blockers — only ``solid``.
+
+    Conservative by design (playability batch): it may reject a jump a
+    perfect arc could thread, which merely asks ``auto_bridge`` for a
+    stepping platform — never the reverse (accepting an impossible jump).
+    Per-column parabola sampling is the deferred 'A* + jump-arc' item.
+    """
+    sx, sy = src
+    dx, dy = dst
+    if sx == dx:
+        return True  # vertical move (swim / volume entry): no columns between
+    solids = tiles.ids("solid")
+    top = min(sy, dy) - movement.jump_height  # highest the feet can reach
+    bottom = max(sy, dy) - 1  # just above the lower foothold; ground is free
+    if bottom < top:
+        return True
+    top = max(0, top)
+    step = 1 if dx > sx else -1
+    for x in range(sx + step, dx, step):
+        for row in range(top, bottom + 1):
+            if int(grid[row, x]) in solids:
+                return False
+    return True
+
+
 def reachable_cells(
     grid,
     start: tuple[int, int],
@@ -90,7 +136,9 @@ def reachable_cells(
         for nx, ny in stand:
             if (nx, ny) in seen:
                 continue
-            if jump_ok(abs(nx - cx), cy - ny, movement):
+            if jump_ok(abs(nx - cx), cy - ny, movement) and arc_clear(
+                grid, (cx, cy), (nx, ny), movement, tiles
+            ):
                 seen.add((nx, ny))
                 queue.append((nx, ny))
         for nx, ny in volume:
@@ -101,8 +149,10 @@ def reachable_cells(
                     seen.add((nx, ny))
                     queue.append((nx, ny))
             else:
-                # Enter a volume: walk/fall in — same arc rule.
-                if jump_ok(abs(nx - cx), cy - ny, movement):
+                # Enter a volume: walk/fall in — same arc rule + clearance.
+                if jump_ok(abs(nx - cx), cy - ny, movement) and arc_clear(
+                    grid, (cx, cy), (nx, ny), movement, tiles
+                ):
                     seen.add((nx, ny))
                     queue.append((nx, ny))
     return seen
@@ -173,7 +223,8 @@ def check_level(
         if exit_ not in reached:
             problems.append(
                 _describe_reachability_break(
-                    grid, spawn, exit_, movement, stand, reached, "exit"
+                    grid, spawn, exit_, movement, stand, reached, "exit",
+                    tiles,
                 )
             )
         for cell in checkpoints:
@@ -181,7 +232,7 @@ def check_level(
                 problems.append(
                     _describe_reachability_break(
                         grid, spawn, cell, movement, stand, reached,
-                        "checkpoint",
+                        "checkpoint", tiles,
                     )
                 )
     return problems
@@ -238,6 +289,7 @@ def _suggest_bridge(
     frontier: tuple[int, int],
     nearest: tuple[int, int],
     movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
 ) -> str | None:
     """A concrete platform op that bridges from the frontier toward the
     unreachable foothold — the arithmetic is ours, never the model's
@@ -269,7 +321,13 @@ def _suggest_bridge(
             return False
         # Reachable from the frontier under the arc rule (falling is free).
         reach = max(1, max_dx_for_rise(movement, max(stand_rise, 0)))
-        return min(abs(col - fx), abs(col + 1 - fx)) <= reach
+        if min(abs(col - fx), abs(col + 1 - fx)) > reach:
+            return False
+        # And the landing cell must actually be arc-reachable — a platform
+        # tucked behind a wall is a dead op auto_bridge would re-emit to
+        # its bound. Check the nearer of the two standing cells.
+        land = (col, row - 1) if abs(col - fx) <= abs(col + 1 - fx) else (col + 1, row - 1)
+        return arc_clear(grid, frontier, land, movement, tiles)
 
     # Rows whose STANDING level lands closest to the foothold's row first
     # (flat gaps get flat steps, tiers get risers), columns spiralling
@@ -299,6 +357,7 @@ def _describe_reachability_break(
     stand: set[tuple[int, int]],
     reached: set[tuple[int, int]],
     label: str = "exit",
+    tiles: TileRegistry = DEFAULT_TILES,
 ) -> str:
     """Locate the break AND hand over the fix — 'add stepping platforms'
     without a location sent the real model into fallback loops, and a
@@ -338,7 +397,7 @@ def _describe_reachability_break(
         f"gets as far as {frontier} but cannot reach the next foothold at "
         f"{nearest}: {detail}."
     )
-    bridge = _suggest_bridge(grid, frontier, nearest, movement)
+    bridge = _suggest_bridge(grid, frontier, nearest, movement, tiles)
     if bridge is None:
         # No platform placement can bridge this — a DESIGN problem: the
         # surrounding geometry must change, not just gain a step.
@@ -407,6 +466,46 @@ def swimmer_spot_exists(
         return True
 
     return any(_fits(x, y) for x, y in volume)
+
+
+def flyer_spot_exists(
+    grid,
+    size: float,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> bool:
+    """True if ANY cell can seat an airborne ``flyer`` of ``size`` — an
+    open-air anchor whose whole body is empty, with a clear cell directly
+    BELOW it (genuinely aloft, not a ground stand) and solid terrain
+    somewhere further down the column (airspace OVER ground, not off the top
+    or across a bottomless void). Nearly always true; rejects fully-solid or
+    fully-ceilinged levels. The env-feasibility gate the roster pre-filter
+    asks (mirrors ``_footprint_problem``'s flyer branch; parity-tested)."""
+    from examples.platformer_pack.combat import occupancy
+
+    height, width = grid.shape
+    empty_id = tiles.empty_id
+    support = tiles.ids("solid", "one_way")
+    cols, rows = occupancy(size)
+
+    def _fits(x: int, y: int) -> bool:
+        for cx in range(x, x + cols):
+            if not (0 <= cx < width):
+                return False
+            for cy in range(y, y - rows, -1):  # whole body in open air
+                if cy < 0 or int(grid[cy, cx]) != empty_id:
+                    return False
+            if y + 1 >= height or int(grid[y + 1, cx]) != empty_id:
+                return False  # aloft: open cell directly below the anchor
+        # over terrain: solid ground somewhere below an occupied column
+        return any(
+            int(grid[yy, cx]) in support
+            for cx in range(x, x + cols)
+            for yy in range(y + 1, height)
+        )
+
+    return any(
+        _fits(x, y) for y in range(height) for x in range(width)
+    )
 
 
 #: How far a checkpoint may be snapped to the nearest valid column — a
@@ -611,7 +710,7 @@ def auto_bridge(
         frontier, nearest = _locate_break(stand, reached)
         if nearest is None:  # pragma: no cover — guarded by check_level
             return text, added, problems
-        op = _suggest_bridge(result.grid, frontier, nearest, movement)
+        op = _suggest_bridge(result.grid, frontier, nearest, movement, tiles)
         if op is None or op in added:
             # No valid bridge exists, or the last one changed nothing —
             # give the problems to the agent instead of burning the bound
@@ -663,6 +762,7 @@ def check_placements(
     volume = volume_cells(grid, tiles)
     height, width = grid.shape
     empty_id = tiles.empty_id
+    support = tiles.ids("solid", "one_way")
     accepted: list[dict] = []
     problems: list[str] = []
     repairs: list[str] = []
@@ -685,6 +785,41 @@ def check_placements(
         is_swimmer = archetype == "swimmer"
         is_surface = is_swimmer and swim_style == "surface"
         policy = rules.enemy_water_policy
+        if archetype == "flyer":
+            # Airborne anchor: whole body in open air, a clear cell directly
+            # below (aloft, not a ground stand), solid terrain somewhere
+            # below the column (airspace over ground). Mirrors
+            # flyer_spot_exists; the parity test cross-checks them.
+            for cx in range(x, x + cols):
+                if not (0 <= cx < width and 0 <= y < height):
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) does not fit: column "
+                        f"{cx} is outside the {width}x{grid.shape[0]} level."
+                    )
+                for cy in range(y, y - rows, -1):
+                    if cy < 0 or int(grid[cy, cx]) != empty_id:
+                        return (
+                            f"{eid} is a FLYER — its body hovers in open air, but "
+                            f"cell ({cx}, {max(cy, 0)}) is {_cell_name(cx, max(cy, 0))}, "
+                            "not empty. Place it in clear airspace."
+                        )
+                if y + 1 >= height or int(grid[y + 1, cx]) != empty_id:
+                    return (
+                        f"{eid} is a FLYER and must be AIRBORNE, but ({cx}, {y + 1}) "
+                        "directly below it is not open air — lift it off the ground "
+                        "into the airspace above."
+                    )
+            if not any(
+                int(grid[yy, cx]) in support
+                for cx in range(x, x + cols)
+                for yy in range(y + 1, height)
+            ):
+                return (
+                    f"{eid} is a FLYER, but {cell} has no ground anywhere below it "
+                    "(open sky / bottomless gap) — place it in airspace over solid "
+                    "terrain the player can reach."
+                )
+            return None
         if is_surface:
             # Surface-riders anchor ON the water's top row (open above).
             for cx in range(x, x + cols):
