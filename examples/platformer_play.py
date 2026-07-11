@@ -90,6 +90,23 @@ def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
     return colors
 
 
+def pick_anim_frame(
+    candidates: list, anim_t: float, states: dict
+) -> tuple[str, int]:
+    """Pure state + frame-index selection for sprite animation (enemy OR player).
+
+    ``candidates`` is the state-priority list the caller builds from the tracked
+    runtime signals (enemy: hurt > walk > idle; player: jump > walk > idle) —
+    the first candidate that exists in ``states`` wins. ``states`` maps state →
+    ``{"count": int, "dur": float_seconds}``. The frame index is a deterministic
+    function of the accumulated clock, so the fixed-dt capture harness (and unit
+    tests) reproduce it exactly. Reference for main.gd's GDScript mirror.
+    """
+    state = next((s for s in candidates if s in states), next(iter(states)))
+    info = states[state]
+    return state, int(anim_t / info["dur"]) % max(1, int(info["count"]))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
@@ -574,6 +591,71 @@ def main() -> None:
         eid: _sprite(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4))
         for eid, spec in enemies.items()
     }
+
+    # Per-state animation frames (art track, B4). frames.json sits beside
+    # base.png; each <state>.png is a horizontal strip sliced by frame count.
+    # No frames.json → this stays empty and the static base sprite plays (the
+    # loud fallback). Frames are pre-scaled to the base display size.
+    def _load_anim(sprite_rel: str, size: tuple) -> dict | None:
+        if not sprite_rel:
+            return None
+        meta_path = data_dir / (sprite_rel.rsplit("/", 1)[0] + "/frames.json")
+        if not meta_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            return None
+        anim: dict = {}
+        for state, m in meta.items():
+            strip = data_dir / m.get("path", "")
+            n = int(m.get("frames", 0))
+            if n < 1 or not strip.exists():
+                continue
+            sheet = pygame.image.load(str(strip)).convert_alpha()
+            fw = sheet.get_width() // n
+            cells = [
+                sheet.subsurface((i * fw, 0, fw, sheet.get_height()))
+                for i in range(n)
+            ]
+            anim[state] = {
+                "frames": [pygame.transform.smoothscale(c, size) for c in cells],
+                "dur": max(0.001, float(m.get("duration_ms", 120)) / 1000.0),
+            }
+        return anim or None
+
+    enemy_anims = {
+        eid: a
+        for eid, spec in enemies.items()
+        if (a := _load_anim(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4)))
+    }
+    # The player animates too (art track): idle/walk/JUMP, smoother (~9 frames).
+    player_anim = _load_anim("sprite/player/base.png", (SCALE - 8, SCALE - 8))
+
+    def _frame_from(anim: dict, candidates: list, anim_t: float):
+        """Pick the current frame Surface for an animation dict given the
+        state-priority candidates + the accumulated clock, or None."""
+        if not anim:
+            return None
+        states = {
+            s: {"count": len(v["frames"]), "dur": v["dur"]} for s, v in anim.items()
+        }
+        state, idx = pick_anim_frame(candidates, anim_t, states)
+        return anim[state]["frames"][idx]
+
+    def _enemy_frame(enemy) -> pygame.Surface | None:
+        """The current animation frame for an enemy's state, or None → the
+        caller draws the static base sprite (loud fallback)."""
+        candidates = (
+            (["hurt"] if enemy.hurt_t > 0 else [])
+            + (["walk"] if getattr(enemy, "_anim_moving", False) else [])
+            + ["idle", "walk", "hurt", "death"]
+        )
+        return _frame_from(
+            enemy_anims.get(enemy.spec.get("enemy_id", "")),
+            candidates,
+            getattr(enemy, "_anim_t", 0.0),
+        )
     # Gameplay props (manifest "props", keyed per biome stage): sprite
     # when the art track made one, drawn placeholder shape otherwise.
     prop_paths = manifest.get("props", {}).get(stage_id, {})
@@ -642,6 +724,8 @@ def main() -> None:
     # window is what keeps respawning next to one fair.
     spawn_shield = 0.0
     blink_t = 0.0  # deterministic blink clock (grace + shield + i-frames)
+    player_anim_t = 0.0  # player animation clock (fixed-dt in capture)
+    player_facing = 1.0  # last horizontal facing (flip the sprite left/right)
     live_enemies = [Enemy(p) for p in placements]
 
     def tile_at(cx: float, cy: float) -> int:
@@ -802,10 +886,12 @@ def main() -> None:
         )
         if dx:
             note_move()  # walking ends the grace, starts the shield
+            player_facing = dx  # face the direction of travel
         grace = spawn_grace and not moved
         iframes = max(0.0, iframes - dt)
         spawn_shield = max(0.0, spawn_shield - dt)
         blink_t += dt
+        player_anim_t += dt
         speed = run_speed * (
             float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
         )
@@ -846,6 +932,15 @@ def main() -> None:
                 break
         for enemy in live_enemies:
             enemy.update(dt, px, py)
+            # Animation state (presentation): moving = it changed position
+            # this tick (patrol/chase/swoop → walk; a still sentry → idle).
+            # The clock advances on the fixed-dt capture too → deterministic.
+            enemy._anim_moving = (
+                abs(enemy.x - getattr(enemy, "_anim_px", enemy.x))
+                + abs(enemy.y - getattr(enemy, "_anim_py", enemy.y))
+            ) > 1e-4
+            enemy._anim_px, enemy._anim_py = enemy.x, enemy.y
+            enemy._anim_t = getattr(enemy, "_anim_t", 0.0) + dt
             if not enemy.alive:
                 continue
             # Size-aware touch AABB: the body is `size` cells square,
@@ -965,14 +1060,13 @@ def main() -> None:
                 side,
             )
             sprite = enemy_sprites.get(enemy.spec.get("enemy_id", ""))
+            frame = _enemy_frame(enemy)  # animated frame, or None → base sprite
             if enemy.hurt_t > 0 and int(enemy.hurt_t * 20) % 2 == 0:
                 pygame.draw.rect(screen, (255, 255, 255), rect)  # stomp flash
-            elif sprite is not None:
-                image = sprite
+            elif (image := frame if frame is not None else sprite) is not None:
                 if enemy.size != 1.0:
                     image = pygame.transform.smoothscale(
-                        sprite,
-                        (int(rect[2]), int(rect[3])),
+                        image, (int(rect[2]), int(rect[3]))
                     )
                 if enemy.direction < 0:
                     image = pygame.transform.flip(image, True, False)
@@ -996,8 +1090,19 @@ def main() -> None:
             grace or spawn_shield > 0 or iframes > 0
         ) and int(blink_t * 8) % 2 == 0
         if not blinking:
-            if player_sprite is not None:
-                screen.blit(player_sprite, (px * SCALE + 4, py * SCALE + 4))
+            # airborne → jump, moving on ground → walk, else idle (loud
+            # fallback to the static base sprite when there's no animation).
+            p_candidates = (
+                (["jump"] if not on_ground else [])
+                + (["walk"] if dx else [])
+                + ["idle", "walk"]
+            )
+            frame = _frame_from(player_anim, p_candidates, player_anim_t)
+            image = frame if frame is not None else player_sprite
+            if image is not None:
+                if player_facing < 0:
+                    image = pygame.transform.flip(image, True, False)
+                screen.blit(image, (px * SCALE + 4, py * SCALE + 4))
             else:
                 pygame.draw.rect(
                     screen, (240, 240, 240),

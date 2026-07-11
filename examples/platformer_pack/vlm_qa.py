@@ -69,6 +69,59 @@ PALETTE_TOLERANCE = 48.0
 #: report or the manifest warnings.
 NOTES_MAX_CHARS = 300
 
+# --- Animation authoring (B2) ------------------------------------------------
+
+#: The closed animation-state vocabulary. Both play surfaces ALREADY track
+#: each of these: ``walk`` while moving, ``hurt`` while hurt_t>0, ``death``
+#: when !alive, else ``idle``. The VLM spec and frames.json share these keys.
+ANIMATION_STATES: tuple[str, ...] = ("idle", "walk", "hurt", "death")
+
+#: The PLAYER's states. The player jumps (enemies don't) and never plays a
+#: death cycle (it respawns), so its set differs from the enemy set. Both
+#: surfaces track: airborne → ``jump``, moving on ground → ``walk``, else idle.
+PLAYER_ANIMATION_STATES: tuple[str, ...] = ("idle", "walk", "jump")
+
+#: One-line meaning of each state, woven into the authoring prompt so motion
+#: is grounded in what the state actually is (a flyer's ``walk`` is flight).
+_STATE_BRIEF: dict[str, str] = {
+    "idle": "at rest / holding position (a flyer hovers, a sentry barely stirs)",
+    "walk": "actively moving along its path (for a flyer/swimmer: flight/swim)",
+    "hurt": "recoiling from a hit — a brief flinch",
+    "death": "defeated — collapse, tumble, or fade",
+    "jump": "a jump arc — crouch, launch, rise, hang at the peak, then fall",
+}
+
+#: Per-state frame counts are clamped here. The image model ignores exact
+#: counts anyway (the animation phase records whatever it segments); this only
+#: bounds the REQUEST so a rambling model can't ask for a 40-frame sheet, and
+#: every state gets at least a 2-frame cycle. The player gets a higher ceiling
+#: for a SMOOTHER hero cycle (~9 frames), enemies stay tighter/cheaper.
+ANIM_FRAMES_MIN, ANIM_FRAMES_MAX = 2, 6
+PLAYER_ANIM_FRAMES_MAX = 9
+
+#: Fallback frame count when the model omits/garbles a state — chosen to read
+#: right: idle barely stirs, a walk/flight cycle is the fullest.
+ANIM_DEFAULT_FRAMES: dict[str, int] = {
+    "idle": 2, "walk": 4, "hurt": 2, "death": 4, "jump": 6,
+}
+
+#: Motion phrases are clamped like the QA notes.
+ANIM_MOTION_MAX_CHARS = 200
+
+# --- Animation QA (B5) -------------------------------------------------------
+
+#: What the VLM judges about a GENERATED animation set — the visual questions
+#: code can't answer. (Frame existence/count/emptiness are code checks.)
+ANIMATION_QA_DIMENSIONS: tuple[str, ...] = ("consistency", "motion", "readability")
+
+#: The global animation-QA report (enemies are world-global, not per-stage) —
+#: warnings re-derive from it on disk, the durable qa_report pattern.
+ANIM_QA_REPORT_REL = "review/animation_qa.json"
+
+#: A sliced animation frame whose opaque area falls below this is blank — a
+#: botched edit or a segmentation that grabbed empty canvas.
+ANIM_FRAME_MIN_OPAQUE = 0.01
+
 
 def qa_report_rel(stage_id: str) -> str:
     return f"review/{stage_id}/qa_report.json"
@@ -374,6 +427,161 @@ def _sanitize_verdict(obj: dict, targets: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Animation authoring (B2) — the VLM interrogates the ACTUAL sprite and
+# describes, per state, how THIS creature moves. Reuses the same judge
+# machinery as qa_prompt (build_vlm_judge, extract_json_object,
+# retry_with_feedback); the spec persists on the enemy as stats["animation"]
+# and the animation phase (B3) consumes it to build one sheet per state.
+# ---------------------------------------------------------------------------
+
+
+def enemy_animation_subject(enemy: Any) -> str:
+    """The enemy-specific description block for :func:`animate_prompt` —
+    archetype is a HINT (appearance is LLM-authored), flavor grounds it."""
+    name = enemy.name or enemy.enemy_id
+    archetype = enemy.archetype or "patroller"
+    size = float(getattr(enemy, "size", 1.0) or 1.0)
+    flavor = str((getattr(enemy, "stats", None) or {}).get("flavor", "")).strip()
+    return (
+        f"Creature: {name!r} — locomotion archetype {archetype!r} (a HINT, not "
+        f"a lock: describe motion that fits the actual sprite; a 'flyer' may be "
+        f"a wingless floating fish). Body ~{size:g} cell(s) tall.\n"
+        f"Flavor: {flavor or 'n/a'}"
+    )
+
+
+def animate_prompt(
+    actor_id: str,
+    subject: str,
+    states: tuple[str, ...] = ANIMATION_STATES,
+    frames_max: int = ANIM_FRAMES_MAX,
+) -> str:
+    """Instructions for authoring a per-state motion spec for ONE actor
+    (enemy or player), grounded in its ACTUAL generated sprite (attached as
+    the sole image). ``subject`` is the actor description block; ``frames_max``
+    bounds the per-state frame count (higher = smoother, e.g. the player).
+
+    Parallel to :func:`qa_prompt`: the text carries the facts, the attached
+    sprite carries what's really drawn, and the model returns bare JSON."""
+    state_lines = "\n".join(f'  - "{s}": {_STATE_BRIEF[s]}' for s in states)
+    example = ", ".join(
+        f'"{s}": {{"frames": <int>, "motion": "<short>"}}' for s in states
+    )
+    return (
+        f"### TASK: plat_animate\n"
+        f"### ACTOR: {actor_id}\n\n"
+        f"You are a 2D sprite animator. The attached image is the ACTUAL "
+        f"generated sprite for this character — study how it is really drawn "
+        f"(limbs, wings, fins, body, tail) and describe how THIS specific "
+        f"character moves in each state. Ground every motion in the drawing.\n\n"
+        f"{subject}\n\n"
+        f"States to author (use these exact keys):\n{state_lines}\n\n"
+        f"For each state provide:\n"
+        f'  - "frames": an integer {ANIM_FRAMES_MIN}-{frames_max} — how many '
+        f"frames the cycle needs. A subtle idle → few; a full walk/jump cycle → "
+        f"more (smoother). Ask only for what the motion needs.\n"
+        f'  - "motion": one short phrase for the per-frame motion, specific to '
+        f"this sprite (e.g. 'legs cycle front-to-back, body bobs' / 'crouch, "
+        f"spring up, tuck at the peak, reach for the landing').\n\n"
+        f"Respond with a bare JSON object, no prose, no fences:\n"
+        f"{{{example}}}"
+    )
+
+
+def _validate_animation_spec(
+    content: str,
+    states: tuple[str, ...] = ANIMATION_STATES,
+    frames_max: int = ANIM_FRAMES_MAX,
+) -> tuple[bool, list[str]]:
+    """retry_with_feedback validator: every state present as an object with a
+    numeric ``frames`` and a non-empty ``motion`` string. Problems are fed
+    verbatim back to the model."""
+    obj = extract_json_object(content)
+    if obj is None:
+        return False, ["Response must be a bare JSON object — no prose or fences."]
+    problems: list[str] = []
+    for state in states:
+        value = obj.get(state)
+        if not isinstance(value, dict):
+            problems.append(
+                f'"{state}" must be an object with an integer "frames" '
+                f'({ANIM_FRAMES_MIN}-{frames_max}) and a short "motion" string.'
+            )
+            continue
+        frames = value.get("frames")
+        if not isinstance(frames, (int, float)) or isinstance(frames, bool):
+            problems.append(f'"{state}.frames" must be a number.')
+        motion = value.get("motion")
+        if not isinstance(motion, str) or not motion.strip():
+            problems.append(f'"{state}.motion" must be a non-empty string.')
+    return (not problems, problems)
+
+
+def _sanitize_animation_spec(
+    obj: dict,
+    states: tuple[str, ...] = ANIMATION_STATES,
+    frames_max: int = ANIM_FRAMES_MAX,
+) -> dict:
+    """Coerce a validated spec into the fixed persisted shape: frame counts
+    rounded + clamped to [MIN, frames_max], motion clamped, every state present
+    (defaults fill any the model garbled). Deterministic key order."""
+    spec: dict[str, dict] = {}
+    for state in states:
+        value = obj.get(state) if isinstance(obj.get(state), dict) else {}
+        raw = value.get("frames")
+        try:
+            frames = int(round(float(raw)))
+        except (TypeError, ValueError):
+            frames = ANIM_DEFAULT_FRAMES.get(state, ANIM_FRAMES_MIN)
+        frames = max(ANIM_FRAMES_MIN, min(frames_max, frames))
+        motion = str(value.get("motion", "")).strip()[:ANIM_MOTION_MAX_CHARS]
+        spec[state] = {"frames": frames, "motion": motion or _STATE_BRIEF[state]}
+    return spec
+
+
+def author_animation_spec(
+    judge: Any,
+    actor_id: str,
+    subject: str,
+    sprite_bytes: bytes,
+    *,
+    states: tuple[str, ...] = ANIMATION_STATES,
+    frames_max: int = ANIM_FRAMES_MAX,
+    max_retries: int = 3,
+) -> dict | None:
+    """Run the VLM to author a per-state motion spec for one actor (enemy or
+    player) from its ACTUAL sprite. Mirrors :meth:`VlmQaPhase._judge_level`'s
+    retry loop.
+
+    Returns the sanitized spec (persist it as the actor's animation manifest),
+    or ``None`` when the verdict never validates — the caller then keeps the
+    static sprite (the loud-fallback contract)."""
+    prompt = animate_prompt(actor_id, subject, states, frames_max)
+
+    def generate(feedback: list[str] | None = None) -> str:
+        text = prompt
+        if feedback:
+            text += "\n\nYour previous response was rejected:\n" + "\n".join(
+                f"- {reason}" for reason in feedback
+            )
+        return judge.judge(text, [sprite_bytes])
+
+    raw = retry_with_feedback(
+        generate_fn=generate,
+        validate_fn=lambda content: _validate_animation_spec(
+            content, states, frames_max
+        ),
+        fallback="",
+        max_retries=max_retries,
+        label=f"plat:animate:{actor_id}",
+    )
+    obj = extract_json_object(raw) if raw else None
+    if obj is None:
+        return None
+    return _sanitize_animation_spec(obj, states, frames_max)
+
+
+# ---------------------------------------------------------------------------
 # Warning derivation — shared by the phase (this run) and the manifest
 # (re-derived from the on-disk report, so an always-node rebuild never
 # erases QA findings: the layout_fallback durability pattern).
@@ -424,17 +632,292 @@ def derive_qa_warnings(report: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Animation QA (B5) — the VLM reviews the GENERATED animation (after B3),
+# closing the authoring→generation→REVIEW loop. Code checks the computable
+# half (frames exist, counts match, no blank frames); the VLM judges what code
+# can't (same creature across frames, coherent motion, reads-as-its-state).
+# Warn-only per the QA doctrine — NO auto-regen; a failure suggests a mark-only
+# enemy re-roll. Global (enemies are world-wide), gated on --vlm-backend.
+# ---------------------------------------------------------------------------
+
+
+#: Canonical state order for the contact sheet + prompt — covers every actor's
+#: states (enemy idle/walk/hurt/death AND player idle/walk/jump).
+_STATE_ORDER: tuple[str, ...] = ("idle", "walk", "jump", "hurt", "death")
+
+
+def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
+    """Computable checks over one actor's generated animation: each state strip
+    exists, its width matches frame_width x frames, and no sliced frame is
+    blank. code-not-LLM — the VLM verdict handles only the visual read."""
+    from PIL import Image
+
+    checks: list[dict] = []
+    target = actor_id
+    for state, meta in sorted((animation.get("states") or {}).items()):
+        rel = str(meta.get("path", ""))
+        n = int(meta.get("frames", 0))
+        fw = int(meta.get("frame_width", 0))
+        path = ctx.adapter.resolve_path(rel)
+        if not path.exists():
+            checks.append({
+                "check": "animation_strip", "target": target, "subject": state,
+                "passed": False, "detail": f"{rel} missing on disk",
+            })
+            continue
+        img = Image.open(path).convert("RGBA")
+        width_ok = n > 0 and img.width == fw * n
+        checks.append({
+            "check": "animation_strip", "target": target, "subject": state,
+            "passed": width_ok,
+            "detail": (
+                f"{state}: {n} frame(s) of {fw}px" if width_ok
+                else f"{state}: {img.width}px wide, expected {fw}x{n}={fw * n}"
+            ),
+        })
+        if not width_ok:
+            continue
+        blank = []
+        for i in range(n):
+            frame = img.crop((i * fw, 0, (i + 1) * fw, img.height))
+            alpha = list(frame.getchannel("A").get_flattened_data())
+            if sum(1 for a in alpha if a > 0) / len(alpha) < ANIM_FRAME_MIN_OPAQUE:
+                blank.append(i)
+        checks.append({
+            "check": "animation_frames", "target": target, "subject": state,
+            "passed": not blank,
+            "detail": (
+                f"{state}: all {n} frame(s) have content" if not blank
+                else f"{state}: frame(s) {blank} are (near-)blank"
+            ),
+        })
+    return checks
+
+
+def _animation_contact_sheet(ctx: Any, animation: dict, scale: int = 4) -> bytes | None:
+    """One image for the VLM: each state's strip on its own row (top→bottom in
+    ANIMATION_STATES order), upscaled so small sprites read. None if nothing
+    loads."""
+    import io
+
+    from PIL import Image
+
+    states = animation.get("states") or {}
+    rows = []
+    for state in _STATE_ORDER:
+        meta = states.get(state)
+        if not meta:
+            continue
+        path = ctx.adapter.resolve_path(str(meta.get("path", "")))
+        if not path.exists():
+            continue
+        strip = Image.open(path).convert("RGBA")
+        rows.append(
+            strip.resize((strip.width * scale, strip.height * scale), Image.NEAREST)
+        )
+    if not rows:
+        return None
+    width = max(r.width for r in rows)
+    height = sum(r.height for r in rows) + 2 * (len(rows) - 1)
+    sheet = Image.new("RGBA", (width, height), (60, 60, 70, 255))
+    y = 0
+    for r in rows:
+        sheet.paste(r, (0, y), r)
+        y += r.height + 2
+    buf = io.BytesIO()
+    sheet.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def animate_qa_prompt(actor_id: str, name: str, states_present: list[str]) -> str:
+    """Review instructions for one actor's generated animation (parallel to
+    qa_prompt). The attached contact sheet has one ROW per state."""
+    order = [s for s in _STATE_ORDER if s in states_present]
+    return (
+        f"### TASK: plat_animate_qa\n"
+        f"### ACTOR: {actor_id}\n\n"
+        f"You are the animation QA judge for one generated 2D game character: "
+        f"{name!r}. The attached image is a CONTACT SHEET — one row per "
+        f"animation state, top to bottom: {', '.join(order)}. Within a row the "
+        f"frames run left→right in play order.\n\n"
+        f"Judge these three dimensions strictly:\n"
+        f'1. "consistency" — is it unmistakably the SAME character in every '
+        f"frame: stable design, size, and colors (no morphing, no stray extra "
+        f"characters)?\n"
+        f'2. "motion" — do the frames of each row form a COHERENT cycle — '
+        f"progressive, distinct poses — rather than identical duplicates or "
+        f"garbled noise?\n"
+        f'3. "readability" — does each state read as its motion (walk = a '
+        f"locomotion stride, idle = a subtle stir, hurt = a recoil)?\n\n"
+        f"Respond with a bare JSON object, no prose, no fences:\n"
+        f'{{"consistency": {{"passed": true|false, "notes": "<short>"}}, '
+        f'"motion": {{"passed": true|false, "notes": "<short>"}}, '
+        f'"readability": {{"passed": true|false, "notes": "<short>"}}, '
+        f'"notes": "<short overall>"}}'
+    )
+
+
+def _validate_animation_verdict(content: str) -> tuple[bool, list[str]]:
+    obj = extract_json_object(content)
+    if obj is None:
+        return False, ["Response must be a bare JSON object — no prose or fences."]
+    problems = []
+    for dim in ANIMATION_QA_DIMENSIONS:
+        value = obj.get(dim)
+        if not isinstance(value, dict) or not isinstance(value.get("passed"), bool):
+            problems.append(
+                f'"{dim}" must be an object with a boolean "passed" and '
+                f'short string "notes".'
+            )
+    return (not problems, problems)
+
+
+def _sanitize_animation_verdict(obj: dict) -> dict:
+    return {
+        "verdicts": {
+            dim: {
+                "passed": bool(obj[dim].get("passed")),
+                "notes": str(obj[dim].get("notes", ""))[:NOTES_MAX_CHARS],
+            }
+            for dim in ANIMATION_QA_DIMENSIONS
+        },
+        "notes": str(obj.get("notes", ""))[:NOTES_MAX_CHARS],
+    }
+
+
+def _animated_actors(ctx: Any) -> list[tuple[str, str, dict]]:
+    """Every actor with a generated animation, as (actor_id, display_name,
+    manifest) — enemies (from stats["animation"]) then the player (from
+    PlayerDefinition.animation). The single source B5 iterates."""
+    actors: list[tuple[str, str, dict]] = []
+    for enemy_id in sorted(ctx.bible.enemy_definitions):
+        enemy = ctx.bible.enemy_definitions[enemy_id]
+        anim = (getattr(enemy, "stats", None) or {}).get("animation")
+        if anim and anim.get("states"):
+            actors.append((f"enemy:{enemy_id}", enemy.name or enemy_id, anim))
+    player = getattr(ctx.bible, "player", None)
+    anim = getattr(player, "animation", None) if player is not None else None
+    if anim and anim.get("states"):
+        actors.append(("player", "the player", anim))
+    return actors
+
+
+def review_animations(ctx: Any, judge: Any, max_retries: int = 3) -> dict:
+    """Global per-ACTOR animation review (enemies + player). Code checks run
+    for every animated actor; the VLM verdict runs when a judge is present.
+    Returns the report dict (write to ANIM_QA_REPORT_REL); it NEVER regenerates
+    — a failing verdict becomes a durable warning only."""
+    reviewed: dict[str, dict] = {}
+    for actor_id, name, animation in _animated_actors(ctx):
+        entry: dict[str, Any] = {
+            "code_checks": _animation_checks(ctx, actor_id, animation),
+        }
+        sheet = _animation_contact_sheet(ctx, animation) if judge is not None else None
+        if sheet is not None:
+            prompt = animate_qa_prompt(actor_id, name, list(animation["states"]))
+            raw = retry_with_feedback(
+                generate_fn=lambda feedback=None, p=prompt, s=sheet: judge.judge(
+                    p if not feedback
+                    else p + "\n\nYour previous response was rejected:\n"
+                    + "\n".join(f"- {r}" for r in feedback),
+                    [s],
+                ),
+                validate_fn=_validate_animation_verdict,
+                fallback="",
+                max_retries=max_retries,
+                label=f"plat:animate_qa:{actor_id}",
+            )
+            obj = extract_json_object(raw) if raw else None
+            if obj is None:
+                entry["error"] = "verdict never validated after retries"
+            else:
+                entry.update(_sanitize_animation_verdict(obj))
+        reviewed[actor_id] = entry
+    return {
+        "vlm_model": (
+            str(getattr(judge, "model", type(judge).__name__))
+            if judge is not None else "none"
+        ),
+        "actors": reviewed,
+    }
+
+
+def derive_animation_qa_warnings(report: dict) -> list[str]:
+    """Failing animation-QA entries → manifest warnings, re-derived from the
+    on-disk report. Suggests a mark-only re-roll of the actor (regen user-run)."""
+    messages: list[str] = []
+    for actor_id, entry in sorted((report.get("actors") or {}).items()):
+        for check in entry.get("code_checks", []):
+            if check.get("passed"):
+                continue
+            messages.append(
+                f"animation_qa code-check {check.get('check')} FAILED for "
+                f"{actor_id} ({check.get('subject')}): "
+                f"{check.get('detail')} (report: {ANIM_QA_REPORT_REL})"
+            )
+        if "error" in entry:
+            messages.append(
+                f"animation_qa {actor_id}: no verdict — {entry['error']} "
+                f"(report: {ANIM_QA_REPORT_REL})"
+            )
+            continue
+        for dim in ANIMATION_QA_DIMENSIONS:
+            verdict = entry.get("verdicts", {}).get(dim, {})
+            if verdict.get("passed", True):
+                continue
+            messages.append(
+                f"animation_qa {actor_id}: {dim} FAILED — "
+                f"{verdict.get('notes', '')}; suggested mark-only target: "
+                f"{actor_id} (report: {ANIM_QA_REPORT_REL}; regen stays "
+                f"user-controlled)"
+            )
+    return messages
+
+
+# ---------------------------------------------------------------------------
 # Backends — explicit-flag wiring, same rules as image/music/sfx.
 # ---------------------------------------------------------------------------
 
 
 def make_fake_vlm_responder():
-    """Canned deterministic verdicts keyed off the prompt's markers. All
-    dimensions pass except READABILITY ON l2, which fails and suggests
-    the first enemy target the prompt offered — so a default fake run
-    exercises the failing-verdict warning path and target filtering."""
+    """Canned deterministic verdicts keyed off the prompt's markers. Serves
+    BOTH VLM tasks from one fake judge:
+
+    - ``plat_animate`` (B2) → a canned per-state motion spec, with a
+      deliberately over-count ``death`` state so the frame clamp is exercised.
+    - ``vlm_qa`` → all dimensions pass except READABILITY on l2, which fails
+      and suggests the first enemy target — exercising the failing-verdict
+      warning path and target filtering.
+    """
 
     def respond(prompt: str, images: list[bytes]) -> str:
+        # NB: check plat_animate_qa BEFORE plat_animate — the former contains
+        # the latter as a substring.
+        if "### TASK: plat_animate_qa" in prompt:
+            return json.dumps(
+                {
+                    dim: {"passed": True, "notes": f"canned fake pass ({dim})"}
+                    for dim in ANIMATION_QA_DIMENSIONS
+                }
+                | {"notes": "canned fake animation review"}
+            )
+        if "### TASK: plat_animate" in prompt:
+            # State-aware canned spec: return exactly the states the prompt
+            # asks for (enemies get idle/walk/hurt/death, the player gets
+            # idle/walk/jump). ``death`` sits ABOVE the enemy clamp ceiling
+            # (9 → 6) so _sanitize_animation_spec's clamp runs in a fake run.
+            canned_frames = {
+                "idle": 2, "walk": 4, "hurt": 2, "death": 9, "jump": 5,
+            }
+            asked = [
+                s for s in re.findall(r'"(\w+)":', prompt) if s in canned_frames
+            ]
+            return json.dumps(
+                {
+                    s: {"frames": canned_frames[s], "motion": f"canned {s}: motion"}
+                    for s in dict.fromkeys(asked)  # dedup, keep order
+                }
+            )
         level_match = re.search(r"### LEVEL: (\w+)", prompt)
         level_id = level_match.group(1) if level_match else ""
         targets_match = re.search(r"### TARGETS: (.+)", prompt)
@@ -560,6 +1043,25 @@ class VlmQaPhase:
                 "verdict(s), %d/%d code check(s) passed.",
                 len(levels), stage_id, failed,
                 sum(1 for c in checks if c["passed"]), len(checks),
+            )
+
+        # Animation QA (B5): review every animated enemy ONCE (enemies are
+        # world-global, not per-stage) — code checks + a VLM verdict → a global
+        # report + durable warnings. Warn-only, never regenerates.
+        anim_report = review_animations(ctx, self.judge)
+        if anim_report["actors"]:
+            ctx.adapter.write_json_singleton(ANIM_QA_REPORT_REL, anim_report)
+            for message in derive_animation_qa_warnings(anim_report):
+                warn(ctx, message)
+            failed = sum(
+                1
+                for entry in anim_report["actors"].values()
+                for dim in ANIMATION_QA_DIMENSIONS
+                if not entry.get("verdicts", {}).get(dim, {}).get("passed", True)
+            )
+            logger.info(
+                "VlmQaPhase reviewed %d animated actor(s): %d failing "
+                "verdict(s).", len(anim_report["actors"]), failed,
             )
         _stamp_metadata(ctx, self.name)
 

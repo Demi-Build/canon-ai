@@ -108,6 +108,11 @@ var tile_filter := CanvasItem.TEXTURE_FILTER_NEAREST
 var player_pos := Vector2.ZERO
 var player_vy := 0.0
 var on_ground := false
+# Player animation (art track): idle/walk/JUMP, loaded at spawn. Empty → the
+# static base sprite plays (loud fallback).
+var player_anim: Dictionary = {}
+var player_anim_t := 0.0
+var player_facing := 1.0
 var won := false
 var hearts := 3
 var iframes := 0.0  # post-hit invulnerability countdown
@@ -850,6 +855,11 @@ func _spawn_enemies(placements: Array) -> void:
 			"node": rect,
 			"frame": frame,
 			"frame_off": frame_off,
+			# Per-state animation (art track, B4): frames + clock + last pos
+			# for the moving check. Empty when there's no frames.json (static).
+			"anim": _load_anim(str(spec.get("sprite_path", ""))),
+			"anim_t": 0.0,
+			"anim_prev": Vector2(p["x"], p["y"]),
 		})
 
 
@@ -936,6 +946,56 @@ func _actor_visual(sprite_rel: String, fallback: Color, size_px: Vector2) -> Can
 	return rect
 
 
+func _load_anim(sprite_rel: String) -> Dictionary:
+	# Per-state animation frames (art track, B4): frames.json beside base.png,
+	# each <state>.png a horizontal strip sliced by frame count. Frames are the
+	# SAME size as base.png (sprite_size square) so a texture swap keeps the
+	# node scale valid. Missing/garbled → {} and the static base sprite plays
+	# (the loud fallback). Returns {"states": {state: [Texture]}, "durs": {...}}.
+	if sprite_rel == "":
+		return {}
+	var meta_path := "res://" + sprite_rel.get_base_dir() + "/frames.json"
+	if not FileAccess.file_exists(meta_path):
+		return {}
+	var meta = JSON.parse_string(FileAccess.get_file_as_string(meta_path))
+	if typeof(meta) != TYPE_DICTIONARY:
+		return {}
+	var states := {}
+	var durs := {}
+	for state in meta:
+		var m: Dictionary = meta[state]
+		var n := int(m.get("frames", 0))
+		var rel := str(m.get("path", ""))
+		if n < 1 or not FileAccess.file_exists("res://" + rel):
+			continue
+		var image := Image.load_from_file(
+			ProjectSettings.globalize_path("res://" + rel)
+		)
+		if image == null:
+			continue
+		var fw := image.get_width() / n
+		var fh := image.get_height()
+		var texs: Array = []
+		for i in range(n):
+			var sub := image.get_region(Rect2i(i * fw, 0, fw, fh))
+			texs.append(ImageTexture.create_from_image(sub))
+		states[state] = texs
+		durs[state] = maxf(0.001, float(m.get("duration_ms", 120)) / 1000.0)
+	if states.is_empty():
+		return {}
+	return {"states": states, "durs": durs}
+
+
+func _anim_pick(candidates: Array, states: Dictionary) -> String:
+	# Mirror of platformer_play.pick_anim_frame (parity): the caller builds the
+	# candidate priority list from runtime signals (enemy: hurt>walk>idle;
+	# player: jump>walk>idle); the first that exists wins.
+	for s in candidates:
+		if states.has(s):
+			return s
+	return str(states.keys()[0])
+
+
 var player_vis_off := Vector2(4, 4)
 
 
@@ -952,6 +1012,7 @@ func _spawn_player() -> void:
 		# Overdrawn hero: x-centered on the hitbox cell, feet on its floor.
 		var vis := (CELL - 8.0) * actor_scale
 		player_vis_off = Vector2((CELL - vis) / 2.0, CELL - 4.0 - vis)
+	player_anim = _load_anim("sprite/player/base.png")
 	add_child(player_node)
 	_respawn()
 
@@ -1559,6 +1620,27 @@ func _process(delta: float) -> void:
 		enemy["node"].position = pos * CELL + enemy["vis_off"]
 		if enemy["node"] is Sprite2D:
 			enemy["node"].flip_h = enemy["dir"] < 0.0
+		# Per-state frame playback (B4): advance the clock, pick the state
+		# off the same runtime signals as pygame (hurt_t / moving), swap the
+		# texture. Frames are base.png-sized so the node scale stays valid;
+		# an empty anim dict leaves the static base sprite (loud fallback).
+		var anim: Dictionary = enemy["anim"]
+		if enemy["node"] is Sprite2D and not anim.is_empty():
+			var moving: bool = (pos - enemy["anim_prev"]).length() > 0.0001
+			enemy["anim_prev"] = pos
+			enemy["anim_t"] = float(enemy["anim_t"]) + delta
+			var st: Dictionary = anim["states"]
+			var cand: Array = []
+			if float(enemy["hurt_t"]) > 0.0:
+				cand.append("hurt")
+			if moving:
+				cand.append("walk")
+			cand.append_array(["idle", "walk", "hurt", "death"])
+			var state := _anim_pick(cand, st)
+			var texs: Array = st[state]
+			var dur: float = anim["durs"][state]
+			var idx := int(float(enemy["anim_t"]) / dur) % texs.size()
+			enemy["node"].texture = texs[idx]
 		# Stomp flash: a surviving stomp blinks the body briefly.
 		enemy["node"].visible = not (
 			float(enemy["hurt_t"]) > 0.0 and int(enemy["hurt_t"] * 20.0) % 2 == 0
@@ -1613,8 +1695,25 @@ func _process(delta: float) -> void:
 		_traj_frame += 1
 
 	player_node.position = player_pos * CELL + player_vis_off
-	if player_node is Sprite2D and dx != 0.0:
-		player_node.flip_h = dx < 0.0
+	if dx != 0.0:
+		player_facing = dx  # face the direction of travel
+	player_anim_t += delta
+	if player_node is Sprite2D:
+		player_node.flip_h = player_facing < 0.0
+		# Per-state playback (B4): airborne → jump, moving on ground → walk,
+		# else idle. Empty anim → the static base sprite stays (loud fallback).
+		if not player_anim.is_empty():
+			var pst: Dictionary = player_anim["states"]
+			var pcand: Array = []
+			if not on_ground:
+				pcand.append("jump")
+			if dx != 0.0:
+				pcand.append("walk")
+			pcand.append_array(["idle", "walk"])
+			var pstate := _anim_pick(pcand, pst)
+			var ptexs: Array = pst[pstate]
+			var pdur: float = player_anim["durs"][pstate]
+			player_node.texture = ptexs[int(player_anim_t / pdur) % ptexs.size()]
 	# Spawn grace / shield / i-frames: the player BLINKS (intermittently
 	# invisible) the whole time they are untouchable.
 	player_node.visible = not (

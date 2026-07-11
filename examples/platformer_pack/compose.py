@@ -17,6 +17,7 @@ from typing import Any
 from canon.bible.models import BibleMetadata
 from examples.platformer_pack.art_phases import (
     BackdropArtPhase,
+    SpriteAnimationPhase,
     SpriteArtPhase,
     TilesetArtPhase,
 )
@@ -138,6 +139,28 @@ def _run_warnings(ctx: Any) -> list[str]:
         for message in derive_qa_warnings(report):
             if message not in warnings:
                 warnings.append(message)
+
+    # Animation QA findings re-derive from the global on-disk report (enemies
+    # are world-wide, so this report is not per-stage) — same durability as the
+    # per-level QA above.
+    from examples.platformer_pack.vlm_qa import (
+        ANIM_QA_REPORT_REL,
+        derive_animation_qa_warnings,
+    )
+
+    anim_path = ctx.adapter.resolve_path(ANIM_QA_REPORT_REL)
+    if anim_path.exists():
+        try:
+            anim_report = _json.loads(anim_path.read_text())
+        except (OSError, ValueError):
+            warnings.append(
+                f"animation_qa: {ANIM_QA_REPORT_REL} exists but is unreadable "
+                "— re-run with --vlm-backend to regenerate it."
+            )
+        else:
+            for message in derive_animation_qa_warnings(anim_report):
+                if message not in warnings:
+                    warnings.append(message)
     return warnings
 
 
@@ -317,6 +340,12 @@ def compose_pipeline(
         # gameplay layer above validated; renders below see final art.
         TilesetArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         SpriteArtPhase(producer=image_producer, graphics=graphics),
+        # Sheet animation reads the base sprites SpriteArtPhase just wrote and
+        # authors motion via the same VLM judge as QA (both no-op without their
+        # backends → static sprites, the loud fallback).
+        SpriteAnimationPhase(
+            producer=image_producer, judge=vlm_judge, graphics=graphics
+        ),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderPhase(variants=variants, graphics=graphics),

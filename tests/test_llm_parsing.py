@@ -1,9 +1,7 @@
 """Unit tests for canon.llm.parsing — robust JSON extraction from LLM output."""
 
-import pytest
 
 from canon.llm.parsing import extract_json_array, extract_json_object, strip_fences
-
 
 # ---------------------------------------------------------------------------
 # strip_fences

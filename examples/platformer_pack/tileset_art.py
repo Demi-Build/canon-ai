@@ -287,6 +287,108 @@ def remove_background(img: Any) -> Any:
     return out
 
 
+# --- Sprite-sheet frame segmentation (B3 sprite animation) ---------------
+# The img2img model does NOT honor an exact cell count (a spike asked for 4
+# frames and got 5, evenly spaced but off any fixed grid), so frames are
+# recovered by CONTENT, not by slicing a grid: cut the background, project
+# opaque pixels onto the x-axis, split on vertical whitespace gaps, and crop
+# each blob to its own box. Deterministic — robust to whatever N the model draws.
+
+
+def build_sheet_reference(base: Any, n_frames: int, cell_px: int) -> Any:
+    """The img2img seed (proven in the B0 spike): the base sprite composited
+    onto white and NEAREST-upscaled to a ``cell_px`` cell, placed as frame 1
+    (leftmost) of an ``n_frames``-wide white canvas — the rest blank for the
+    model to fill. Returns RGB."""
+    from PIL import Image
+
+    white = Image.new("RGBA", base.size, (255, 255, 255, 255))
+    flat = Image.alpha_composite(white, base.convert("RGBA")).convert("RGB")
+    cell = flat.resize((cell_px, cell_px), Image.NEAREST)
+    ref = Image.new("RGB", (cell_px * max(1, n_frames), cell_px), (255, 255, 255))
+    ref.paste(cell, (0, 0))
+    return ref
+
+
+def segment_frames(
+    sheet: Any, *, min_gap_frac: float = 0.01, min_blob_frac: float = 0.02
+) -> list:
+    """Split a generated sprite SHEET into per-frame RGBA crops, left→right.
+    Background is cut first (white → transparent); opaque columns are grouped
+    into blobs, runs closer than ``min_gap_frac`` of the width are merged, and
+    blobs narrower than ``min_blob_frac`` are dropped. Fraction thresholds keep
+    it resolution-independent."""
+    keyed = remove_background(sheet.convert("RGB"))  # RGBA, bg → transparent
+    w, h = keyed.size
+    alpha = list(keyed.getchannel("A").get_flattened_data())
+    col = [0] * w
+    for i, a in enumerate(alpha):
+        if a > 0:
+            col[i % w] += 1
+    min_gap = max(1, int(w * min_gap_frac))
+    min_blob = max(1, int(w * min_blob_frac))
+
+    runs: list[list[int]] = []
+    x = 0
+    while x < w:
+        if col[x] > 0:
+            x0 = x
+            while x < w and col[x] > 0:
+                x += 1
+            runs.append([x0, x])
+        else:
+            x += 1
+    merged: list[list[int]] = []
+    for run in runs:
+        if merged and run[0] - merged[-1][1] < min_gap:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+
+    crops = []
+    for x0, x1 in merged:
+        if (x1 - x0) < min_blob:
+            continue
+        strip = keyed.crop((x0, 0, x1, h))
+        bbox = strip.getchannel("A").getbbox()
+        crops.append(strip.crop(bbox) if bbox else strip)
+    return crops
+
+
+def normalize_frames(crops: list, *, pad: int = 4) -> list:
+    """Seat every crop in a common SQUARE canvas (max content dimension +
+    pad), x-centered and bottom-aligned (feet on the frame floor, matching
+    ``_bottom_align`` and the static base.png framing). One shared canvas
+    size → the creature holds a consistent size across the cycle. Empty
+    input → []."""
+    from PIL import Image
+
+    if not crops:
+        return []
+    side = max(max(c.width for c in crops), max(c.height for c in crops)) + pad
+    out = []
+    for c in crops:
+        frame = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        frame.paste(c, ((side - c.width) // 2, side - c.height))
+        out.append(frame)
+    return out
+
+
+def frames_to_strip(frames: list) -> Any:
+    """Concatenate uniform square frames into one horizontal strip (RGBA);
+    consumers slice by index at play time (frame width = strip width // N).
+    Empty input → None."""
+    from PIL import Image
+
+    if not frames:
+        return None
+    fw, fh = frames[0].size
+    strip = Image.new("RGBA", (fw * len(frames), fh), (0, 0, 0, 0))
+    for i, frame in enumerate(frames):
+        strip.paste(frame, (i * fw, 0))
+    return strip
+
+
 def dominant_hue(img: Any) -> float | None:
     """Saturation-weighted dominant hue (degrees) over opaque pixels;
     None when the sprite is effectively colorless or empty."""

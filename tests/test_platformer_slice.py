@@ -2222,3 +2222,47 @@ class TestPerLevelView:
         assert gfx.view_for("intimate") == 8
         assert gfx.view_for("standard") is None
         assert gfx.view_for("") is None
+
+
+class TestAnimFramePick:
+    """The pure candidate → (state, frame-index) selector, shared in spirit
+    with main.gd's GDScript mirror. The CALLER builds the candidate priority
+    list from runtime signals (enemy: hurt>walk>idle; player: jump>walk>idle)."""
+
+    S = {
+        "idle": {"count": 2, "dur": 0.25},
+        "walk": {"count": 4, "dur": 0.10},
+        "jump": {"count": 6, "dur": 0.09},
+    }
+
+    def test_first_present_candidate_wins(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        # player airborne: jump leads the list and exists
+        assert pick_anim_frame(["jump", "walk", "idle"], 0.0, self.S)[0] == "jump"
+        # enemy hurt priority, but no hurt frames here → walk
+        assert pick_anim_frame(["hurt", "walk", "idle"], 0.0, self.S)[0] == "walk"
+        assert pick_anim_frame(["idle", "walk"], 0.0, self.S)[0] == "idle"
+
+    def test_frame_index_advances_and_wraps(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        # walk: dur 0.10, 4 frames → idx = int(t/0.10) % 4
+        assert pick_anim_frame(["walk"], 0.00, self.S)[1] == 0
+        assert pick_anim_frame(["walk"], 0.15, self.S)[1] == 1
+        assert pick_anim_frame(["walk"], 0.35, self.S)[1] == 3
+        assert pick_anim_frame(["walk"], 0.45, self.S)[1] == 0  # wraps
+
+    def test_falls_through_when_no_candidate_exists(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        only_idle = {"idle": {"count": 3, "dur": 0.2}}
+        # candidates absent → first state in the dict
+        assert pick_anim_frame(["jump", "walk"], 0.0, only_idle)[0] == "idle"
+
+    def test_deterministic(self) -> None:
+        from examples.platformer_play import pick_anim_frame
+
+        a = pick_anim_frame(["walk"], 0.37, self.S)
+        b = pick_anim_frame(["walk"], 0.37, self.S)
+        assert a == b

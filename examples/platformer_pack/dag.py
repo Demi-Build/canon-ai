@@ -455,6 +455,7 @@ def compose_dag_pipeline(
     the Bible already has a stage plan (see module docstring)."""
     from examples.platformer_pack.art_phases import (
         BackdropArtPhase,
+        SpriteAnimationPhase,
         SpriteArtPhase,
         TilesetArtPhase,
     )
@@ -474,6 +475,9 @@ def compose_dag_pipeline(
         # never runs before the levels validate.
         TilesetArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         SpriteArtPhase(producer=image_producer, graphics=graphics),
+        SpriteAnimationPhase(
+            producer=image_producer, judge=vlm_judge, graphics=graphics
+        ),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderDagPhase(variants=variants, graphics=graphics),

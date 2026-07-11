@@ -18,6 +18,7 @@ Code that only needs to check availability can test for ``None``::
 
 from canon.backends.base import (
     ImageBackend,
+    ImageEditBackend,
     LLMBackend,
     MusicBackend,
     SFXBackend,
@@ -64,6 +65,7 @@ except ImportError:
 __all__ = [
     "LLMBackend",
     "ImageBackend",
+    "ImageEditBackend",
     "MusicBackend",
     "SFXBackend",
     "VLMBackend",

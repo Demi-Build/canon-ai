@@ -13,6 +13,7 @@ network calls and get deterministic, inspectable results::
 
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
 from pathlib import Path
 
@@ -234,6 +235,64 @@ class FakeImageBackend:
     ) -> bool:
         """Async variant of ``generate_and_save``."""
         return self.generate_and_save(prompt, filepath, width, height)
+
+    # -- img2img (implements ``ImageEditBackend``) --------------------------
+
+    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
+        """Return a deterministic canned multi-frame sprite SHEET and record
+        the call. The sheet holds ``_EDIT_SHEET_FRAMES`` opaque blobs on a
+        white field, evenly spaced with clear gaps, so content-aware frame
+        segmentation recovers exactly that many frames — the animation slicing
+        path runs at $0. Byte-identical for identical ``(width, height)``."""
+        self.calls.append(
+            {
+                "op": "edit",
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "image_bytes": len(image_bytes),
+            }
+        )
+        return self._edit_sheet_bytes(width, height)
+
+    async def edit_async(
+        self, image_bytes: bytes, prompt: str, width: int, height: int
+    ) -> bytes:
+        """Async variant of ``edit``."""
+        return self.edit(image_bytes, prompt, width, height)
+
+    #: Frame count the canned edit sheet draws — a fixed, evenly-spaced count
+    #: so segmentation is deterministic. Real img2img ignores exact counts;
+    #: the animation phase records whatever it segments, not this number.
+    _EDIT_SHEET_FRAMES = 4
+
+    @classmethod
+    def _edit_sheet_bytes(cls, width: int, height: int) -> bytes:
+        """Deterministic white-background sheet of evenly-spaced opaque blobs.
+        Falls back to the 1×1 stub only if Pillow is somehow absent (the pack
+        always installs it; the animation path needs it regardless)."""
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:  # pragma: no cover — pack installs Pillow
+            return _MIN_PNG_BYTES
+        w, h = max(cls._EDIT_SHEET_FRAMES, width), max(4, height)
+        img = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        cell = w // cls._EDIT_SHEET_FRAMES
+        radius = max(2, min(cell, h) // 3)
+        cy = h // 2
+        for i in range(cls._EDIT_SHEET_FRAMES):
+            cx = i * cell + cell // 2
+            draw.ellipse(
+                [cx - radius, cy - radius, cx + radius, cy + radius],
+                fill=(60, 90, 200, 255),
+            )
+            # a per-frame "leg" nub so slices differ yet stay deterministic
+            leg = radius + (i % 3)
+            draw.rectangle([cx - 2, cy, cx + 2, cy + leg], fill=(60, 90, 200, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
 
     def _placeholder_bytes(self) -> bytes:
         if self.placeholder and self.placeholder.exists():
