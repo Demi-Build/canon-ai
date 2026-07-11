@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from pathlib import Path
 
@@ -283,40 +284,162 @@ class TestSwimStyles:
             assert (int(x), int(y)) in volumes
 
 
+def _in_sight_sim(archetype, facing, rel_x, rel_y, aggro_range, sight):
+    """Faithful copy of the consumers' `_in_sight` (main.gd /
+    platformer_play.py) — the eyesight-cone gate the parity sims below
+    share with both play surfaces."""
+    if math.hypot(rel_x, rel_y) > aggro_range:
+        return False
+    cfg = sight.get(archetype, {})
+    fov = str(cfg.get("fov", "omni"))
+    if fov == "none":
+        return False
+    if fov == "omni":
+        return True
+    if rel_x * facing < 0:
+        return False
+    if fov == "forward":
+        return abs(rel_y) <= float(cfg.get("vband", 2))
+    return True
+
+
+def _ground_aggro_step(st, behavior, sight, player, speed, chase_mult, dt):
+    """One step of the consumers' aggressive-PATROLLER branch on an open
+    field (no walls): FOV-gated detection, an `alerted` lock that commits by
+    RANGE until the tether snaps, chase at chase_mult speed, else return /
+    patrol. Mutates st = {x, home_x, y, dir, alerted}; returns the mode."""
+    aggro = float(behavior.get("aggro_range", 0) or 0)
+    leash = float(behavior.get("leash_range", 0) or 0)
+    patrol = float(behavior.get("patrol_range", 4))
+    px, py = player
+    rel_x, rel_y = px - st["x"], py - st.get("y", 0.0)
+    home_dist = abs(st["x"] - st["home_x"])
+    if st["alerted"]:
+        if math.hypot(rel_x, rel_y) > aggro or (leash > 0 and home_dist >= leash):
+            st["alerted"] = False
+    elif aggro > 0 and _in_sight_sim(
+        "patroller", st["dir"], rel_x, rel_y, aggro, sight
+    ):
+        st["alerted"] = True
+    if st["alerted"]:
+        mode = "chase"
+    elif home_dist > patrol:
+        mode = "return"
+    else:
+        mode = "patrol"
+    if mode == "chase":
+        step = speed * chase_mult * dt
+        d = 1.0 if px > st["x"] else (-1.0 if px < st["x"] else 0.0)
+        if d != 0.0:
+            st["dir"] = d
+        st["x"] = px if abs(px - st["x"]) < step else st["x"] + d * step
+    elif mode == "return":
+        step = speed * dt
+        d = 1.0 if st["home_x"] > st["x"] else (-1.0 if st["home_x"] < st["x"] else 0.0)
+        if d != 0.0:
+            st["dir"] = d
+        st["x"] = (
+            st["home_x"] if abs(st["home_x"] - st["x"]) < step else st["x"] + d * step
+        )
+    else:
+        step = speed * dt
+        nx = st["x"] + st["dir"] * step
+        if abs(nx - st["home_x"]) >= patrol:
+            st["dir"] *= -1.0
+        else:
+            st["x"] = nx
+    return mode
+
+
 class TestBehaviorDoctrine:
-    """Tracks first, leashed chasing, no hazard entry — the arithmetic
-    both play surfaces mirror (same style as the jump-physics parity
-    test: the sim below IS the consumer branch logic)."""
+    """Aggro is an ORTHOGONAL behavior tier (not a unique archetype): FOV-
+    gated, leashed pursuit that composes with any locomotion. Tracks-first,
+    no-hazard-entry doctrine holds. The sims here ARE the consumer branch
+    logic both play surfaces mirror (same style as the jump-physics parity
+    test); the frame captures cross-check Godot against pygame."""
 
-    def test_chaser_leash_returns_to_home_track(self) -> None:
-        home, leash, aggro, speed, dt = 10.0, 4.0, 20.0, 3.0, 1 / 60
-        x, player_x = 10.0, 40.0
+    #: Default game FOV config (rules.enemy_sight): ground sees a forward
+    #: cone within vband rows; swimmers are omnidirectional; sentries blind.
+    SIGHT = {
+        "patroller": {"fov": "forward", "vband": 2},
+        "swimmer": {"fov": "omni"},
+        "sentry": {"fov": "none"},
+    }
 
-        def step(x: float) -> float:
-            chasing = abs(player_x - x) <= aggro and (
-                leash <= 0 or abs(x - home) < leash
-            )
-            if chasing:
-                return x + (1.0 if player_x > x else -1.0) * speed * dt
-            if abs(x - home) > 0.1:
-                return x + (1.0 if home > x else -1.0) * speed * dt
-            return x
-
-        # Player far away: out of aggro — the chaser stays on its track.
-        for _ in range(200):
-            x = step(x)
-        assert abs(x - home) <= 0.2
-        # Player inside aggro: pursue, but never past the leash...
-        player_x = 25.0
+    def test_passive_never_chases(self) -> None:
+        """aggro_range 0 (passive tier) — patrols its beat and never breaks
+        off toward the player, however close."""
+        st = {"x": 10.0, "home_x": 10.0, "y": 7.0, "dir": 1.0, "alerted": False}
+        behavior = {"aggro_range": 0, "leash_range": 0, "patrol_range": 4}
         for _ in range(600):
-            x = step(x)
-            assert abs(x - home) <= leash + speed * dt
-        assert x > home  # it DID give chase
-        # ...and when the player leaves aggro, walk home again.
-        player_x = 60.0
-        for _ in range(600):
-            x = step(x)
-        assert abs(x - home) <= 0.2
+            _ground_aggro_step(st, behavior, self.SIGHT, (11.0, 7.0), 2.0, 1.5, 1 / 60)
+            assert not st["alerted"]
+        assert abs(st["x"] - 10.0) <= 4.0 + 0.1  # stayed on the beat
+
+    def test_ground_fov_only_sees_in_front_at_its_level(self) -> None:
+        """A ground walker's 'forward' cone: ignores a player behind it or
+        well above/below, alerts only on one in front, in band, in range —
+        while a swimmer (omni) sees the same player behind it."""
+        s = self.SIGHT
+        assert not _in_sight_sim("patroller", 1.0, -3.0, 0.0, 8.0, s)  # behind
+        assert not _in_sight_sim("patroller", 1.0, 3.0, -5.0, 8.0, s)  # too high
+        assert _in_sight_sim("patroller", 1.0, 3.0, 1.0, 8.0, s)  # in the cone
+        assert not _in_sight_sim("patroller", 1.0, 9.0, 0.0, 8.0, s)  # out of range
+        assert _in_sight_sim("swimmer", 1.0, -3.0, 0.0, 8.0, s)  # omni sees behind
+
+    def test_aggressive_leashes_and_returns_to_beat(self) -> None:
+        """The dissolved 'chaser' = patroller + aggressive: spots the player
+        in its forward cone, chases, never strays past its tether, and walks
+        home to resume patrol once the player is gone."""
+        behavior = {"aggro_range": 12.0, "leash_range": 6.0, "patrol_range": 4}
+        st = {"x": 10.0, "home_x": 10.0, "y": 7.0, "dir": 1.0, "alerted": False}
+        for _ in range(200):  # player far right, out of range: just patrols
+            _ground_aggro_step(st, behavior, self.SIGHT, (40.0, 7.0), 2.0, 1.5, 1 / 60)
+        assert not st["alerted"] and abs(st["x"] - 10.0) <= 4.0 + 0.1
+        max_reach = st["x"]
+        for _ in range(1200):  # player in the cone: chase, never past leash
+            _ground_aggro_step(st, behavior, self.SIGHT, (18.0, 7.0), 2.0, 1.5, 1 / 60)
+            max_reach = max(max_reach, st["x"])
+            assert st["x"] - st["home_x"] <= behavior["leash_range"] + 0.5
+        assert max_reach > 12.0  # it gave chase well past its home beat
+        for _ in range(1200):  # player leaves: un-alert, walk home, patrol
+            _ground_aggro_step(st, behavior, self.SIGHT, (80.0, 7.0), 2.0, 1.5, 1 / 60)
+        assert not st["alerted"] and abs(st["x"] - 10.0) <= 4.0 + 0.1
+
+    def test_hunter_has_no_tether(self) -> None:
+        """leash_range <= 0 (hunter / the relentless variant) chases across
+        the whole map — never breaks off while the player stays in sight."""
+        behavior = {"aggro_range": 30.0, "leash_range": 0, "patrol_range": 4}
+        st = {"x": 10.0, "home_x": 10.0, "y": 7.0, "dir": 1.0, "alerted": False}
+        for _ in range(2000):
+            _ground_aggro_step(st, behavior, self.SIGHT, (34.0, 7.0), 3.0, 1.5, 1 / 60)
+        assert st["alerted"] and st["x"] > 30.0  # ran far past any beat
+
+    def test_aggressive_swimmer_pursues_in_2d_within_water(self) -> None:
+        """An aggressive swimmer (omni sight) chases in X AND Y toward the
+        player but never leaves the water volume — mirrors _swim_toward's
+        per-axis in-water occupancy gate."""
+        def in_water(x, y):
+            return 4 <= x <= 12 and 4 <= y <= 10
+
+        x, y = 6.0, 6.0
+        px, py = 20.0, 20.0  # player outside the box, down-right
+        aggro, speed, chase_mult, dt = 30.0, 2.0, 1.5, 1 / 60
+        alerted = False
+        for _ in range(2000):
+            if not alerted and math.hypot(px - x, py - y) <= aggro:
+                alerted = True  # omni: no facing gate
+            step = speed * chase_mult * dt
+            dx = 1.0 if px > x else (-1.0 if px < x else 0.0)
+            nx = px if abs(px - x) < step else x + dx * step
+            if in_water(nx, y):
+                x = nx
+            dy = 1.0 if py > y else (-1.0 if py < y else 0.0)
+            ny = py if abs(py - y) < step else y + dy * step
+            if in_water(x, ny):
+                y = ny
+            assert in_water(x, y)  # never left the volume
+        assert alerted and x >= 11.0 and y >= 9.0  # pressed to the near corner
 
     def test_relentless_variant_overrides_the_leash(self) -> None:
         from examples.platformer_pack.variants import load_variants
@@ -361,6 +484,192 @@ class TestBehaviorDoctrine:
             else:
                 x = nx
         assert x < 12.0  # never entered the strip
+
+
+def _flyer_step(st, behavior, sight, fcfg, player, speed, chase_mult, dt):
+    """One step of the consumers' flyer branch on an open sky (no occupancy):
+    the shared aggro decision, then chase (2D swoop) / return / hover
+    (bob + scan-sway), or passive x-patrol + periodic dive when aggro_range is
+    0. Mutates st = {x, y, home_x, home_y, dir, alerted, bob_t}; returns the
+    mode. Faithful to main.gd / platformer_play.py."""
+    aggro = float(behavior.get("aggro_range", 0) or 0)
+    leash = float(behavior.get("leash_range", 0) or 0)
+    patrol = float(behavior.get("patrol_range", 4))
+    px, py = player
+    rel_x, rel_y = px - st["x"], py - st["y"]
+    home_dist = abs(st["x"] - st["home_x"])  # flyer territory is HORIZONTAL
+    if aggro > 0:
+        if st["alerted"]:
+            if math.hypot(rel_x, rel_y) > aggro or (leash > 0 and home_dist >= leash):
+                st["alerted"] = False
+        elif _in_sight_sim("flyer", st["dir"], rel_x, rel_y, aggro, sight):
+            st["alerted"] = True
+        mode = (
+            "chase" if st["alerted"] else ("return" if home_dist > patrol else "patrol")
+        )
+    else:
+        mode = "patrol"
+    # Flyer clocks advance every frame (deterministic; matches the consumers).
+    st["bob_t"] += dt
+    st["swoop_t"] += dt
+    bob = math.sin(st["bob_t"] * fcfg["hover_freq"]) * fcfg["hover_amp"]
+    if mode == "chase":  # dive-bomb: committed plunge then recover on the plane
+        period, dur = fcfg["swoop_period"], fcfg["swoop_duration"]
+        phase = math.fmod(st["swoop_t"], period)
+        if phase < dur:  # committed dive
+            u = phase / dur
+            st["x"] += st["swoop_dir"] * speed * chase_mult * dt
+            st["y"] = st["home_y"] + st["swoop_dep"] * 4.0 * u * (1.0 - u)
+            if st["swoop_dir"] != 0.0:
+                st["dir"] = st["swoop_dir"]
+        else:  # recover on the plane: track player at altitude, aim next dive
+            st["swoop_dir"] = 1.0 if px > st["x"] else (-1.0 if px < st["x"] else 0.0)
+            st["swoop_dep"] = max(0.0, py - st["home_y"])
+            step = speed * dt
+            st["x"] = px if abs(px - st["x"]) < step else st["x"] + st["swoop_dir"] * step
+            st["y"] = st["home_y"] + bob
+            if px != st["x"]:
+                st["dir"] = 1.0 if px > st["x"] else -1.0
+    elif mode == "return":
+        step = speed * dt
+        dx = 1.0 if st["home_x"] > st["x"] else (-1.0 if st["home_x"] < st["x"] else 0.0)
+        if dx != 0.0:
+            st["dir"] = dx
+        st["x"] = (
+            st["home_x"] if abs(st["home_x"] - st["x"]) < step else st["x"] + dx * step
+        )
+        dy = 1.0 if st["home_y"] > st["y"] else (-1.0 if st["home_y"] < st["y"] else 0.0)
+        st["y"] = (
+            st["home_y"] if abs(st["home_y"] - st["y"]) < step else st["y"] + dy * step
+        )
+    elif aggro > 0:  # hover: vertical bob + scanning sway (drifts back into zone)
+        nx = st["x"] + st["dir"] * fcfg["sway_speed"] * dt
+        if nx > st["home_x"] + fcfg["hover_sway"]:
+            st["dir"] = -1.0
+        elif nx < st["home_x"] - fcfg["hover_sway"]:
+            st["dir"] = 1.0
+        st["x"] += st["dir"] * fcfg["sway_speed"] * dt
+        st["y"] = st["home_y"] + bob
+    else:  # passive: x-patrol at altitude + periodic ambient dive
+        nx = st["x"] + st["dir"] * speed * dt
+        if abs(nx - st["home_x"]) >= patrol:
+            st["dir"] *= -1.0
+        else:
+            st["x"] = nx
+        phase = math.fmod(st["swoop_t"], fcfg["swoop_period"])
+        dip = (
+            fcfg["swoop_depth"] * math.sin(math.pi * phase / fcfg["swoop_duration"])
+            if phase < fcfg["swoop_duration"]
+            else 0.0
+        )
+        st["y"] = st["home_y"] + dip
+    return mode
+
+
+class TestFlyer:
+    """Flyer locomotion (airborne) + its two flight styles: env feasibility,
+    airborne placement, and the hover/swoop/return + patrol/dive movement both
+    play surfaces mirror. Aggro composes on top exactly as for ground/water."""
+
+    GRID_W, GRID_H = 16, 12
+    SIGHT = {"flyer": {"fov": "hemisphere"}}
+    FCFG = {
+        "hover_amp": 0.4, "hover_freq": 3.0, "hover_sway": 2.0, "sway_speed": 1.5,
+        "swoop_period": 3.0, "swoop_duration": 1.0, "swoop_depth": 3.0,
+    }
+
+    def _open_grid(self):
+        from examples.platformer_pack.dsl import stamp
+
+        return stamp(
+            "floor(0,15)\nspawn(0)\nexit(15)", self.GRID_W, self.GRID_H
+        ).grid
+
+    def test_flyer_spot_exists_needs_airspace_over_ground(self) -> None:
+        """flyer_spot_exists is the roster gate: open airspace over ground is
+        feasible; a fully-solid level (no air) and a groundless void (no
+        terrain below) are not."""
+        from examples.platformer_pack.validate import flyer_spot_exists
+
+        g = self._open_grid()
+        assert flyer_spot_exists(g, 1.0)
+        assert flyer_spot_exists(g, 2.0)
+        assert not flyer_spot_exists(np.ones((self.GRID_H, self.GRID_W), int), 1.0)
+        assert not flyer_spot_exists(np.zeros((self.GRID_H, self.GRID_W), int), 1.0)
+
+    def test_flyer_placed_aloft_not_on_the_ground(self) -> None:
+        """A flyer validates in open air above the terrain and is REJECTED on
+        the ground surface (an airborne creature never stands)."""
+        from examples.platformer_pack.validate import standable_cells
+
+        g = self._open_grid()
+        surf = min(y for _, y in standable_cells(g))
+        col = self.GRID_W // 2
+        enemies = {"bat": {"archetype": "flyer", "size": 1.0, "rarity": "common"}}
+
+        def _check(x, y):
+            return check_placements(
+                g, [{"enemy_id": "bat", "x": x, "y": y}], (0, surf), enemies
+            )
+
+        accepted, _, _ = _check(col, surf - 3)  # aloft in open air
+        assert accepted
+        _, problems, _ = _check(col, surf)  # on the ground surface
+        assert problems and "AIRBORNE" in problems[0]
+
+    def test_aggressive_flyer_dive_bombs_and_returns_to_plane(self) -> None:
+        """The hunt-from-above flyer: hovers on its altitude plane until it
+        spots the player, then DIVE-BOMBS in parabolic plunges that dip toward
+        the player and CLIMB BACK to the plane (never descending to a
+        ground-chase); horizontal reach is leash-bounded; returns home when the
+        player is gone."""
+        behavior = {"aggro_range": 12.0, "leash_range": 5.0, "patrol_range": 3}
+        st = {
+            "x": 20.0, "y": 6.0, "home_x": 20.0, "home_y": 6.0, "dir": 1.0,
+            "alerted": False, "bob_t": 0.0, "swoop_t": 0.0,
+            "swoop_dir": 1.0, "swoop_dep": 0.0,
+        }
+        for _ in range(300):  # player far: hover on the plane, never alert
+            _flyer_step(st, behavior, self.SIGHT, self.FCFG, (40.0, 6.0), 2.0, 1.5, 1 / 60)
+            assert not st["alerted"]
+            assert abs(st["y"] - 6.0) <= self.FCFG["hover_amp"] + 1e-6
+        max_dip = max_hx = 0.0
+        back_on_plane = alerted_ever = False
+        for _ in range(1800):  # player in range below: dive-bomb, leash-bound
+            _flyer_step(st, behavior, self.SIGHT, self.FCFG, (16.0, 12.0), 2.0, 1.5, 1 / 60)
+            max_dip = max(max_dip, st["y"] - 6.0)
+            max_hx = max(max_hx, abs(st["x"] - 20.0))
+            alerted_ever = alerted_ever or st["alerted"]
+            if st["alerted"] and abs(st["y"] - 6.0) <= 0.5:
+                back_on_plane = True  # climbed back to the plane mid-engagement
+            assert abs(st["x"] - 20.0) <= behavior["leash_range"] + 0.5  # H tether
+        assert alerted_ever
+        assert max_dip >= 3.0  # it DID dive down toward the player
+        assert back_on_plane  # and returned to its plane (never stuck at ground)
+        assert max_hx > behavior["patrol_range"]  # hunted horizontally past its beat
+        for _ in range(1500):  # player gone: un-alert, return home, hover
+            _flyer_step(st, behavior, self.SIGHT, self.FCFG, (80.0, 6.0), 2.0, 1.5, 1 / 60)
+        assert not st["alerted"]
+        assert abs(st["x"] - 20.0) <= self.FCFG["hover_sway"] + 0.3
+        assert abs(st["y"] - 6.0) <= self.FCFG["hover_amp"] + 0.1  # back on the plane
+
+    def test_passive_flyer_patrols_and_dives(self) -> None:
+        """The patrol+swoop flyer: patrols horizontally at altitude and dives
+        on a periodic ambient swoop, and NEVER targets the player."""
+        behavior = {"aggro_range": 0, "leash_range": 0, "patrol_range": 4}
+        st = {
+            "x": 20.0, "y": 6.0, "home_x": 20.0, "home_y": 6.0, "dir": 1.0,
+            "alerted": False, "bob_t": 0.0, "swoop_t": 0.0,
+            "swoop_dir": 1.0, "swoop_dep": 0.0,
+        }
+        min_y = max_y = 6.0
+        for _ in range(600):
+            _flyer_step(st, behavior, self.SIGHT, self.FCFG, (20.0, 11.0), 2.0, 1.5, 1 / 60)
+            assert not st["alerted"]  # passive: no aggro, ever
+            assert abs(st["x"] - 20.0) <= behavior["patrol_range"] + 0.1
+            min_y, max_y = min(min_y, st["y"]), max(max_y, st["y"])
+        assert min_y == pytest.approx(6.0, abs=0.01)  # altitude is the dive's top
+        assert max_y >= 6.0 + self.FCFG["swoop_depth"] - 0.2  # it DID dive
 
 
 class TestManifestV2:

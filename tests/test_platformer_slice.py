@@ -849,10 +849,42 @@ class TestEndToEnd:
             for placement in level.entities:
                 enemy_id = placement.ref.split(":", 1)[1]
                 archetype = ctx.bible.enemy_definitions[enemy_id].archetype
+                if archetype == "flyer":
+                    # Airborne: an open-air cell, never a ground stand or water.
+                    assert tuple(placement.pos) not in stand
+                    assert tuple(placement.pos) not in volume
+                    continue
                 expected = volume if archetype == "swimmer" else stand
                 assert tuple(placement.pos) in expected, (
                     f"{enemy_id} ({archetype}) at {placement.pos}"
                 )
+
+    def test_canned_fake_places_a_flyer_in_open_air(self, tmp_path: Path) -> None:
+        """The canned fake exercises the flyer path end-to-end at $0: a
+        flyer-rolling seed yields a flyer definition placed in an open-air
+        cell (never a ground stand or water) — the air-summary + fake air
+        pool + validator airborne branch all on the same path."""
+        ctx = _run_slice(tmp_path / "run", seed="zephyr")
+        flyers = {
+            eid
+            for eid, e in ctx.bible.enemy_definitions.items()
+            if e.archetype == "flyer"
+        }
+        assert flyers, "the 'zephyr' seed should roll at least one flyer"
+        placed_in_air = False
+        for level in ctx.bible.levels.values():
+            with np.load(tmp_path / "run" / level.collision) as data:
+                grid = data["collision"]
+            stand, volume = standable_cells(grid), volume_cells(grid)
+            for placement in level.entities:
+                eid = placement.ref.split(":", 1)[1]
+                if eid in flyers:
+                    pos = tuple(placement.pos)
+                    assert pos not in stand and pos not in volume, (
+                        f"flyer {eid} at {pos} is not open air"
+                    )
+                    placed_in_air = True
+        assert placed_in_air, "no flyer was placed in any level"
 
     def test_spawn_exit_first_class_fields(self, tmp_path: Path) -> None:
         """spawn/exit are Level fields (not trigger records) and land on

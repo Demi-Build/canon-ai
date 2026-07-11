@@ -6,5 +6,21 @@
   "variant_caps": { "elite": 1, "champion": 1, "relentless": 1 },
   "checkpoint_enemy_reset": true,
   "spawn_grace": "until_move",
-  "rarity_caps": { "rare": 1, "uncommon": 2 }
+  "rarity_caps": { "rare": 1, "uncommon": 2 },
+  "enemy_sight": {
+    "patroller": { "fov": "forward", "vband": 2 },
+    "swimmer": { "fov": "omni" },
+    "flyer": { "fov": "hemisphere" },
+    "sentry": { "fov": "none" }
+  },
+  "chase_speed_mult": 1.5,
+  "flyer": {
+    "hover_amp": 0.4,
+    "hover_freq": 3.0,
+    "hover_sway": 2.0,
+    "sway_speed": 1.5,
+    "swoop_period": 3.0,
+    "swoop_duration": 1.0,
+    "swoop_depth": 3.0
+  }
 }

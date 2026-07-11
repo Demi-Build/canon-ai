@@ -41,6 +41,7 @@ from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
     auto_bridge,
     check_placements,
+    flyer_spot_exists,
     snap_checkpoints,
     snap_spawn,
     standable_cells,
@@ -370,19 +371,22 @@ def place_level_entities(
     with np.load(ctx.adapter.resolve_path(level.collision)) as data:
         grid = data["collision"]
     # Env feasibility (code, before the prompt): an enemy this TERRAIN
-    # can't sustain is never offered — a swimmer needs water its whole
-    # body fits (the first multi-stage run burned every retry trying to
-    # seat a 1.5-body swimmer in 1-deep puddles). Land archetypes always
-    # have standable ground in a valid level; flyers join this gate when
-    # they exist.
-    infeasible = [
-        e for e in roster
-        if e["archetype"] == "swimmer"
-        and not swimmer_spot_exists(
-            grid, e["size"],
-            str(e["behavior"].get("swim_style", "") or ""), tiles,
-        )
-    ]
+    # can't sustain is never offered — a swimmer needs water its whole body
+    # fits (the first multi-stage run burned every retry trying to seat a
+    # 1.5-body swimmer in 1-deep puddles), and a flyer needs open airspace
+    # over ground (rejects fully-solid/ceilinged levels). Land archetypes
+    # always have standable ground in a valid level.
+    def _terrain_sustains(e: dict) -> bool:
+        if e["archetype"] == "swimmer":
+            return swimmer_spot_exists(
+                grid, e["size"],
+                str(e["behavior"].get("swim_style", "") or ""), tiles,
+            )
+        if e["archetype"] == "flyer":
+            return flyer_spot_exists(grid, e["size"], tiles)
+        return True
+
+    infeasible = [e for e in roster if not _terrain_sustains(e)]
     if infeasible:
         roster = [e for e in roster if e not in infeasible]
         logger.info(
@@ -390,8 +394,7 @@ def place_level_entities(
             "offered roster (env feasibility is code's call).",
             level_id,
             ", ".join(
-                f"{e['id']} (size-{e['size']:g} "
-                f"{e['behavior'].get('swim_style') or 'within'} swimmer)"
+                f"{e['id']} (size-{e['size']:g} {e['archetype']})"
                 for e in infeasible
             ),
         )
@@ -407,6 +410,7 @@ def place_level_entities(
     spawn = level.spawn or (0, 0)
     summary = _cells_summary(sorted(standable_cells(grid, tiles)))
     volume_summary = _volume_summary(grid, tiles)
+    air_summary = _air_summary(grid, tiles)
     brief = level.brief or _level_brief(ctx, level_id)
     accepted_holder: dict[str, list[dict]] = {"placements": []}
     last_attempt: dict[str, str | None] = {"content": None}
@@ -417,6 +421,7 @@ def place_level_entities(
         request = ctx.prompts.placement_generation(
             level_id, brief, roster, summary, max_enemies,
             spawn=spawn, volume_summary=volume_summary,
+            air_summary=air_summary,
             variants=variants, rules=rules, combat=combat,
             previous=last_attempt["content"], feedback=feedback,
         )
@@ -639,6 +644,39 @@ def _volume_summary(grid, tiles: TileRegistry) -> str:
         if cells:
             parts.append(f"{tile.name}: {_cells_summary(cells)}")
     return " | ".join(parts) or "none"
+
+
+def _air_summary(grid, tiles: TileRegistry, hover: int = 3) -> str:
+    """Representative airborne anchors for flyers: one open cell ~``hover``
+    rows above each column's ground surface — a hover-line following the
+    terrain. Descriptive context for the Entity Agent (like the volume
+    summary for swimmers), never a raw grid dump; the flyer's full
+    feasibility is ``flyer_spot_exists``. 'none' on a level with no open
+    airspace over ground."""
+    height, width = grid.shape
+    empty = tiles.empty_id
+    support = tiles.ids("solid", "one_way")
+    cells: list[tuple[int, int]] = []
+    for x in range(width):
+        surf = next(
+            (
+                y
+                for y in range(height - 1)
+                if int(grid[y, x]) == empty and int(grid[y + 1, x]) in support
+            ),
+            None,
+        )
+        if surf is None:
+            continue
+        ay = max(0, surf - hover)
+        if (
+            int(grid[ay, x]) == empty
+            and ay + 1 < height
+            and int(grid[ay + 1, x]) == empty
+            and any(int(grid[yy, x]) in support for yy in range(ay + 1, height))
+        ):
+            cells.append((x, ay))
+    return _cells_summary(sorted(cells))
 
 
 def _cells_summary(cells: list[tuple[int, int]]) -> str:

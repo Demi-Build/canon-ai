@@ -468,6 +468,46 @@ def swimmer_spot_exists(
     return any(_fits(x, y) for x, y in volume)
 
 
+def flyer_spot_exists(
+    grid,
+    size: float,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> bool:
+    """True if ANY cell can seat an airborne ``flyer`` of ``size`` — an
+    open-air anchor whose whole body is empty, with a clear cell directly
+    BELOW it (genuinely aloft, not a ground stand) and solid terrain
+    somewhere further down the column (airspace OVER ground, not off the top
+    or across a bottomless void). Nearly always true; rejects fully-solid or
+    fully-ceilinged levels. The env-feasibility gate the roster pre-filter
+    asks (mirrors ``_footprint_problem``'s flyer branch; parity-tested)."""
+    from examples.platformer_pack.combat import occupancy
+
+    height, width = grid.shape
+    empty_id = tiles.empty_id
+    support = tiles.ids("solid", "one_way")
+    cols, rows = occupancy(size)
+
+    def _fits(x: int, y: int) -> bool:
+        for cx in range(x, x + cols):
+            if not (0 <= cx < width):
+                return False
+            for cy in range(y, y - rows, -1):  # whole body in open air
+                if cy < 0 or int(grid[cy, cx]) != empty_id:
+                    return False
+            if y + 1 >= height or int(grid[y + 1, cx]) != empty_id:
+                return False  # aloft: open cell directly below the anchor
+        # over terrain: solid ground somewhere below an occupied column
+        return any(
+            int(grid[yy, cx]) in support
+            for cx in range(x, x + cols)
+            for yy in range(y + 1, height)
+        )
+
+    return any(
+        _fits(x, y) for y in range(height) for x in range(width)
+    )
+
+
 #: How far a checkpoint may be snapped to the nearest valid column — a
 #: checkpoint's exact column within a few tiles carries no design intent.
 MAX_CHECKPOINT_SNAP = 8
@@ -722,6 +762,7 @@ def check_placements(
     volume = volume_cells(grid, tiles)
     height, width = grid.shape
     empty_id = tiles.empty_id
+    support = tiles.ids("solid", "one_way")
     accepted: list[dict] = []
     problems: list[str] = []
     repairs: list[str] = []
@@ -744,6 +785,41 @@ def check_placements(
         is_swimmer = archetype == "swimmer"
         is_surface = is_swimmer and swim_style == "surface"
         policy = rules.enemy_water_policy
+        if archetype == "flyer":
+            # Airborne anchor: whole body in open air, a clear cell directly
+            # below (aloft, not a ground stand), solid terrain somewhere
+            # below the column (airspace over ground). Mirrors
+            # flyer_spot_exists; the parity test cross-checks them.
+            for cx in range(x, x + cols):
+                if not (0 <= cx < width and 0 <= y < height):
+                    return (
+                        f"{eid} at {cell} (size {eff:g}) does not fit: column "
+                        f"{cx} is outside the {width}x{grid.shape[0]} level."
+                    )
+                for cy in range(y, y - rows, -1):
+                    if cy < 0 or int(grid[cy, cx]) != empty_id:
+                        return (
+                            f"{eid} is a FLYER — its body hovers in open air, but "
+                            f"cell ({cx}, {max(cy, 0)}) is {_cell_name(cx, max(cy, 0))}, "
+                            "not empty. Place it in clear airspace."
+                        )
+                if y + 1 >= height or int(grid[y + 1, cx]) != empty_id:
+                    return (
+                        f"{eid} is a FLYER and must be AIRBORNE, but ({cx}, {y + 1}) "
+                        "directly below it is not open air — lift it off the ground "
+                        "into the airspace above."
+                    )
+            if not any(
+                int(grid[yy, cx]) in support
+                for cx in range(x, x + cols)
+                for yy in range(y + 1, height)
+            ):
+                return (
+                    f"{eid} is a FLYER, but {cell} has no ground anywhere below it "
+                    "(open sky / bottomless gap) — place it in airspace over solid "
+                    "terrain the player can reach."
+                )
+            return None
         if is_surface:
             # Surface-riders anchor ON the water's top row (open above).
             for cx in range(x, x + cols):

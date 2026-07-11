@@ -187,18 +187,28 @@ class TilesetArtPhase:
 
 
 #: Behavior must READ in the still sprite — a stationary sentry looked
-#: broken in the first paid run. Each archetype maps to a visual stance the
-#: diffusion model can draw, so a sentry looks planted and a chaser fast.
+#: broken in the first paid run. Each LOCOMOTION archetype maps to a visual
+#: stance the diffusion model can draw, so a sentry looks planted and a
+#: swimmer aquatic. Aggro is orthogonal (AGGRO_LOOK below), folded in on top.
 ARCHETYPE_LOOK = {
     "patroller": "ambling mid-stride, built to walk a beat back and forth",
-    "chaser": "alert and lunging forward, lean and built for a fast chase",
     "sentry": (
         "rooted and planted in place — a squat, immobile, turret-like "
         "guardian with no legs for walking, clearly a creature that holds "
         "its ground rather than roams"
     ),
     "swimmer": "sleek and aquatic, finned or gilled for gliding through water",
+    "flyer": (
+        "airborne and hovering, built to drift and swoop through open air — "
+        "wings optional (a weightless, floating body reads as a flyer too)"
+    ),
 }
+
+#: Temperament, ORTHOGONAL to locomotion (schema `aggro` tier): an
+#: aggressive enemy — a patroller, swimmer, or flyer that hunts the player —
+#: reads as a predator regardless of how it moves. Passive enemies get no
+#: extra trait (their locomotion stance is the whole story).
+AGGRO_LOOK = "alert and predatory, poised to lunge, with a sharp hunting glare"
 
 #: The player is a platformer MASCOT, not the diffusion default fantasy
 #: knight (first paid run: 'we keep getting knights with swords'). Kept
@@ -213,11 +223,20 @@ PLAYER_DESCRIPTOR = (
 )
 
 
-def _enemy_art_descriptor(archetype: str, flavor: str) -> str:
-    """Fold the archetype's visual stance into the sprite descriptor so the
-    generated art matches the behavior (planted sentry, lunging chaser)."""
-    look = ARCHETYPE_LOOK.get(archetype)
-    base = f"a {archetype} enemy" + (f" that is {look}" if look else "")
+def _enemy_art_descriptor(
+    archetype: str, flavor: str, aggressive: bool = False
+) -> str:
+    """Fold the enemy's LOCOMOTION stance and its (orthogonal) AGGRO
+    temperament into the sprite descriptor so the generated art matches the
+    behavior — a planted sentry, a sleek swimmer, and a predatory glare on
+    anything that hunts the player, whatever its locomotion."""
+    traits = [
+        t for t in (ARCHETYPE_LOOK.get(archetype), AGGRO_LOOK if aggressive else "")
+        if t
+    ]
+    base = f"a {archetype} enemy" + (
+        f" that is {', '.join(traits)}" if traits else ""
+    )
     return f"{base} — {flavor}".strip(" —")
 
 
@@ -281,7 +300,9 @@ class SpriteArtPhase:
                 continue
             color_hex = str(enemy.stats.get("placeholder_color", "#ff00ff"))
             descriptor = _enemy_art_descriptor(
-                enemy.archetype, str(enemy.stats.get("flavor", ""))
+                enemy.archetype,
+                str(enemy.stats.get("flavor", "")),
+                aggressive=float(enemy.behavior.get("aggro_range", 0) or 0) > 0,
             )
             sprite = self._generate(
                 ctx, enemy.name or enemy_id, descriptor, color_hex,

@@ -1,9 +1,12 @@
 {
-  "schema_version": "6",
+  "schema_version": "7",
   "entity_type": "enemy",
   "fields": {
     "archetype": {
-      "choices": [["patroller", 5], ["chaser", 1], ["sentry", 1], ["swimmer", 3]]
+      "choices": [["patroller", 5], ["sentry", 1], ["swimmer", 3], ["flyer", 2]]
+    },
+    "aggro": {
+      "choices": [["passive", 80], ["stalker", 12], ["pursuer", 6], ["hunter", 2]]
     },
     "rarity": {
       "choices": [["common", 3], ["uncommon", 2], ["rare", 1]]
@@ -21,18 +24,17 @@
       "depends_on": "size"
     },
     "speed": {
-      "lookup": [["patroller", 2], ["chaser", 3], ["sentry", 0], ["swimmer", 2]],
+      "lookup": [["patroller", 2], ["sentry", 0], ["swimmer", 2], ["flyer", 2]],
       "depends_on": "archetype"
     },
     "patrol_range": { "range": [3, 8] },
-    "aggro_range": {
-      "lookup": [["patroller", 0], ["chaser", 6], ["sentry", 5], ["swimmer", 0]],
-      "depends_on": "archetype"
+    "aggro_mult": {
+      "lookup": [["passive", 0], ["stalker", 1.5], ["pursuer", 2.0], ["hunter", 2.5]],
+      "depends_on": "aggro"
     },
-    "leash_range": {
-      "lookup": [["patroller", 0], ["chaser", [8, 12]], ["sentry", 0], ["swimmer", 0]],
-      "depends_on": "archetype",
-      "lookup_ranges": true
+    "leash_mult": {
+      "lookup": [["passive", 0], ["stalker", 1.0], ["pursuer", 3.0], ["hunter", -1]],
+      "depends_on": "aggro"
     }
   }
 }

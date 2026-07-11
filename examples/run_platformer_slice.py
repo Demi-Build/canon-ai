@@ -159,6 +159,26 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
             if len(land) == 3:
                 break
 
+    # Airborne anchors for flyers (parsed from the placement prompt's
+    # open-air hover-line, same as land/water spots), spread and spawn-clear.
+    air_m = re.search(r"FLYERS hover here, above the ground\): (.+)\n", msg)
+    air_cells = sorted(
+        c
+        for c in (_parse_summary_cells(air_m.group(1)) if air_m else [])
+        if abs(c[0] - spawn_x) >= 5
+    )
+    air: list[tuple[int, int]] = []
+    if air_cells:
+        seen_ax: set[int] = set()
+        for idx in (len(air_cells) // 5, len(air_cells) // 2,
+                    (4 * len(air_cells)) // 5, 0, len(air_cells) - 1):
+            cell = air_cells[idx]
+            if cell[0] not in seen_ax:
+                seen_ax.add(cell[0])
+                air.append(cell)
+            if len(air) == 3:
+                break
+
     water_cells: list[tuple[int, int]] = []
     if vol_m and vol_m.group(1).strip() != "none":
         for tile_part in vol_m.group(1).split(" | "):
@@ -201,6 +221,7 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
     ]
     return {
         "land": land,
+        "air": air,
         "water": _distinct_columns(deep_first, 2),
         "surface": _distinct_columns(surface_cells, 2),
         "pocket": _distinct_columns(pocket_cells, 2),
@@ -445,6 +466,7 @@ def make_fake_responder():
             rarity_used: dict[str, int] = {}
             spots = _fake_spots(msg)
             land = list(spots["land"])
+            air = list(spots["air"])
             pools = {
                 "": list(spots["water"]),
                 "within": list(spots["water"]),
@@ -468,6 +490,8 @@ def make_fake_responder():
                         (entry.get("behavior") or {}).get("swim_style", "")
                     )
                     pool = pools.get(style, pools[""])
+                elif entry["archetype"] == "flyer":
+                    pool = air  # airborne anchors above the ground
                 else:
                     pool = land
                 if not pool:

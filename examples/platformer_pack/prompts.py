@@ -444,6 +444,7 @@ class PlatformerPrompts:
         max_enemies: int,
         spawn: tuple[int, int] | None = None,
         volume_summary: str = "none",
+        air_summary: str = "none",
         variants: VariantSet = DEFAULT_VARIANTS,
         rules: GameRules = DEFAULT_RULES,
         combat: CombatSpec = DEFAULT_COMBAT,
@@ -490,6 +491,8 @@ class PlatformerPrompts:
                 f"Standable cells (x, y are grid coords, y from top): "
                 f"{standable_summary}\n"
                 f"Volume cells by tile (swimmers ONLY go here): {volume_summary}\n"
+                f"Open-air cells (FLYERS hover here, above the ground): "
+                f"{air_summary}\n"
                 f"Player spawn: {list(spawn) if spawn else 'unknown'}\n{fb}\n"
                 f"Place 1..{max_enemies} enemies to fit the brief. Spread "
                 "them out; put slower enemies on patrol routes and ranged/"
@@ -498,7 +501,9 @@ class PlatformerPrompts:
                 'swim_style matters: "surface" riders go on the water\'s '
                 'TOP row (open air above), "float" drifters need a deep '
                 '2x2 pocket, "within" swimmers just need their body in '
-                "water. Every other archetype MUST be on standable land. "
+                "water. FLYER-archetype enemies MUST be placed in open-air "
+                "cells — they hover above the ground and never stand on it. "
+                "Every other archetype MUST be on standable land. "
                 "Sizes are in cells: a size-2.0 body "
                 "occupies TWO columns (x and x+1 both standable) and two "
                 "rows of clearance; size 1.5 needs one column but two rows "
