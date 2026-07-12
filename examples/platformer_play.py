@@ -137,6 +137,7 @@ def main() -> None:
 
     BLOCKING = _types_with("solid")
     ONE_WAY = _types_with("one_way")
+    SUPPORT = BLOCKING | ONE_WAY  # anything the feet can rest on
     #: tile id → hazard params ("damage" in hearts, default 1)
     HAZARDS = {
         int(s["tile_type"]): dict(s.get("params") or {})
@@ -713,6 +714,7 @@ def main() -> None:
 
     px, py = float(spawn["x"]), float(spawn["y"])  # cell coords
     vy = 0.0
+    vx = 0.0  # horizontal velocity (run-up momentum / slide)
     on_ground = False
     won = False
     hearts = MAX_HEARTS
@@ -764,10 +766,10 @@ def main() -> None:
         return None
 
     def respawn() -> None:
-        nonlocal px, py, vy, damage_soaked, hearts, iframes, moved
+        nonlocal px, py, vy, vx, damage_soaked, hearts, iframes, moved
         nonlocal spawn_shield
         px, py = float(respawn_point["x"]), float(respawn_point["y"])
-        vy, damage_soaked = 0.0, 0.0
+        vy, vx, damage_soaked = 0.0, 0.0, 0.0
         hearts, iframes, moved, spawn_shield = MAX_HEARTS, 0.0, False, 0.0
         if enemy_reset:
             # Killed enemies come back on a checkpoint respawn — dying
@@ -815,6 +817,14 @@ def main() -> None:
                 return
 
     run_speed = float(movement["run_speed"])
+    walk_speed = float(movement.get("walk_speed", run_speed))
+    ground_accel = float(movement.get("ground_accel", 0.0))
+    ground_friction = float(movement.get("ground_friction", 0.0))
+    air_accel = float(movement.get("air_accel", ground_accel))
+    air_friction = float(movement.get("air_friction", 0.0))
+    # No-accel manifests (ground_accel 0) fall back to the old snappy
+    # instant-speed feel; a real spec drives run-up momentum.
+    momentum = ground_accel > 0.0
     gravity = float(movement["gravity"])
     # Jump velocity for jump_height cells PLUS a headroom margin: discrete
     # frame integration undershoots the analytic apex, which made exactly-
@@ -834,6 +844,12 @@ def main() -> None:
     # diffable in world space (rendering-independent). Either hook runs a
     # deterministic FIXED-dt, no-input session.
     traj_path = os.environ.get("PLAT_TRAJ", "")
+    # PLAT_HOLD drives the headless harness with a fixed input so run-up
+    # momentum is observable (the default no-input session can't show a
+    # running jump): "right"/"left" walk, "run_right"/"run_left" hold RUN
+    # too; it jumps every PLAT_HOLD_JUMP_EVERY ticks (0 = never).
+    hold_mode = os.environ.get("PLAT_HOLD", "")
+    hold_jump_every = int(os.environ.get("PLAT_HOLD_JUMP_EVERY", "0"))
     headless = bool(cap_dir or traj_path)
     cap_ticks = int(os.environ.get("PLAT_CAPTURE_TICKS", "300"))
     cap_every = int(os.environ.get("PLAT_CAPTURE_EVERY", "30"))
@@ -843,9 +859,21 @@ def main() -> None:
     traj_file = open(traj_path, "w") if traj_path else None  # noqa: SIM115
 
     running = True
+    frame_i = -1
     while running:
+        frame_i += 1
         dt = (1.0 / FPS) if headless else clock.tick(FPS) / 1000.0
         volume = volume_params_at(px, py)
+        # Scripted-harness jump (PLAT_HOLD): the event loop below never sees a
+        # KEYDOWN headless, so trigger the on-ground jump here, matching the
+        # normal path (vy set before the horizontal step).
+        if (
+            headless and hold_mode and hold_jump_every
+            and on_ground and volume is None
+            and frame_i % hold_jump_every == 0
+        ):
+            note_move()
+            vy = -jump_v
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -884,6 +912,14 @@ def main() -> None:
         dx = (keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (
             keys[pygame.K_LEFT] or keys[pygame.K_a]
         )
+        run_held = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
+        if headless and hold_mode:
+            # Scripted run-up harness (PLAT_HOLD) — no-input can't show a
+            # running jump, so drive a fixed direction (+ RUN) here.
+            dx = 1 if hold_mode.endswith("right") else (
+                -1 if hold_mode.endswith("left") else 0
+            )
+            run_held = hold_mode.startswith("run")
         if dx:
             note_move()  # walking ends the grace, starts the shield
             player_facing = dx  # face the direction of travel
@@ -892,11 +928,39 @@ def main() -> None:
         spawn_shield = max(0.0, spawn_shield - dt)
         blink_t += dt
         player_anim_t += dt
-        speed = run_speed * (
+        vol_factor = (
             float(volume.get("speed_factor", 0.55)) if volume is not None else 1.0
         )
-        new_x = px + dx * speed * dt
-        if not blocked_at(new_x, py):
+        if momentum:
+            # Accelerate vx toward the held direction's target speed (walk, or
+            # run_speed with RUN held); idle bleeds it off via friction (the
+            # slide). Ground control is stronger than air control, so speed is
+            # built on the GROUND and carried through the jump. vx is never
+            # reset on jump — that IS the run-up momentum.
+            #
+            # "grounded for movement" is a DETERMINISTIC grid probe (support
+            # directly under the feet, and not rising) — NOT the on_ground
+            # flag, whose sub-cell landing flicker differs by a float epsilon
+            # between the two surfaces and would desync run-up acceleration.
+            foot = int(py + 1.01)
+            gmove = vy >= -0.01 and (
+                tile_at(px + BODY_L, foot) in SUPPORT
+                or tile_at(px + BODY_R, foot) in SUPPORT
+            )
+            if dx:
+                target = (run_speed if run_held else walk_speed) * vol_factor
+                desired = dx * target
+                step = (ground_accel if gmove else air_accel) * dt
+                vx = min(vx + step, desired) if vx < desired else max(vx - step, desired)
+            else:
+                fric = (ground_friction if gmove else air_friction) * dt
+                vx = max(0.0, vx - fric) if vx > 0 else min(0.0, vx + fric)
+        else:
+            vx = dx * run_speed * vol_factor  # legacy instant-speed feel
+        new_x = px + vx * dt
+        if blocked_at(new_x, py):
+            vx = 0.0  # ran into a wall — kill horizontal momentum
+        else:
             px = max(0.0, min(new_x, width - 1.0))
 
         vy += (
@@ -968,7 +1032,11 @@ def main() -> None:
                 f"{e.spec.get('enemy_id', '')}:{e.x:.3f}:{e.y:.3f}:{1 if e.alerted else 0}"
                 for e in live_enemies
             ]
-            traj_file.write(f"{cap_i}|{','.join(parts)}\n")
+            # PLAYER token first (P:px:py:vx) so player-movement parity is
+            # diffable across surfaces alongside the enemy trajectories.
+            traj_file.write(
+                f"{cap_i}|P:{px:.3f}:{py:.3f}:{vx:.3f}|{','.join(parts)}\n"
+            )
         # Crossing a checkpoint moves the respawn point (3b triggers).
         for checkpoint in checkpoints:
             if (

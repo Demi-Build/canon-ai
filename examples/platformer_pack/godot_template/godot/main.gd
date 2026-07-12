@@ -73,6 +73,12 @@ var level_time := 0.0
 # rendering/camera. Pairs with PLAT_LEVEL + --quit-after for a fixed run.
 var _traj_file: FileAccess = null
 var _traj_frame := 0
+# PLAT_HOLD drives a scripted input (verification only) so run-up momentum is
+# observable in a fixed capture: "right"/"left" walk, "run_right"/"run_left"
+# hold RUN; jumps every PLAT_HOLD_JUMP_EVERY frames. Mirrors the pygame hook.
+var _hold_mode := ""
+var _hold_jump_every := 0
+var _play_frame := 0
 var save_path := ""
 
 var grid: Array = []
@@ -107,6 +113,7 @@ var tile_filter := CanvasItem.TEXTURE_FILTER_NEAREST
 
 var player_pos := Vector2.ZERO
 var player_vy := 0.0
+var player_vx := 0.0  # horizontal velocity (run-up momentum / slide)
 var on_ground := false
 # Player animation (art track): idle/walk/JUMP, loaded at spawn. Empty → the
 # static base sprite plays (loud fallback).
@@ -188,6 +195,10 @@ func _ready() -> void:
 	var traj_path := OS.get_environment("PLAT_TRAJ")
 	if traj_path != "":
 		_traj_file = FileAccess.open(traj_path, FileAccess.WRITE)
+	_hold_mode = OS.get_environment("PLAT_HOLD")
+	var hje := OS.get_environment("PLAT_HOLD_JUMP_EVERY")
+	if hje != "":
+		_hold_jump_every = int(hje)
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
 	# DIRECTLY (no map, no start overlay — frame-capture runs verify any
 	# level without input).
@@ -1066,6 +1077,7 @@ func _play_sfx(event: String) -> void:
 func _respawn() -> void:
 	player_pos = respawn_point
 	player_vy = 0.0
+	player_vx = 0.0
 	damage_soaked = 0.0
 	hearts = max_hearts
 	iframes = 0.0
@@ -1358,23 +1370,56 @@ func _process(delta: float) -> void:
 
 	var volume: Variant = _volume_params(player_pos.x, player_pos.y)
 
-	# --- player: same integration as the pygame harness ---
+	# --- player: same integration as the pygame harness (run-up momentum) ---
+	_play_frame += 1
 	var dx := 0.0
 	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
 		dx += 1.0
 	if Input.is_key_pressed(KEY_LEFT) or Input.is_key_pressed(KEY_A):
 		dx -= 1.0
+	var run_held := Input.is_key_pressed(KEY_SHIFT)
+	if _hold_mode != "":  # scripted verification harness
+		dx = (1.0 if _hold_mode.ends_with("right") else (-1.0 if _hold_mode.ends_with("left") else 0.0))
+		run_held = _hold_mode.begins_with("run")
 	if dx != 0.0:
 		_note_move()  # walking ends the grace, starts the shield
 	var grace: bool = _spawn_grace() and not moved
 	iframes = maxf(0.0, iframes - delta)
 	spawn_shield = maxf(0.0, spawn_shield - delta)
 	blink_t += delta
-	var speed := float(movement["run_speed"])
+	var run_speed := float(movement["run_speed"])
+	var vol_factor := 1.0
 	if volume != null:
-		speed *= float(volume.get("speed_factor", 0.55))
-	var new_x: float = player_pos.x + dx * speed * delta
-	if not _blocked_at(new_x, player_pos.y):
+		vol_factor = float(volume.get("speed_factor", 0.55))
+	# Accelerate vx toward the held direction's target (walk, or run_speed with
+	# RUN held); idle bleeds it off (the slide). Ground control > air control,
+	# so speed is built on the GROUND and carried through the jump — vx is
+	# never reset on jump. ground_accel 0 (old manifests) = legacy instant feel.
+	if float(movement.get("ground_accel", 0.0)) > 0.0:
+		# "grounded for movement" is a DETERMINISTIC grid probe (support under
+		# the feet, not rising) — NOT the on_ground flag, whose sub-cell
+		# landing flicker differs by a float epsilon from the pygame surface
+		# and would desync run-up acceleration.
+		var foot: int = int(player_pos.y + 1.01)
+		var tl := _tile(player_pos.x + BODY_L, foot)
+		var tr := _tile(player_pos.x + BODY_R, foot)
+		var gmove: bool = player_vy >= -0.01 and (
+			blocking.has(tl) or one_way.has(tl) or blocking.has(tr) or one_way.has(tr)
+		)
+		if dx != 0.0:
+			var target: float = (run_speed if run_held else float(movement.get("walk_speed", run_speed))) * vol_factor
+			var desired := dx * target
+			var step: float = (float(movement.get("ground_accel", 0.0)) if gmove else float(movement.get("air_accel", 0.0))) * delta
+			player_vx = minf(player_vx + step, desired) if player_vx < desired else maxf(player_vx - step, desired)
+		else:
+			var fric: float = (float(movement.get("ground_friction", 0.0)) if gmove else float(movement.get("air_friction", 0.0))) * delta
+			player_vx = maxf(0.0, player_vx - fric) if player_vx > 0.0 else minf(0.0, player_vx + fric)
+	else:
+		player_vx = dx * run_speed * vol_factor  # legacy instant-speed feel
+	var new_x: float = player_pos.x + player_vx * delta
+	if _blocked_at(new_x, player_pos.y):
+		player_vx = 0.0  # ran into a wall — kill horizontal momentum
+	else:
 		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
 
 	var gravity := float(movement["gravity"])
@@ -1383,6 +1428,8 @@ func _process(delta: float) -> void:
 		or Input.is_key_pressed(KEY_UP)
 		or Input.is_key_pressed(KEY_W)
 	)
+	if _hold_mode != "" and _hold_jump_every > 0 and on_ground and _play_frame % _hold_jump_every == 0:
+		jump_pressed = true  # scripted verification jump
 	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
 	if jump_pressed:
 		_note_move()  # a jump ends the grace, starts the shield
@@ -1690,7 +1737,10 @@ func _process(delta: float) -> void:
 				str(e["spec"].get("enemy_id", "")), ep.x, ep.y,
 				(1 if bool(e.get("alerted", false)) else 0),
 			])
-		_traj_file.store_line("%d|%s" % [_traj_frame, ",".join(parts)])
+		# PLAYER token first (P:px:py:vx), matching the pygame harness, so
+		# player-movement parity is diffable across surfaces.
+		var pl := "P:%.3f:%.3f:%.3f" % [player_pos.x, player_pos.y, player_vx]
+		_traj_file.store_line("%d|%s|%s" % [_traj_frame, pl, ",".join(parts)])
 		_traj_file.flush()
 		_traj_frame += 1
 

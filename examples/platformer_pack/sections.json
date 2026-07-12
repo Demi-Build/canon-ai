@@ -1,0 +1,57 @@
+{
+  "runway": {
+    "axis": "horizontal",
+    "min_len": 8,
+    "max_len": 16,
+    "intensity": "low",
+    "water": "dry",
+    "encounter": "traversal",
+    "feature_bias": {"floor": 5, "platform": 1, "gap": 0, "hazard": 0, "stairs": 1},
+    "framing": "vista",
+    "flavor": "a flat, mostly-open run-up stretch — clear flat ground so the player can build running speed for what comes next; keep it easy and readable, a breather between challenges"
+  },
+  "gauntlet": {
+    "axis": "horizontal",
+    "min_len": 14,
+    "max_len": 28,
+    "intensity": "high",
+    "water": "dry",
+    "encounter": "traversal",
+    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "hazard": 2, "stairs": 1},
+    "framing": "vista",
+    "flavor": "a platforming gauntlet — mostly air and platforms with little solid ground, a rhythm of deliberate jumps over gaps and hazards; a couple of gaps may be WIDE run-and-jump challenges (with runway before them)"
+  },
+  "cave": {
+    "axis": "horizontal",
+    "min_len": 14,
+    "max_len": 26,
+    "intensity": "medium",
+    "water": "optional",
+    "encounter": "mixed",
+    "feature_bias": {"floor": 3, "platform": 2, "gap": 1, "hazard": 2, "wall": 3, "stairs": 1},
+    "framing": "intimate",
+    "flavor": "a tight, enclosed cave — low ceilings and narrow passages, claustrophobic, threading between walls and hazards"
+  },
+  "islands": {
+    "axis": "horizontal",
+    "min_len": 16,
+    "max_len": 28,
+    "intensity": "medium",
+    "water": "optional",
+    "encounter": "traversal",
+    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "water": 2, "hazard": 1},
+    "framing": "vista",
+    "flavor": "scattered islands over a pit or water — hop from platform to platform, the ground below is a fall or a swim"
+  },
+  "climb": {
+    "axis": "vertical",
+    "min_len": 12,
+    "max_len": 22,
+    "intensity": "high",
+    "water": "optional",
+    "encounter": "traversal",
+    "feature_bias": {"platform": 5, "ledge": 2, "hazard": 1, "water": 1, "stairs": 1},
+    "framing": "tall",
+    "flavor": "a vertical climb — ascend a rising stack of staggered platforms and ledges toward an exit at the TOP; occasional water pockets to swim up through"
+  }
+}

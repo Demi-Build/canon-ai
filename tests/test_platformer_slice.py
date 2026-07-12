@@ -132,9 +132,11 @@ class TestDsl:
 
 class TestValidators:
     def test_rising_costs_horizontal_range(self) -> None:
-        """Arc-aware jump rule (round-4 play test: 'platforms too high,
-        can't jump onto them'): the box rule approved rise-3 + dx-4
-        diagonals the real arc can't make. Values from the shared
+        """``max_dx_for_rise`` (round-4 play test: 'platforms too high') is
+        now the CONSERVATIVE FEEDBACK vocabulary — the reachability decision
+        itself is the jump-arc simulation, which is if anything more generous
+        on diagonals. These values still drive the located-fix message so it
+        teaches the rising-costs-range constraint. Values from the shared
         ballistic model."""
         from examples.platformer_pack.movement import max_dx_for_rise
 
@@ -144,18 +146,19 @@ class TestValidators:
         assert max_dx_for_rise(DEFAULT_MOVEMENT, 0) == 4  # flat: box rule
         assert max_dx_for_rise(DEFAULT_MOVEMENT, 4) == -1  # over max rise
 
-        # A rise-3 platform 4 columns out passes the OLD rule, fails now —
-        # and the message teaches the rising-costs-range constraint.
-        # (platform row 11 -> stand atop row 10 = rise 3 from row 13.)
+        # A rise-3 platform 6 columns out is beyond even a running jump's
+        # arc — the simulation flags the break and the message teaches the
+        # rising-costs-range constraint. (platform row 11 -> stand atop row
+        # 10 = rise 3 from row 13; dx 6 from the col-10 frontier.)
         result = stamp(
-            "floor(0,10)\nplatform(14,11,4)\nledge(20,26,9)\nfloor(30,47)\n"
+            "floor(0,10)\nplatform(16,11,4)\nfloor(30,47)\n"
             "spawn(2)\nexit(45)", W, H,
         )
         problems = check_level(
             result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
         )
         assert problems and "rising costs range" in problems[0]
-        # The same step one column closer (dx 3 at rise 3) is makeable.
+        # A rise-3 step 3 columns out (within the arc) is makeable.
         near = stamp(
             "floor(0,10)\nplatform(13,11,4)\nledge(19,26,9)\n"
             "floor(30,47)\nspawn(2)\nexit(45)", W, H,
@@ -243,21 +246,18 @@ class TestValidators:
 
     def test_auto_bridge_repairs_reachability_in_code(self) -> None:
         """Code-for-computation: bridging a located break is arithmetic,
-        so the TOOL appends the platforms — no LLM round-trip. Both
-        observed break shapes converge to a valid level."""
+        so the TOOL appends the platforms — no LLM round-trip. Under run-up
+        momentum the tool must build CLIMBABLE (offset) steps, since a jump
+        can't go straight up onto a platform in its own column."""
         from examples.platformer_pack.validate import auto_bridge
 
         cases = (
-            # The exact l3 real-run loop: a 5-wide gap on the ground row.
-            "floor(0,32)\nfloor(38,47)\nspawn(2)\nexit(45)",
-            # Vertical breaks (the l2 attempt-2 shape): the only route is
-            # over a high ledge bridge — rises of 7 need stacked steps.
+            # The l3 real-run loop, now beyond a running jump's reach: a
+            # 9-wide gap (dx 10 >> the ~7-cell simulated max) on the ground.
+            "floor(0,30)\nfloor(40,47)\nspawn(2)\nexit(45)",
+            # A high ledge (rise 7): the tool builds offset stepping platforms
+            # up to it (a vertical stack would be unclimbable under momentum).
             "floor(0,10)\nledge(15,25,7)\nfloor(30,47)\nspawn(2)\nexit(45)",
-            # SECOND real run's l1/l3 fallback: foothold DIRECTLY above
-            # the frontier (dx=0, rise 4). The old blind formula proposed
-            # a platform whose standing cell was the foothold's own
-            # supporting solid — a dead op re-emitted until the bound.
-            "floor(0,47)\npit(10,20)\nledge(9,20,10)\nspawn(2)\nexit(25)",
         )
         for dsl_text in cases:
             repaired, added, problems = auto_bridge(
@@ -271,36 +271,38 @@ class TestValidators:
                 result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT
             )
 
-    def test_arc_clear_rejects_jumps_through_solid_terrain(self) -> None:
-        """jump_ok checks only the two endpoints; a jump whose dx/rise fit
-        the envelope but whose flight path passes THROUGH a solid column is
-        physically impossible. arc_clear is the code-side guard — only
-        SOLID blocks (you fly over hazards and swim through volumes), and
-        ground continuing beneath an upward hop never blocks."""
+    def test_simulation_rejects_jumps_into_impassable_terrain(self) -> None:
+        """The reachability edge test is now a real jump-arc SIMULATION
+        (can_reach): a jump into a cliff taller than the player can clear is
+        rejected, but a WALL SHORT ENOUGH TO JUMP OVER is allowed (the old
+        arc_clear heuristic over-conservatively rejected any solid in the
+        flight band; simulation is more accurate). Hazards are flown over."""
         import numpy as np
 
-        from examples.platformer_pack.validate import arc_clear
+        from examples.platformer_pack.validate import can_reach
 
         m = DEFAULT_MOVEMENT
-        # Floors at row 5 (standable row 4); a wall (id 3) poking up at col 3.
-        g = np.zeros((7, 7), dtype=np.int8)
-        g[5, :] = 1
-        g[6, :] = 1
-        for r in range(2, 7):
-            g[r, 3] = 3  # solid column taller than the footholds
-        assert not arc_clear(g, (1, 4), (5, 4), m)  # flies into the wall
-        # Same slot, but a HAZARD instead of solid: flown over, allowed.
-        g2 = np.zeros((7, 7), dtype=np.int8)
-        g2[5, :] = 1
-        g2[6, :] = 1
-        for r in range(2, 5):
-            g2[r, 3] = 10  # spike column — not a reachability blocker
-        assert arc_clear(g2, (1, 4), (5, 4), m)
-        # Ground continuing UNDER an upward hop must not block it.
-        g3 = np.zeros((12, 12), dtype=np.int8)
-        g3[10, :] = 1  # floor everywhere (standable row 9)
-        g3[11, :] = 1
-        assert arc_clear(g3, (4, 9), (7, 7), m)  # rise 2 over open air above
+        # A full-height cliff at col 3 (floor at row 8): impassable.
+        g = np.zeros((10, 8), dtype=np.int8)
+        g[8, :] = 1
+        g[9, :] = 1
+        for r in range(0, 8):
+            g[r, 3] = 3
+        assert not can_reach(g, (1, 7), (5, 7), m)  # jumps into the cliff
+        # A low wall (top only 1 cell above the foothold) is cleared.
+        g2 = np.zeros((10, 8), dtype=np.int8)
+        g2[8, :] = 1
+        g2[9, :] = 1
+        for r in (6, 7):
+            g2[r, 3] = 3
+        assert can_reach(g2, (1, 7), (5, 7), m)  # hops the low wall
+        # A hazard column is flown over, never a blocker.
+        g3 = np.zeros((10, 8), dtype=np.int8)
+        g3[8, :] = 1
+        g3[9, :] = 1
+        for r in range(5, 8):
+            g3[r, 3] = 10  # spike column
+        assert can_reach(g3, (1, 7), (5, 7), m)
 
     def test_l1_arc_blocked_exit_regression(self) -> None:
         """The exact clover_hills/l1 grid from the first paid run: its exit
@@ -315,7 +317,7 @@ class TestValidators:
         from examples.platformer_pack.validate import (
             _locate_break,
             _suggest_bridge,
-            arc_clear,
+            can_reach,
             reachable_cells,
         )
 
@@ -341,9 +343,10 @@ class TestValidators:
         spawn, exit_ = (1, 12), (42, 12)
         m = DEFAULT_MOVEMENT
 
-        # The two edges that faked reachability fly into the x36 cliff.
-        assert not arc_clear(g, (35, 12), (38, 9), m)
-        assert not arc_clear(g, (35, 12), (39, 10), m)
+        # The two edges that faked reachability fly into the x36 cliff — the
+        # simulation lands the player short of them, not on the far foothold.
+        assert not can_reach(g, (35, 12), (38, 9), m)
+        assert not can_reach(g, (35, 12), (39, 10), m)
         # So the exit is no longer falsely reachable, and the break is seen.
         assert exit_ not in reachable_cells(g, spawn, m)
         problems = check_level(g, spawn, exit_, m)
@@ -361,6 +364,122 @@ class TestValidators:
         for i in range(length):
             g[row, col + i] = 2  # paint the one-way platform the tool chose
         assert exit_ in reachable_cells(g, spawn, m)
+
+    def test_up_through_platform_is_unbeatable(self) -> None:
+        """The l6 pathology: a shelf capped by a solid slab is 'reachable'
+        under the old heuristic only via a straight-up jump THROUGH the slab
+        (arc_clear short-circuited every same-column edge). The simulation
+        bonks the slab's underside — the shelf is an island. A control with
+        clear headroom above a one-way platform stays reachable, proving the
+        strictness is aimed at capped columns, not at vertical ascents."""
+        import numpy as np
+
+        from examples.platformer_pack.validate import (
+            can_reach,
+            check_level,
+            reachable_cells,
+        )
+
+        m = DEFAULT_MOVEMENT
+        dec = {".": 0, "F": 1, "p": 2}
+        capped = np.array([[dec[c] for c in r] for r in [
+            ".........",   # shelf standable cells (atop the slab); exit (4,0)
+            "FFFFFFFFF",   # full-width slab
+            ".........",
+            ".........",
+            ".........",   # pocket floor's standable row; spawn (0,4)
+            "FFFFFFFFF",   # floor
+        ]], dtype=np.int8)
+        assert (4, 0) not in reachable_cells(capped, (0, 4), m)
+        assert not can_reach(capped, (0, 4), (4, 0), m)  # straight-up bonk
+        problems = check_level(capped, (0, 4), (4, 0), m)
+        assert problems and "not reachable" in problems[0]
+
+        headroom = np.array([[dec[c] for c in r] for r in [
+            ".........",   # clear sky above the platform
+            "...pp....",   # one-way platform -> shelf (3,0)
+            ".........",   # spawn (0,2) standable row
+            "FFFFFFFFF",   # floor
+        ]], dtype=np.int8)
+        assert (3, 0) in reachable_cells(headroom, (0, 2), m)
+
+    def test_mount_from_below_is_unbeatable(self) -> None:
+        """The l4 pathology: a step up whose top is capped by a slab ONE
+        cell above it. The old heuristic accepted the mount (adjacent
+        columns leave no cells 'strictly between' for arc_clear to inspect);
+        the simulation has the player bonk the ceiling and fall back. The
+        identical step WITHOUT the cap is a normal, makeable jump — so the
+        cap, not the mount, is what the simulation rejects."""
+        import numpy as np
+
+        from examples.platformer_pack.validate import can_reach, reachable_cells
+
+        m = DEFAULT_MOVEMENT
+        dec = {".": 0, "F": 1}
+        capped = np.array([[dec[c] for c in r] for r in [
+            ".........",
+            "..FFFFF..",   # slab capping the step tops (cols 2..6)
+            ".........",   # (4,2) target: standable atop the step, capped above
+            "...FFF...",   # step solids
+            "...FFF...",   # step base; spawn (0,4) on the floor
+            "FFFFFFFFF",
+        ]], dtype=np.int8)
+        assert (4, 2) not in reachable_cells(capped, (0, 4), m)
+        assert not can_reach(capped, (2, 4), (4, 2), m)
+
+        uncapped = np.array([[dec[c] for c in r] for r in [
+            ".........",
+            ".........",   # no cap
+            ".........",   # (4,2) standable atop the step
+            "...FFF...",
+            "...FFF...",
+            "FFFFFFFFF",
+        ]], dtype=np.int8)
+        assert (4, 2) in reachable_cells(uncapped, (0, 4), m)
+
+    def test_wide_gap_needs_run_up_momentum(self) -> None:
+        """Run-up momentum: a wide (6-cell) bottomless PIT is crossable only
+        with a running jump, which needs RUNWAY behind the takeoff. Given a
+        long flat approach it's reachable; from a no-runway island takeoff it
+        is NOT — the run-and-jump technique some gaps deliberately demand. A
+        normal (3-cell) gap needs no run-up at all."""
+        import numpy as np
+
+        from examples.platformer_pack.validate import reachable_cells
+
+        m = DEFAULT_MOVEMENT
+
+        def scene(rows: list[str]):
+            dec = {".": 0, "F": 1}
+            w = max(len(r) for r in rows)
+            return np.array(
+                [[dec[c] for c in r.ljust(w, ".")] for r in rows], dtype=np.int8
+            )
+
+        # Long left floor (runway), 6-wide bottomless pit, right floor.
+        run_up = scene([
+            "...................",
+            "FFFFFFFFFF......FFFF",
+            "FFFFFFFFFF......FFFF",
+        ])
+        assert (17, 0) in reachable_cells(run_up, (0, 0), m)
+
+        # Takeoff is a 1-cell island (pit on the approach side) → no runway →
+        # only a weak standing jump → the 6-wide pit is uncrossable.
+        no_runway = scene([
+            "...................",
+            "FFF.F......FFFFFFFF",
+            "FFF.F......FFFFFFFF",
+        ])
+        assert (17, 0) not in reachable_cells(no_runway, (0, 0), m)
+
+        # A 3-wide pit is an ordinary walk-jump — no run-up required.
+        narrow = scene([
+            "...................",
+            "FFF...FFFFFFFFFFFFF",
+            "FFF...FFFFFFFFFFFFF",
+        ])
+        assert (17, 0) in reachable_cells(narrow, (0, 0), m)
 
     def test_structural_roles_get_separated(self) -> None:
         """Ground/platform/wall within a few luminance points of each
@@ -511,11 +630,12 @@ class TestValidators:
                 layout_calls.append(msg)
                 # Dims are schema-rolled ranges — build the unreachable
                 # layout against whatever grid the prompt advertises: a
-                # 5-wide gap (> jump_width 4) between two floor runs.
+                # 9-wide gap (dx 10, beyond a running jump's ~7-cell reach)
+                # between two floor runs.
                 m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
                 right = int(m.group(1)) - 1
                 sent["gap_dsl"] = (
-                    f"floor(0,{right - 15})\nfloor({right - 9},{right})\n"
+                    f"floor(0,{right - 19})\nfloor({right - 9},{right})\n"
                     f"checkpoint(20)\nspawn(2)\nexit({right - 2})"
                 )
                 return sent["gap_dsl"]
