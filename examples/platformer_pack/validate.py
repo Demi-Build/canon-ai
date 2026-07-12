@@ -6,11 +6,17 @@ Since 3b every tile judgment resolves through the game's TILE REGISTRY
 (categories in code, values in data): solids/one-ways support standing,
 volume tiles (water, lava, mud) are swimmable, hazards are neither.
 
-Reachability here is the *lite* version: BFS over traversable cells —
-standable cells connected by the jump rule (dx <= jump_width, rise <=
-jump_height, drops unlimited), plus volume cells (Appendix E.1: vertical
-movement is free inside a volume; the jump rule applies when exiting it).
-Full A* + jump-arc physics is a later 3b-phase item.
+Reachability is a BFS whose successor relation is a REAL jump-arc
+SIMULATION: from each foothold we integrate the player's exact physics
+(the same jump velocity, gravity, run speed, dt, and ceiling/wall/land
+collision the two play surfaces run — examples/platformer_play.py and its
+byte-identical twin godot_template/godot/main.gd) and record every cell the
+player can actually come to rest in. This replaced the old dx/rise +
+"scan the columns between the footholds" heuristic, which silently passed
+UNBEATABLE levels: it never checked the takeoff column, so a jump straight
+UP through a capping platform, or a mount onto a slab from a sealed pocket
+below, read as reachable. Simulating the arc catches takeoff blocks,
+up-through-platforms, mount-from-below, and flattened arcs that fall short.
 """
 
 from __future__ import annotations
@@ -24,7 +30,13 @@ from examples.platformer_pack.combat import (
     effective_size,
     occupancy,
 )
-from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
+from examples.platformer_pack.movement import (
+    REACH_COMFORT,
+    PlayerMovementSpec,
+    jump_speed,
+    max_dx_for_rise,
+    runway_speed,
+)
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
@@ -57,61 +69,332 @@ def volume_cells(
     }
 
 
-def jump_ok(dx: int, rise: int, movement: PlayerMovementSpec) -> bool:
-    """The arc-aware jump rule shared by reachability, feedback, and the
-    bridge tool: rise caps height, and RISING COSTS HORIZONTAL RANGE
-    (max_dx_for_rise) — the box rule approved unmakeable diagonals."""
-    if rise > movement.jump_height:
-        return False
-    if dx > movement.jump_width:
-        return False
-    return rise <= 0 or dx <= max_dx_for_rise(movement, rise)
+# --------------------------------------------------------------------------
+# Jump-arc SIMULATION — the reachability successor relation. These constants
+# and the integration loop below MUST stay identical to the two play surfaces
+# (examples/platformer_play.py's update loop and godot_template/godot/main.gd's
+# _physics_process, which are byte-identical to each other). The ballistic
+# apex margin lives in movement.jump_speed / movement.JUMP_HEADROOM.
+# --------------------------------------------------------------------------
+
+#: Player body span in cells — the two corners collision samples, matching
+#: BODY_L/BODY_R in both consumers.
+BODY_L, BODY_R = 0.15, 0.85
+
+#: The consumers integrate at a fixed 60 FPS; the simulation matches it.
+_SIM_DT = 1.0 / 60.0
+
+#: Frame cap per plan — a full jump (~0.8 s) plus a fall from the top of any
+#: real level to the kill plane fits easily; a plan that never resolves is
+#: treated as going nowhere.
+_MAX_SIM_FRAMES = 400
+
+#: Cells a walk plan tracks before yielding to the BFS. Walking is
+#: transitive, so a short hop keeps each simulation cheap and the BFS chains
+#: the rest.
+_WALK_REACH = 8
+
+#: Max runway cells the probe counts behind a takeoff — beyond the run-up
+#: needed to reach run_speed, extra cells don't add takeoff velocity.
+_RUNWAY_MAX = 8
 
 
-def arc_clear(
+def _drop_targets(
+    grid, stand: set, volume: set, tiles: TileRegistry
+) -> list[list[int | None]]:
+    """Per column, the foothold a straight-down drop from each row lands on
+    (or ``None``). Used only for the CONTROLLED step-off (walk to a ledge edge
+    and drop nearly straight down — a tap is always makeable); mid-air drops
+    are NOT sound under run-up momentum (you can't stop horizontally in the
+    air). Solids, one-ways, and water all stop a fall; a fall into water has
+    no dry landing (the swim edges cover the water)."""
+    height, width = grid.shape
+    solids = tiles.ids("solid")
+    one_ways = tiles.ids("one_way")
+    cols: list[list[int | None]] = [[None] * height for _ in range(width)]
+    for x in range(width):
+        target: int | None = None
+        for y in range(height - 1, -1, -1):
+            if (x, y) in volume:
+                target = None  # water: an incoming fall has no dry landing
+            elif int(grid[y, x]) in solids or int(grid[y, x]) in one_ways:
+                target = None  # solid/one-way floor blocks passage below
+            elif (x, y) in stand:
+                target = y  # empty foothold: a fall from here/above lands
+            cols[x][y] = target
+    return cols
+
+
+def _runway(stand: set, tx: int, ty: int, direction: int, max_cells: int) -> int:
+    """Flat run-up available for a jump in ``direction`` from ``(tx, ty)``:
+    the count of contiguous standable cells at row ``ty`` on the APPROACH side
+    (behind the takeoff), capped at ``max_cells``. A wide gap right after a
+    wall gets 0 (only a standing/walk jump); a gap after open ground gets a
+    full runway (the run-and-jump)."""
+    n = 0
+    x = tx - direction
+    while n < max_cells and (x, ty) in stand:
+        n += 1
+        x -= direction
+    return n
+
+
+#: Takeoff-speed sampling step (cells/s). A jump's landing column is ~ vx ×
+#: airtime, so ~1 cell/s keeps consecutive landings under a cell apart — dense
+#: enough that no makeable jump falls between samples (which would over-bridge).
+_TAKEOFF_STEP = 1.0
+
+
+def _takeoff_speeds(max_vx: float) -> list[float]:
+    """Horizontal takeoff speeds to sample for a jump, from a standstill up to
+    ``max_vx`` (the top speed the RUNWAY allows). Sampling the whole range —
+    densely — catches intermediate-distance landings a full-speed jump would
+    overshoot, so the successor neither over- nor under-bridges. With no runway
+    ``max_vx`` is ~0, so only the standing jump is offered."""
+    if max_vx <= 0.5:
+        return [0.0]
+    n = int(max_vx / _TAKEOFF_STEP)
+    speeds = [i * _TAKEOFF_STEP for i in range(n + 1)]
+    if not speeds or speeds[-1] < max_vx - 1e-6:
+        speeds.append(max_vx)
+    return speeds
+
+
+def _simulate_plan(
+    grid,
+    src: tuple[int, int],
+    vx0: float,
+    hold: int,
+    jump: bool,
+    is_walk: bool,
+    out: set,
+    *,
+    jv: float,
+    gravity: float,
+    walk_speed: float,
+    run_speed: float,
+    ground_accel: float,
+    ground_friction: float,
+    air_accel: float,
+    air_friction: float,
+    solids: frozenset | set,
+    one_ways: frozenset | set,
+    volume: set,
+    stand: set,
+    width: int,
+    height: int,
+    extra_solid: frozenset,
+    extra_one_way: frozenset,
+    extra_stand: frozenset,
+) -> None:
+    """Integrate ONE plan from ``src`` with the consumers' RUN-UP MOMENTUM
+    physics and add every foothold the player lands on (plus volume cells
+    entered) to ``out``. ``vx0`` is the horizontal velocity at the start (the
+    run-up speed already built for a jump); vx then accelerates toward
+    ``hold * run_speed`` — weakly in the air (``air_accel``), strongly on the
+    ground (``ground_accel``) — with friction when idle. No straight-down drop
+    shortcut: momentum means you can't stop in mid-air, so only real arc
+    landings count. ``extra_solid`` / ``extra_one_way`` / ``extra_stand``
+    inject a proposed bridge (a ONE-WAY: lands from above, never blocks from
+    below) so the same code answers "would this bridge be reachable"."""
+
+    def _solid_at(ix: int, iy: int) -> bool:
+        if (ix, iy) in extra_solid:
+            return True
+        if 0 <= ix < width and 0 <= iy < height:
+            return int(grid[iy, ix]) in solids
+        return False
+
+    def _support_below(x: float, y: float) -> bool:
+        # Deterministic ground probe (matches the consumers' `gmove`): support
+        # directly under the feet — robust to the sub-cell landing flicker.
+        foot = int(y + 1.01)
+        for cx in (x + BODY_L, x + BODY_R):
+            ix = int(cx)
+            if (ix, foot) in extra_one_way:
+                return True
+            if 0 <= ix < width and 0 <= foot < height and (
+                int(grid[foot, ix]) in solids or int(grid[foot, ix]) in one_ways
+            ):
+                return True
+        return False
+
+    def _blocked(x: float, y: float) -> bool:
+        for cy in (y, y + 0.99):
+            iy = int(cy)
+            if _solid_at(int(x + BODY_L), iy) or _solid_at(int(x + BODY_R), iy):
+                return True
+        return False
+
+    def _landing(x: float, y: float, prev_bottom: float) -> bool:
+        iy = int(y)
+        floor_row = float(iy)
+        for cx in (x + BODY_L, x + BODY_R):
+            ix = int(cx)
+            if _solid_at(ix, iy):
+                return True
+            on_one_way = (ix, iy) in extra_one_way or (
+                0 <= ix < width
+                and 0 <= iy < height
+                and int(grid[iy, ix]) in one_ways
+            )
+            if on_one_way and prev_bottom <= floor_row:
+                return True
+        return False
+
+    px, py = float(src[0]), float(src[1])
+    vx = float(vx0)
+    vy = -jv if jump else 0.0
+    airborne_seen = jump
+    sx = src[0]
+    for _ in range(_MAX_SIM_FRAMES):
+        prev_px = px
+        gmove = vy >= -0.01 and _support_below(px, py)
+        accel = ground_accel if gmove else air_accel
+        if hold != 0:
+            target = hold * run_speed  # RUN held = max reach (is-it-possible)
+            step = accel * _SIM_DT
+            vx = min(vx + step, target) if vx < target else max(vx - step, target)
+        else:
+            fric = (ground_friction if gmove else air_friction) * _SIM_DT
+            vx = max(0.0, vx - fric) if vx > 0 else min(0.0, vx + fric)
+        new_x = px + vx * _SIM_DT
+        if _blocked(new_x, py):
+            vx = 0.0
+        else:
+            px = min(max(new_x, 0.0), width - 1.0)
+        vy += gravity * _SIM_DT
+        prev_bottom = py + 0.99
+        new_y = py + vy * _SIM_DT
+        if vy > 0 and _landing(px, new_y + 0.99, prev_bottom):
+            py = float(int(new_y + 0.99) - 1)
+            vy = 0.0
+            grounded = True
+        elif vy < 0 and _blocked(px, new_y):
+            vy = 0.0
+            grounded = False
+        else:
+            py = new_y
+            grounded = False
+        iy = int(py)
+        for cx in (px + BODY_L, px + BODY_R):
+            ix = int(cx)
+            cell = (ix, iy)
+            if cell in volume:
+                out.add(cell)
+            if grounded and (cell in stand or cell in extra_stand):
+                out.add(cell)
+        if not grounded:
+            airborne_seen = True
+        if py > height + 2:
+            return  # fell off the bottom
+        if grounded and airborne_seen:
+            return  # a jump / walk-off resolves once it lands
+        if is_walk and grounded:
+            if abs(px - prev_px) < 1e-9:
+                return  # walked into a wall / clamped at the edge
+            if abs(px - sx) >= _WALK_REACH:
+                return  # far enough; the BFS carries on from these cells
+
+
+def _successors(
+    grid,
+    cell: tuple[int, int],
+    movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
+    *,
+    stand: set | None = None,
+    volume: set | None = None,
+    drop: list | None = None,
+    extra_solid: frozenset = frozenset(),
+    extra_one_way: frozenset = frozenset(),
+    extra_stand: frozenset = frozenset(),
+) -> set:
+    """Cells reachable from ``cell`` in one move by simulating the player's
+    run-up momentum physics: per direction, a jump at several takeoff speeds
+    gated by the RUNWAY behind the takeoff (a wide gap needs a run-up); walk
+    connectivity; a controlled step-off drop; and free swimming in a volume.
+    The successor relation the reachability BFS and the bridge tool share, so
+    "reachable" and "bridgeable" stay consistent."""
+    height, width = grid.shape
+    if stand is None:
+        stand = standable_cells(grid, tiles)
+    if volume is None:
+        volume = volume_cells(grid, tiles)
+    if drop is None:
+        drop = _drop_targets(grid, stand, volume, tiles)
+    solids = tiles.ids("solid")
+    one_ways = tiles.ids("one_way")
+    comfort = REACH_COMFORT
+    walk_vx = movement.walk_speed * comfort
+    run_cap = movement.run_speed * comfort
+    kw = dict(
+        jv=jump_speed(movement), gravity=movement.gravity,
+        walk_speed=movement.walk_speed * comfort,
+        run_speed=movement.run_speed * comfort,
+        ground_accel=movement.ground_accel, ground_friction=movement.ground_friction,
+        air_accel=movement.air_accel, air_friction=movement.air_friction,
+        solids=solids, one_ways=one_ways, volume=volume, stand=stand,
+        width=width, height=height, extra_solid=extra_solid,
+        extra_one_way=extra_one_way, extra_stand=extra_stand,
+    )
+    out: set = set()
+    cx, cy = cell
+    if cell in volume:
+        # Free swim: vertical movement is free inside a volume; the jump rule
+        # applies only when leaving it.
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            if (nx, ny) in volume:
+                out.add((nx, ny))
+        # Surface exit: open air directly above turns a stroke into a full
+        # jump (no runway underwater — walk/run takeoff, both directions).
+        air_above = (
+            cy - 1 >= 0
+            and (cx, cy - 1) not in volume
+            and int(grid[cy - 1, cx]) not in solids
+        )
+        if air_above:
+            # No runway underwater: a surface exit is a low-speed jump.
+            for hold in (-1, 0, 1):
+                for vx0 in _takeoff_speeds(walk_vx):
+                    _simulate_plan(
+                        grid, cell, hold * vx0, hold, True, False, out, **kw
+                    )
+    else:
+        for hold in (-1, 1):
+            runway = _runway(stand, cx, cy, hold, _RUNWAY_MAX)
+            run_vx = min(run_cap, runway_speed(movement, runway) * comfort)
+            for vx0 in _takeoff_speeds(run_vx):
+                _simulate_plan(
+                    grid, cell, hold * vx0, hold, True, False, out, **kw
+                )
+        # Straight-up jump (vertical), no horizontal.
+        _simulate_plan(grid, cell, 0.0, 0, True, False, out, **kw)
+        # Walk connectivity (accelerates on the ground, falls off ledges).
+        for hold in (-1, 1):
+            _simulate_plan(grid, cell, 0.0, hold, False, True, out, **kw)
+        # Controlled step-off: tap to an adjacent open column and drop nearly
+        # straight down (a slow step is always makeable, unlike a mid-air stop).
+        for nx in (cx - 1, cx + 1):
+            if 0 <= nx < width and (nx, cy) not in stand and int(grid[cy, nx]) == 0:
+                r = drop[nx][cy]
+                if r is not None:
+                    out.add((nx, r))
+    out.discard(cell)
+    return out
+
+
+def can_reach(
     grid,
     src: tuple[int, int],
     dst: tuple[int, int],
     movement: PlayerMovementSpec,
     tiles: TileRegistry = DEFAULT_TILES,
 ) -> bool:
-    """Conservative jump-arc clearance: can the player travel ``src`` ->
-    ``dst`` without a SOLID column in between rising into its flight path?
-
-    ``jump_ok`` only checks the two endpoints' dx/rise, so a jump that
-    clears the envelope but flies THROUGH a cliff was wrongly called
-    reachable — the first paid run shipped an unbeatable level whose exit
-    was 'reachable' only via ``(35,12)->(38,9)``, a jump straight into a
-    5-cell wall. This is the code-side guard: for every column strictly
-    between the footholds, reject if any solid tile sits in the band from
-    the highest point the feet can reach (apex = the higher foothold minus
-    ``jump_height``) down to just above the LOWER foothold. Ground at or
-    below the lower foothold never blocks (the player is above it as it
-    travels); a protrusion into that band does. One-way platforms
-    (pass-through), hazards (flown over), and volumes (swum through) are
-    not blockers — only ``solid``.
-
-    Conservative by design (playability batch): it may reject a jump a
-    perfect arc could thread, which merely asks ``auto_bridge`` for a
-    stepping platform — never the reverse (accepting an impossible jump).
-    Per-column parabola sampling is the deferred 'A* + jump-arc' item.
-    """
-    sx, sy = src
-    dx, dy = dst
-    if sx == dx:
-        return True  # vertical move (swim / volume entry): no columns between
-    solids = tiles.ids("solid")
-    top = min(sy, dy) - movement.jump_height  # highest the feet can reach
-    bottom = max(sy, dy) - 1  # just above the lower foothold; ground is free
-    if bottom < top:
-        return True
-    top = max(0, top)
-    step = 1 if dx > sx else -1
-    for x in range(sx + step, dx, step):
-        for row in range(top, bottom + 1):
-            if int(grid[row, x]) in solids:
-                return False
-    return True
+    """True if the player can move ``src`` -> ``dst`` in one jump/walk/swim,
+    by simulation. The single-edge form of :func:`reachable_cells`, handy for
+    tests and callers reasoning about a specific jump."""
+    return dst in _successors(grid, src, movement, tiles)
 
 
 def reachable_cells(
@@ -120,41 +403,24 @@ def reachable_cells(
     movement: PlayerMovementSpec,
     tiles: TileRegistry = DEFAULT_TILES,
 ) -> set[tuple[int, int]]:
-    """BFS over traversable cells: stand->stand by the arc-aware jump
-    rule; volume->volume 4-adjacent (swimming is free movement);
-    stand->volume by entering/falling in; and volume->stand by the jump
-    rule from the volume cell (surface exit)."""
+    """BFS over traversable cells whose edges are the jump-arc SIMULATION
+    (see the module docstring). Standable and volume cells both flow through
+    :func:`_successors`; the start must itself be standable or in a volume."""
     stand = standable_cells(grid, tiles)
     volume = volume_cells(grid, tiles)
     if start not in stand and start not in volume:
         return set()
+    drop = _drop_targets(grid, stand, volume, tiles)
     seen = {start}
     queue = deque([start])
     while queue:
-        cx, cy = queue.popleft()
-        in_volume = (cx, cy) in volume
-        for nx, ny in stand:
-            if (nx, ny) in seen:
-                continue
-            if jump_ok(abs(nx - cx), cy - ny, movement) and arc_clear(
-                grid, (cx, cy), (nx, ny), movement, tiles
-            ):
-                seen.add((nx, ny))
-                queue.append((nx, ny))
-        for nx, ny in volume:
-            if (nx, ny) in seen:
-                continue
-            if in_volume:
-                if abs(nx - cx) + abs(ny - cy) == 1:  # swim: 4-adjacent
-                    seen.add((nx, ny))
-                    queue.append((nx, ny))
-            else:
-                # Enter a volume: walk/fall in — same arc rule + clearance.
-                if jump_ok(abs(nx - cx), cy - ny, movement) and arc_clear(
-                    grid, (cx, cy), (nx, ny), movement, tiles
-                ):
-                    seen.add((nx, ny))
-                    queue.append((nx, ny))
+        cur = queue.popleft()
+        for nxt in _successors(
+            grid, cur, movement, tiles, stand=stand, volume=volume, drop=drop
+        ):
+            if nxt not in seen and (nxt in stand or nxt in volume):
+                seen.add(nxt)
+                queue.append(nxt)
     return seen
 
 
@@ -297,15 +563,19 @@ def _suggest_bridge(
 
     Candidates are verified against the GRID: the platform's two cells
     AND the standing cells above them must be open air, and standing on
-    it must be arc-jumpable from the frontier. The first real run's
-    fallback levels traced to the old blind formula: with a foothold
-    directly above the frontier (dx=0, rise 4) it proposed a platform
-    whose standing cell was the foothold's own supporting solid — a
-    structurally dead op that auto_bridge re-emitted until its bound.
+    it must be reachable from the frontier BY SIMULATION — the same jump-arc
+    physics :func:`reachable_cells` uses, with the proposed one-way platform
+    injected, so a bridge this tool accepts is guaranteed to reconnect the
+    level when auto_bridge stamps it (no more dead ops re-emitted to the
+    bound). The first real run's fallback levels traced to the old blind
+    formula proposing a platform whose standing cell was structurally dead.
     Returns None when no valid bridge exists (a design problem)."""
     height, width = grid.shape
     fx, fy = frontier
     nx, ny = nearest
+    stand = standable_cells(grid, tiles)
+    volume = volume_cells(grid, tiles)
+    drop = _drop_targets(grid, stand, volume, tiles)
 
     def _free(x: int, y: int) -> bool:
         return 0 <= x < width and 0 <= y < height and int(grid[y, x]) == 0
@@ -319,15 +589,21 @@ def _suggest_bridge(
         stand_rise = fy - (row - 1)
         if stand_rise > movement.jump_height:
             return False
-        # Reachable from the frontier under the arc rule (falling is free).
+        # Cheap geometric prefilter (rising costs range) before the sim.
         reach = max(1, max_dx_for_rise(movement, max(stand_rise, 0)))
         if min(abs(col - fx), abs(col + 1 - fx)) > reach:
             return False
-        # And the landing cell must actually be arc-reachable — a platform
-        # tucked behind a wall is a dead op auto_bridge would re-emit to
-        # its bound. Check the nearer of the two standing cells.
-        land = (col, row - 1) if abs(col - fx) <= abs(col + 1 - fx) else (col + 1, row - 1)
-        return arc_clear(grid, frontier, land, movement, tiles)
+        # Final gate: standing on the proposed platform must be physically
+        # reachable from the frontier. Inject the platform as a one-way and
+        # its two standing cells, then simulate — a platform tucked behind a
+        # wall or capped above simply won't be reached, and is rejected.
+        platform = frozenset({(col, row), (col + 1, row)})
+        stands = frozenset({(col, row - 1), (col + 1, row - 1)})
+        succ = _successors(
+            grid, frontier, movement, tiles, stand=stand, volume=volume,
+            drop=drop, extra_one_way=platform, extra_stand=stands,
+        )
+        return bool(stands & succ)
 
     # Rows whose STANDING level lands closest to the foothold's row first
     # (flat gaps get flat steps, tiers get risers), columns spiralling
