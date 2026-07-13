@@ -103,6 +103,7 @@ def _fake_section(
     total: int,
     vol: str,
     haz: str,
+    has_breakable: bool = False,
 ) -> str:
     """Deterministic per-SECTION layout for the $0 fake run (the sectioned
     ``stamp_level_collision`` calls the Layout Agent once PER section). Sized
@@ -151,7 +152,12 @@ def _fake_section(
     # has swimmable water.
     pocket = [f"volume_block({vol},4,{g - 4},6,{g - 3})"]
     if archetype == "gauntlet" and width >= 16:
-        lines += [
+        # A short crumbling stretch on the ground (breakable floor, Chunk D —
+        # only if the registry has the tile) + floating platform tiers.
+        # breakable is a solid foothold, so the level stays reachable; a
+        # lingering player would drop through it in play.
+        crumble = [f"breakable({mid - 3},{mid - 1})"] if has_breakable else []
+        lines += crumble + [
             f"platform({mid},{g - 3},3)",
             f"platform({mid + 4},{g - 5},3)",
         ] + pocket
@@ -389,6 +395,7 @@ _FAKE_PALETTE = {
     "ground": "#6e5a4e",
     "platform": "#b8804a",
     "wall": "#5b4d5e",
+    "breakable": "#cdb36a",  # pale cracked ochre — distinct from ground/platform
     "danger": "#e0453a",
     "water": "#3a6ea5",
     "lava": "#e8722c",
@@ -532,6 +539,10 @@ def make_fake_responder():
                     index=int(sec_match.group(2)) - 1,
                     total=int(sec_match.group(3)),
                     vol=vol, haz=haz,
+                    # Only emit breakable() when the registry advertises it
+                    # (the prompt gates the op) — a game without a breakable
+                    # tile (e.g. the lava world) must not receive the op.
+                    has_breakable="breakable(x1,x2)" in msg,
                 )
             return _fake_layout(
                 width, height, vol=vol, haz=haz,

@@ -60,7 +60,7 @@ def _load(data_dir: Path, level_id: str):
     level_dir = data_dir / "level" / stage_id / level_id
     level = json.loads((level_dir / "level.json").read_text())
     with np.load(level_dir / "collision.npz") as data:
-        grid = data["collision"]
+        grid = data["collision"].copy()  # writable — breakable floors mutate it
     enemies = {
         p.stem: json.loads(p.read_text())
         for p in (data_dir / "enemy").glob("*.json")
@@ -183,6 +183,14 @@ def main() -> None:
     drop_through = bool(rules.get("platform_drop_through", True))
     enemy_reset = bool(rules.get("checkpoint_enemy_reset", True))
     spawn_grace = str(rules.get("spawn_grace", "until_move")) == "until_move"
+    # Breakable floors (sectioned-levels D): tile ids whose slot params mark
+    # them breakable, + the fuse length. The fuse mechanic below MUST match
+    # main.gd byte-for-byte (parity), so both surfaces read these the same way.
+    BREAKABLE = {
+        int(s["tile_type"]) for s in tileset["slots"]
+        if (s.get("params") or {}).get("breakable")
+    }
+    BREAK_DELAY_S = float(rules.get("break_delay_s", 0.6))
     #: Variant vocabulary from the manifest — consumers never hardcode
     #: what "elite" or "champion" means.
     variant_defs = {v["name"]: v for v in manifest.get("variants", [])}
@@ -719,6 +727,10 @@ def main() -> None:
     vy = 0.0
     vx = 0.0  # horizontal velocity (run-up momentum / slide)
     on_ground = False
+    # Per-cell breakable-floor fuse: (col,row) -> seconds of hold LEFT. PERSIST
+    # policy (counts down only while a foot rests on the cell, never resets).
+    # Mirrors main.gd's tile_fuses byte-for-byte.
+    break_fuses: dict[tuple[int, int], float] = {}
     won = False
     hearts = MAX_HEARTS
     iframes = 0.0  # post-hit invulnerability countdown
@@ -980,6 +992,26 @@ def main() -> None:
             vy, on_ground = 0.0, False
         else:
             py, on_ground = new_y, False
+
+        # Breakable floors: a foot resting on a breakable cell burns its fuse;
+        # at zero the tile is removed (collision cleared -> the player falls
+        # next tick). Uses the SAME deterministic foot probe as gmove (never
+        # the on_ground flag), the SAME countdown arithmetic, and a sorted
+        # deduped column list — all to stay byte-identical to main.gd.
+        if BREAKABLE:
+            bfoot = int(py + 1.01)
+            if vy >= -0.01:
+                for bx in sorted({int(px + BODY_L), int(px + BODY_R)}):
+                    if not (0 <= bx < width and 0 <= bfoot < height):
+                        continue
+                    if int(grid[bfoot, bx]) not in BREAKABLE:
+                        continue
+                    rem = break_fuses.get((bx, bfoot), BREAK_DELAY_S) - dt
+                    if rem <= 0.0:
+                        grid[bfoot, bx] = 0  # crumble — empty, player falls
+                        break_fuses.pop((bx, bfoot), None)
+                    else:
+                        break_fuses[(bx, bfoot)] = rem
 
         # Damaging volumes (swimmable lava): drain hearts continuously —
         # every accumulated point costs one heart; the fraction resets on

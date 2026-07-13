@@ -17,7 +17,7 @@
     "intensity": "high",
     "water": "optional",
     "encounter": "combat",
-    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "hazard": 2, "stairs": 1},
+    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "hazard": 2, "stairs": 1, "breakable": 2},
     "framing": "vista",
     "flavor": "a platforming gauntlet — mostly air and platforms with little solid ground, a rhythm of deliberate jumps over gaps and hazards; a couple of gaps may be WIDE run-and-jump challenges (with runway before them)"
   },

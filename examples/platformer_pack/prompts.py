@@ -120,6 +120,7 @@ _FEATURE_OPS = {
     "stairs": "stairs_up, stairs_down, pyramid",
     "water": "pool, water_wall, water_block",
     "ledge": "ledge",
+    "breakable": "breakable",
 }
 
 _INTENSITY_HINT = {
@@ -361,6 +362,8 @@ class PlatformerPrompts:
             "stairs_up(x1,x2)", "stairs_down(x1,x2)", "pyramid(x1,x2)",
             "checkpoint(x)", "spawn(x)", "exit(x)",
         ]
+        if "breakable" in tiles.by_name:
+            ops.append("breakable(x1,x2)")
         if hazards:
             ops.append("hazard_strip(name,x1,x2)")
         if volumes:
@@ -435,6 +438,14 @@ class PlatformerPrompts:
                 "Hazard tiles for hazard_strip(): "
                 + ", ".join(t.name for t in hazards)
                 + " (touching one kills — they sit on floor)."
+            )
+        if "breakable" in tiles.by_name:
+            vocab_lines.append(
+                "breakable(x1,x2): a CRUMBLING FLOOR — solid to stand on, but "
+                "it gives way a moment after the player steps on it and drops "
+                "them into the pit below (a fall). Keep spans SHORT (2-4 "
+                "columns) so a moving player can cross before it breaks; use it "
+                "for tension, never as the only footing over a wide gap."
             )
         return ops, vocab_lines
 

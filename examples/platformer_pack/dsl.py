@@ -7,6 +7,10 @@ values in data, categories in code). Agents never touch grid cells.
 Grammar (one op per line or semicolon-separated)::
 
     floor(x1, x2)        ground segment: floor at row H-2, bedrock below
+    breakable(x1, x2)    a crumbling floor: solid footing at row H-2 over a
+                         bottomless pit — a consumer fuse removes it a moment
+                         after the player stands on it (reachability treats it
+                         as a permanent foothold; v1 ignores the fuse timing)
     gap(x1, x2)          removes ground (fall = respawn)
     pit(x1, x2)          gap with a hazard at the bottom row (visible death)
     platform(x, y, len)  one-way platform at row y, cols x..x+len-1
@@ -70,6 +74,7 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: Op signatures: "i" = int arg, "n" = registry tile name arg.
 _SIGNATURES: dict[str, str] = {
     "floor": "ii",
+    "breakable": "ii",
     "gap": "ii",
     "pit": "ii",
     "platform": "iii",
@@ -99,6 +104,7 @@ _SIGNATURES: dict[str, str] = {
 #: recites the EXACT signature (not just the count) is what breaks the loop.
 _ARG_NAMES: dict[str, str] = {
     "floor": "x1, x2",
+    "breakable": "x1, x2",
     "gap": "x1, x2",
     "pit": "x1, x2",
     "platform": "x, y, len",
@@ -444,6 +450,22 @@ def stamp(
             _check_x(name, x1, x2)
             grid[ground_row, x1 : x2 + 1] = floor_id
             grid[height - 1, x1 : x2 + 1] = wall_id  # bedrock
+        elif name == "breakable":
+            # A crumbling bridge: a SOLID foothold on the ground row (so the
+            # player walks/stands on it and reachability treats it as normal
+            # footing), but with a BOTTOMLESS PIT below — when a consumer's
+            # break fuse fires the tile is removed and the player falls. Keep
+            # spans SHORT: v1 reachability assumes it is crossable and does
+            # NOT model the fuse timing.
+            x1, x2 = args
+            _check_x(name, x1, x2)
+            if "breakable" not in by_name:
+                raise DslError(
+                    "breakable: this game's tile registry has no 'breakable' "
+                    "tile."
+                )
+            grid[ground_row, x1 : x2 + 1] = by_name["breakable"].id
+            grid[height - 1, x1 : x2 + 1] = empty_id  # pit below — fall on break
         elif name in ("gap", "pit"):
             x1, x2 = args
             _check_x(name, x1, x2)

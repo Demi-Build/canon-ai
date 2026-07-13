@@ -495,7 +495,7 @@ class TestValidators:
 
         palette = {  # the real run's near-identical browns
             "background": "#1a1208", "ground": "#4b3b2b",
-            "platform": "#6b4a2a", "wall": "#473b32",
+            "platform": "#6b4a2a", "wall": "#473b32", "breakable": "#a08050",
             "danger": "#c43a0a", "water": "#4a3d1a",
         }
         out, adjusted = separate_structural_roles(palette, DEFAULT_TILES)
@@ -1356,7 +1356,7 @@ class TestEndToEnd:
         # Manifest ships the full game vocabulary for play surfaces.
         manifest = json.loads((run / "manifest.json").read_text())
         assert [t["name"] for t in manifest["tiles"]] == [
-            "empty", "floor", "platform", "wall", "spike", "water",
+            "empty", "floor", "platform", "wall", "breakable", "spike", "water",
         ]
         assert [v["name"] for v in manifest["variants"]] == [
             "elite", "champion", "relentless",
@@ -1666,6 +1666,49 @@ class TestTileRegistry:
             result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
             tiles=tiles,
         )
+
+
+class TestBreakableFloors:
+    """Chunk D: breakable(x1,x2) stamps a crumbling floor — a solid foothold
+    over a bottomless pit that a consumer's fuse removes in play."""
+
+    def test_breakable_stamps_solid_over_a_cleared_pit(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        bid = DEFAULT_TILES.by_name["breakable"].id
+        assert DEFAULT_TILES.by_name["breakable"].category == "solid"
+        res = stamp(
+            "floor(0,9)\nbreakable(10,12)\nfloor(13,23)\nspawn(2)\nexit(22)",
+            24, 16,
+        )
+        g = res.grid
+        # breakable on the ground row, bedrock CLEARED below (a pit to fall in)
+        assert [int(g[14, x]) for x in (9, 10, 12, 13)] == [1, bid, bid, 1]
+        assert [int(g[15, x]) for x in (10, 11, 12)] == [0, 0, 0]
+
+    def test_breakable_is_a_reachable_foothold(self) -> None:
+        # A solid breakable counts as footing, so a level bridged only by a
+        # breakable stretch is reachable (v1 ignores the break timing).
+        from examples.platformer_pack.validate import reachable_cells
+
+        res = stamp(
+            "floor(0,9)\nbreakable(10,12)\nfloor(13,23)\nspawn(2)\nexit(22)",
+            24, 16,
+        )
+        assert res.exit in reachable_cells(res.grid, res.spawn, DEFAULT_MOVEMENT)
+        assert not check_level(
+            res.grid, res.spawn, res.exit, DEFAULT_MOVEMENT
+        )
+
+    def test_breakable_rejected_without_registry_tile(self) -> None:
+        # A game whose registry has no breakable tile rejects the op loudly.
+        from examples.platformer_pack.tiles import load_tiles
+
+        no_break = load_tiles()
+        no_break.tiles = [t for t in no_break.tiles if t.name != "breakable"]
+        with pytest.raises(DslError, match="no 'breakable' tile"):
+            stamp("floor(0,9)\nbreakable(3,5)\nspawn(2)\nexit(8)",
+                  10, 16, tiles=no_break)
 
 
 class TestGenericOps:
@@ -2192,7 +2235,7 @@ class TestStyleGuide:
 
         good = {
             "background": "#2b2331", "ground": "#6e5a4e",
-            "platform": "#b8804a", "wall": "#5b4d5e",
+            "platform": "#b8804a", "wall": "#5b4d5e", "breakable": "#a08050",
             "danger": "#e0453a", "water": "#3a6ea5",
         }
         assert check_palette(good, DEFAULT_TILES) == []
@@ -2269,7 +2312,7 @@ class TestStyleGuide:
         # The exact palette shape the real model looped on.
         palette = {
             "background": "#2b1f2e", "ground": "#7a5c3a",
-            "platform": "#c8843a", "wall": "#c0a882",
+            "platform": "#c8843a", "wall": "#c0a882", "breakable": "#a08050",
             "danger": "#e84210", "water": "#1a4a6b",  # distance ~32: fails
         }
         repaired, adjusted = enforce_contrast(palette, DEFAULT_TILES)
@@ -2297,6 +2340,7 @@ class TestStyleGuide:
                 return json.dumps({"palette": {
                     "background": "#2b1f2e", "ground": "#7a5c3a",
                     "platform": "#c8843a", "wall": "#c0a882",
+                    "breakable": "#a08050",
                     "danger": "#e84210", "water": "#1a4a6b",
                 }})
             return good(request)
@@ -2325,7 +2369,10 @@ class TestStyleGuide:
         _run_slice(tmp_path / "run", responder=spy)
         assert len(prompts) == 1
         message = prompts[0]
-        assert "### ROLES: background,ground,platform,wall,danger,water" in message
+        assert (
+            "### ROLES: background,ground,platform,wall,breakable,danger,water"
+            in message
+        )
         assert "luminance distance >= 40" in message
         assert "dangerous at a glance" in message
 

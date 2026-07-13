@@ -106,6 +106,12 @@ var blocking := {}
 var one_way := {}
 var hazard := {}
 var volumes := {}
+# Breakable floors (sectioned-levels D) — the fuse mechanic below MUST match
+# platformer_play.py byte-for-byte (parity, verified via PLAT_TRAJ).
+var breakable_types := {}  # tile_type -> true (solid tiles that crumble)
+var tile_fuses := {}       # Vector2i(col,row) -> seconds of hold LEFT
+var tile_nodes := {}       # Vector2i(col,row) -> Sprite2D (freed on break)
+var break_delay_s := 0.6
 var slot_atlas := {}
 var slot_category := {}
 var bg_color := Color8(24, 24, 32)  # empty-slot sample = style palette
@@ -152,6 +158,7 @@ func _ready() -> void:
 	manifest = _load_json("res://manifest.json")
 	movement = manifest["movement"]
 	rules = manifest.get("rules", {})
+	break_delay_s = float(rules.get("break_delay_s", 0.6))
 	for v in manifest.get("variants", []):
 		variant_defs[str(v["name"])] = v
 	level_ids = manifest["levels"]
@@ -501,6 +508,8 @@ func _load_tileset() -> void:
 		match str(slot.get("collision", "")):
 			"solid":
 				blocking[tile_type] = true
+				if bool(slot.get("params", {}).get("breakable", false)):
+					breakable_types[tile_type] = true
 			"one_way":
 				one_way[tile_type] = true
 			"hazard":
@@ -522,6 +531,7 @@ func _load_level(index: int) -> void:
 	var level: Dictionary = _load_json(base + "/level.json")
 	grid = _load_json(base + "/collision.grid.json")["collision"]
 	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
+	tile_fuses.clear()  # per-level breakable state (broken tiles reset on reload)
 	var background: Array = _load_json(base + "/background.grid.json")["background"]
 	grid_h = grid.size()
 	grid_w = grid[0].size() if grid_h > 0 else 0
@@ -694,6 +704,7 @@ func _build_effects() -> void:
 
 
 func _build_tiles() -> void:
+	tile_nodes.clear()
 	for y in range(grid_h):
 		for x in range(grid_w):
 			var slot := int(terrain[y][x])
@@ -706,6 +717,9 @@ func _build_tiles() -> void:
 			sprite.position = Vector2(x, y) * CELL
 			sprite.scale = Vector2(CELL, CELL) / sprite.texture.get_size()
 			world_root.add_child(sprite)
+			# Remember a breakable tile's node so the fuse can free it on break.
+			if breakable_types.has(int(grid[y][x])):
+				tile_nodes[Vector2i(x, y)] = sprite
 
 
 func _build_markers(triggers: Array) -> void:
@@ -1487,6 +1501,34 @@ func _process(delta: float) -> void:
 	else:
 		player_pos.y = new_y
 		on_ground = false
+
+	# Breakable floors — byte-identical to platformer_play.py: the SAME
+	# deterministic foot probe (never the on_ground flag), the SAME countdown
+	# arithmetic, and a sorted deduped column list. At zero the collision cell
+	# is cleared (the player falls next tick) and the tile node freed.
+	if not breakable_types.is_empty():
+		var bfoot := int(player_pos.y + 1.01)
+		if player_vy >= -0.01:
+			var bcols := {}
+			bcols[int(player_pos.x + BODY_L)] = true
+			bcols[int(player_pos.x + BODY_R)] = true
+			var sorted_cols := bcols.keys()
+			sorted_cols.sort()
+			for bx in sorted_cols:
+				if bx < 0 or bx >= grid_w or bfoot < 0 or bfoot >= grid_h:
+					continue
+				if not breakable_types.has(int(grid[bfoot][bx])):
+					continue
+				var bkey := Vector2i(bx, bfoot)
+				var rem: float = float(tile_fuses.get(bkey, break_delay_s)) - delta
+				if rem <= 0.0:
+					grid[bfoot][bx] = 0  # crumble — empty, player falls
+					tile_fuses.erase(bkey)
+					if tile_nodes.has(bkey):
+						(tile_nodes[bkey] as Node).queue_free()
+						tile_nodes.erase(bkey)
+				else:
+					tile_fuses[bkey] = rem
 
 	# Damaging volumes (swimmable lava): drain hearts continuously —
 	# every accumulated point costs one heart; the fraction resets on

@@ -43,7 +43,13 @@ from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
 
 def standable_cells(grid, tiles: TileRegistry = DEFAULT_TILES) -> set[tuple[int, int]]:
-    """Cells a body can stand in: empty with solid/one-way support below."""
+    """Cells a body can stand in: empty with solid/one-way support below.
+
+    A ``breakable`` tile is ``solid`` category, so it counts as support here —
+    reachability treats a crumbling floor as a PERMANENT foothold. v1 does NOT
+    model the break fuse (a consumer-only mechanic), so this is deliberately
+    conservative: a level is never rejected for footing that can break, even
+    though a slow player could fall through it."""
     height, width = grid.shape
     empty = tiles.empty_id
     support = tiles.ids("solid", "one_way")

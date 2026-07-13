@@ -48,6 +48,7 @@ class TileType(IntEnum):
     FLOOR = 1
     PLATFORM = 2
     WALL = 3
+    BREAKABLE = 4  # solid foothold that crumbles after a fuse (sectioned-levels D)
     SPIKE = 10
     WATER = 20
 
