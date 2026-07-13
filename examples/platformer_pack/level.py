@@ -17,6 +17,8 @@ path). One body, two schedulers — the outputs must be byte-identical.
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from canon.bible.artifacts import make_artifact_id
@@ -37,13 +39,23 @@ from examples.platformer_pack.phases import (
     warn,
 )
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.sections import (
+    DEFAULT_VOCAB,
+    SECTION_OVERLAP,
+    PlannedSection,
+    SectionArchetype,
+    composite,
+    plan_sections,
+    section_owner_of_cell,
+)
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
-    auto_bridge,
+    auto_bridge_grid,
     check_placements,
     flyer_spot_exists,
-    snap_checkpoints,
-    snap_spawn,
+    place_exit,
+    snap_checkpoints_grid,
+    snap_spawn_grid,
     standable_cells,
     swimmer_spot_exists,
     volume_cells,
@@ -111,6 +123,426 @@ def world_stages(ctx: Any) -> list:
 # ---------------------------------------------------------------------------
 
 
+#: Fraction of ELIGIBLE levels composed as a VERTICAL climb (deterministic per
+#: level). Only stages 2+ are eligible — stage-1 levels (a world's intro) stay
+#: side-scrolling so the player learns the basics on flat ground first.
+VERTICAL_FRACTION = 0.4
+
+
+def _roll_level_axis(ctx: Any, level_id: str, phase_name: str, stage_number: int) -> str:
+    """Deterministically pick a level's layout AXIS. Vertical climbs appear
+    only from stage 2 on (a progression: horizontal intros, vertical variety
+    later), on a per-level roll keyed independently of the dims/plan rolls."""
+    if stage_number < 2:
+        return "horizontal"
+    seed = str(getattr(ctx.config, "seed", ""))
+    r = derive_rng(seed, phase_name, level_id, "axis").random()
+    return "vertical" if r < VERTICAL_FRACTION else "horizontal"
+
+
+def _vertical_dims(width: int, height: int) -> tuple[int, int]:
+    """Recast a rolled (wide, short) level into TALL + NARROW for a climb: the
+    wide dimension becomes the HEIGHT (the ascent), the short becomes the WIDTH
+    (a shaft). Clamped to sane bands (Chunk F widens them)."""
+    v_width = min(max(height, 16), 22)
+    v_height = min(max(width, 40), 56)
+    return v_width, v_height
+
+
+def _roll_level_knobs(
+    ctx: Any,
+    level_id: str,
+    index: int,
+    *,
+    phase_name: str,
+    default_width: int,
+    default_height: int,
+) -> tuple[dict, int, int, str]:
+    """The rolled difficulty knobs + dims + AXIS for a level — the DETERMINISTIC
+    roll (difficulty escalates across the WORLD: stage position + level
+    position, clamped to the schema's 1..3 table; the schema keys off this
+    context, code computes the progression). A VERTICAL level recasts its dims
+    to tall+narrow. Factored so the placement phase can recompute the exact
+    same section plan (dims + axis) without a persisted field."""
+    spec = load_skeleton_spec(SCHEMAS_DIR / "level_layout.json")
+    stage = _stage_for_level(ctx, level_id)
+    seed = str(getattr(ctx.config, "seed", ""))
+    stage_number = _stage_number(ctx, stage.stage_id)
+    roll_context = {
+        "level_number": min(stage_number + index, 3),
+        "stage_number": stage_number,
+    }
+    knobs = roll_skeleton(
+        spec, derive_rng(seed, phase_name, level_id), context=roll_context
+    )
+    # Variable dims (GridDims, §4.2): schema-rolled per level; the defaults
+    # are the fallback for schemas without them.
+    width = int(knobs.get("grid_width", default_width))
+    height = int(knobs.get("grid_height", default_height))
+    axis = _roll_level_axis(ctx, level_id, phase_name, stage_number)
+    if axis == "vertical":
+        width, height = _vertical_dims(width, height)
+    return knobs, width, height, axis
+
+
+def level_section_plan(
+    ctx: Any,
+    level: Level,
+    *,
+    layout_phase: str = "plat:layout",
+    default_width: int = 48,
+    default_height: int = 16,
+) -> list[PlannedSection]:
+    """Recompute the (deterministic) section plan the layout phase stitched, so
+    a LATER phase (placement) can read the section map without a persisted
+    field. Uses the level's stored dims + a re-derived difficulty, keyed on the
+    LAYOUT phase name so the roll matches ``_generate_sectioned_level`` exactly."""
+    stage = _stage_for_level(ctx, level.level_id)
+    index = (
+        stage.level_ids.index(level.level_id)
+        if level.level_id in stage.level_ids
+        else 0
+    )
+    knobs, _, _, axis = _roll_level_knobs(
+        ctx, level.level_id, index, phase_name=layout_phase,
+        default_width=default_width, default_height=default_height,
+    )
+    difficulty = int(knobs.get("difficulty", 1))
+    seed = str(getattr(ctx.config, "seed", ""))
+    return plan_sections(
+        level.grid_width, level.grid_height, difficulty,
+        derive_rng(seed, layout_phase, level.level_id, "plan"),
+        axis=axis,
+    )
+
+
+def section_encounter_summary(
+    plan: list[PlannedSection],
+    vocab: dict[str, SectionArchetype] = DEFAULT_VOCAB,
+    axis: str = "horizontal",
+) -> str:
+    """A compact per-section ENCOUNTER map for the placement prompt — which
+    whole-level ranges are combat/mixed (concentrate enemies) vs traversal
+    (lighter). Text only (I3), derived from the section archetypes' encounter
+    dimension; the range is columns (horizontal) or rows (vertical)."""
+    label, off = ("cols", "x_off") if axis == "horizontal" else ("rows", "y_off")
+    return "; ".join(
+        f"{label} {getattr(ps, off)}-{getattr(ps, off) + ps.length - 1} "
+        f"{ps.archetype} ({vocab[ps.archetype].encounter})"
+        for ps in plan
+        if ps.archetype in vocab
+    )
+
+
+@dataclass
+class _SectionState:
+    """One generated section: its plan slot, the accepted local DSL, the
+    stamped local sub-grid, whether it fell back to flat, and its retry log."""
+
+    ps: PlannedSection
+    dsl: str
+    res: StampResult
+    fell_back: bool
+    attempts: list[dict[str, Any]]
+
+
+def _section_fallback_dsl(
+    local_w: int, local_h: int, index: int, axis: str
+) -> str:
+    """A guaranteed-VALID (and REACHABLE) section (the per-section analogue of
+    :func:`_fallback_dsl`).
+    - horizontal: a flat floor; the FIRST section also plants the spawn.
+    - vertical: a climbable ladder of staggered platforms (2 rows apart, dx 1
+      so every step is jumpable); the FIRST (bottom) section also lays the
+      ground floor + spawn.
+    NO section declares the exit — the stitcher places it (goal mode)."""
+    if axis == "vertical":
+        lines: list[str] = []
+        if index == 0:
+            lines += [f"floor(0,{local_w - 1})", "spawn(2)"]
+        y = local_h - 4
+        i = 0
+        while y >= 1:
+            lines.append(f"platform({2 + i % 2},{y},2)")
+            y -= 2
+            i += 1
+        return "\n".join(lines) or f"platform(2,{max(1, local_h - 4)},2)"
+    base = f"floor(0,{local_w - 1})"
+    return f"{base}\nspawn(2)" if index == 0 else base
+
+
+def _generate_one_section(
+    ctx: Any,
+    *,
+    level_id: str,
+    brief: str,
+    ps: PlannedSection,
+    arch: SectionArchetype,
+    index: int,
+    total: int,
+    local_w: int,
+    local_h: int,
+    axis: str,
+    movement: PlayerMovementSpec,
+    rules: GameRules,
+    tiles: TileRegistry,
+    seam: str | None,
+    phase_name: str,
+    initial_feedback: list[str] | None = None,
+    previous: str | None = None,
+) -> _SectionState:
+    """Generate ONE section: Layout Agent → local DSL → stamped local sub-grid
+    at the section's own (``local_w`` x ``local_h``) dims. ``retry_with_feedback``
+    covers LOCAL validity (stamps without a ``DslError``; the first section must
+    plant a spawn). Falls back to a flat floor / climbable ladder.
+    ``initial_feedback``/``previous`` seed a whole-level-driven regeneration's
+    FIRST attempt (the stitcher routed a design problem here)."""
+    last_attempt: dict[str, str | None] = {"content": previous}
+
+    def generate(
+        feedback: list[str] | None = None, max_tokens: int | None = None
+    ) -> str:
+        # retry_with_feedback passes feedback=None on attempt 1 (kwarg name
+        # MUST be `feedback` — _call_generate strips unknown kwargs); seed that
+        # first call with any whole-level feedback the stitcher routed here.
+        eff_fb = feedback if feedback is not None else initial_feedback
+        request = ctx.prompts.section_layout(
+            level_id, brief, ps.archetype, arch.flavor, arch.feature_bias,
+            index, total, local_w, local_h, movement, rules=rules, tiles=tiles,
+            seam=seam, intensity=arch.intensity, water=arch.water, axis=axis,
+            previous=last_attempt["content"], feedback=eff_fb,
+        )
+        if max_tokens is not None:
+            request.max_tokens = max_tokens
+        content = ctx.llm.generate(
+            request, phase=f"{phase_name}:{level_id}:s{index}"
+        )
+        last_attempt["content"] = content
+        return content
+
+    def validate(content: str) -> tuple[bool, list[str]]:
+        try:
+            res = stamp(
+                content, local_w, local_h, tiles=tiles, validate_markers=False
+            )
+        except DslError as exc:
+            return False, list(exc.problems)
+        if index == 0 and res.spawn is None:
+            return False, [
+                "The FIRST section must declare exactly one spawn(x) on clear "
+                "flat floor near the "
+                + ("bottom-left." if axis == "vertical" else "left.")
+            ]
+        return True, []
+
+    fallback = _section_fallback_dsl(local_w, local_h, index, axis)
+    attempts: list[dict[str, Any]] = []
+    text = retry_with_feedback(
+        generate_fn=generate,
+        validate_fn=validate,
+        fallback=fallback,
+        max_retries=getattr(ctx.config, "max_retries", 3),
+        label=f"{phase_name}:{level_id}:s{index}",
+        attempt_log=attempts,
+        token_escalation=default_token_escalation,
+        initial_max_tokens=max(512, min(2048, local_w * local_h)),
+    )
+    # Fell back only if NO attempt validated (retry_with_feedback then returns
+    # the fallback) — never by comparing text to the fallback string, since a
+    # flat section (a runway) legitimately generates the same flat DSL.
+    fell = not any(a["outcome"] == "passed" for a in attempts)
+    for a in attempts:
+        a["section"] = index
+        a["archetype"] = ps.archetype
+    res = stamp(text, local_w, local_h, tiles=tiles, validate_markers=False)
+    return _SectionState(
+        ps=ps, dsl=text, res=res, fell_back=fell, attempts=attempts
+    )
+
+
+def _stitch_and_repair(
+    states: list[_SectionState],
+    width: int,
+    height: int,
+    axis: str,
+    movement: PlayerMovementSpec,
+    rules: GameRules,
+    tiles: TileRegistry,
+) -> tuple[StampResult, list[str], list[str], list[str]]:
+    """Composite the section sub-grids into the whole level, place the
+    whole-level exit (right edge for horizontal, the climb SUMMIT for vertical —
+    "goal mode"), run the COMPUTABLE repairs (snap spawn/checkpoints +
+    auto_bridge) on the whole grid, and return ``(result, bridges, snaps,
+    problems)`` — ``problems`` is the whole-level ``check_level`` residue
+    (DESIGN failures the owning section must fix)."""
+    parts = [(st.res, st.ps.x_off, st.ps.y_off) for st in states]
+    whole = composite(parts, width, height)
+    exclude = {whole.spawn[0]} if whole.spawn else set()
+    exit_ = place_exit(whole.grid, tiles, exclude=exclude, axis=axis)
+    if exit_ is None:
+        whole.exit = None
+        edge = "top has no standable platform" if axis == "vertical" else (
+            "right edge has no open ground floor"
+        )
+        return whole, [], [], [
+            f"exit: the level's {edge} to exit onto — the FINAL section must "
+            "end on solid standable ground."
+        ]
+    whole.spawn, spawn_moves = snap_spawn_grid(
+        whole.grid, whole.spawn, exit_, tiles
+    )
+    whole.triggers, cp_moves = snap_checkpoints_grid(
+        whole.grid, whole.triggers, tiles
+    )
+    grid, bridges, problems = auto_bridge_grid(
+        whole.grid, whole.spawn, exit_, movement, rules=rules, tiles=tiles,
+        triggers=whole.triggers, free_volume=whole.free_volume,
+    )
+    whole.grid = grid
+    whole.exit = exit_
+    return whole, bridges, spawn_moves + cp_moves, problems
+
+
+def _owner_of_problem(
+    plan: list[PlannedSection], problems: list[str], axis: str
+) -> int:
+    """Route the first whole-level problem to the section that owns its cell
+    (by x-range for horizontal, y-range for vertical); a cell-less message
+    (exit/containment at the far edge) goes to the LAST section."""
+    for p in problems:
+        m = re.search(r"\((\d+),\s*(\d+)\)", p)
+        if m:
+            return section_owner_of_cell(
+                plan, int(m.group(1)), int(m.group(2)), axis
+            )
+    return len(plan) - 1
+
+
+def _section_feedback(
+    problems: list[str], ps: PlannedSection, axis: str
+) -> list[str]:
+    """Whole-level problems + a note translating them to the section's local
+    coordinate frame (its own origin at 0,0)."""
+    if axis == "vertical":
+        note = (
+            f"(WHOLE-LEVEL coordinates; THIS section occupies rows "
+            f"{ps.y_off}..{ps.y_off + ps.length - 1}. Subtract {ps.y_off} from "
+            "the row for your local row.)"
+        )
+    else:
+        note = (
+            f"(WHOLE-LEVEL coordinates; THIS section occupies columns "
+            f"{ps.x_off}..{ps.x_off + ps.length - 1}. Subtract {ps.x_off} from "
+            "the column for your local column.)"
+        )
+    return list(problems) + [note]
+
+
+def _section_local_dims(
+    ps: PlannedSection, width: int, height: int, axis: str
+) -> tuple[int, int]:
+    """A section's OWN (local_w, local_h) — horizontal sections are the level's
+    height and their own width; vertical sections are the level's width and
+    their own height."""
+    return (ps.length, height) if axis == "horizontal" else (width, ps.length)
+
+
+def _generate_sectioned_level(
+    ctx: Any,
+    *,
+    level_id: str,
+    brief: str,
+    knobs: dict,
+    width: int,
+    height: int,
+    axis: str,
+    movement: PlayerMovementSpec,
+    rules: GameRules,
+    tiles: TileRegistry,
+    seed: str,
+    phase_name: str,
+) -> tuple[StampResult, str, bool, list[dict], list[str], list[str]]:
+    """Plan sections → generate each (seam-threaded) → stitch → whole-grid
+    repair → whole-level check, regenerating only the owning section on a
+    design failure. Handles BOTH axes: horizontal sections tile the width
+    (exit at the right edge), vertical sections stack up the height (spawn at
+    the bottom, exit at the summit). Returns the whole-level ``StampResult``
+    plus the combined DSL record, the fallback flag, the aggregated attempt
+    log, and the bridge/snap notes for logging."""
+    difficulty = int(knobs.get("difficulty", 1))
+    plan = plan_sections(
+        width, height, difficulty,
+        derive_rng(seed, phase_name, level_id, "plan"), axis=axis,
+    )
+    total = len(plan)
+    max_retries = getattr(ctx.config, "max_retries", 3)
+
+    def gen(idx: int, ps: PlannedSection, seam, feedback, previous):
+        lw, lh = _section_local_dims(ps, width, height, axis)
+        return _generate_one_section(
+            ctx, level_id=level_id, brief=brief, ps=ps,
+            arch=DEFAULT_VOCAB[ps.archetype], index=idx, total=total,
+            local_w=lw, local_h=lh, axis=axis, movement=movement,
+            rules=rules, tiles=tiles, seam=seam, phase_name=phase_name,
+            initial_feedback=feedback, previous=previous,
+        )
+
+    # 1) Generate every section once, threading each section's outgoing seam
+    #    summary (right edge / top) into the next section (text, never a grid).
+    states: list[_SectionState] = []
+    seam: str | None = None
+    for idx, ps in enumerate(plan):
+        st = gen(idx, ps, seam, None, None)
+        states.append(st)
+        seam = seam_summary(st.res, axis=axis, tiles=tiles)
+
+    # 2) Stitch + whole-grid repair; on a DESIGN failure regenerate ONLY the
+    #    owning section with located feedback and re-stitch (bounded). v1
+    #    sections meet on a continuous seam, so downstream sections are not
+    #    re-generated (a v1 simplification).
+    whole_fallback = False
+    for attempt in range(max_retries + 1):
+        result, bridges, snaps, problems = _stitch_and_repair(
+            states, width, height, axis, movement, rules, tiles
+        )
+        if not problems:
+            break
+        if attempt == max_retries:
+            # Out of retries: fall the WHOLE level back to a flat guaranteed
+            # layout (a misbehaving model still yields a walkable level).
+            whole_fallback = True
+            result = stamp(_fallback_dsl(width), width, height, tiles=tiles)
+            bridges, snaps = [], []
+            break
+        owner = _owner_of_problem(plan, problems, axis)
+        ps = plan[owner]
+        prev_seam = (
+            seam_summary(states[owner - 1].res, axis=axis, tiles=tiles)
+            if owner > 0
+            else None
+        )
+        states[owner] = gen(
+            owner, ps, prev_seam,
+            _section_feedback(problems, ps, axis), states[owner].dsl,
+        )
+
+    section_fallbacks = sum(1 for st in states if st.fell_back)
+    attempts: list[dict[str, Any]] = [a for st in states for a in st.attempts]
+    if whole_fallback:
+        dsl_text = _fallback_dsl(width)
+    else:
+        dsl_text = "\n".join(
+            f"### SECTION {i}: {st.ps.archetype} "
+            + (f"@x={st.ps.x_off}" if axis == "horizontal" else f"@y={st.ps.y_off}")
+            + f" w={st.ps.length}\n{st.dsl}"
+            for i, st in enumerate(states)
+        )
+        if bridges:
+            dsl_text += "\n# auto-bridge (whole-level)\n" + "\n".join(bridges)
+    fell_back = whole_fallback or section_fallbacks > 0
+    return result, dsl_text, fell_back, attempts, bridges, snaps
+
+
 def stamp_level_collision(
     ctx: Any,
     level_id: str,
@@ -124,31 +556,19 @@ def stamp_level_collision(
     default_height: int = 16,
     phase_name: str = "plat:layout",
 ) -> Level:
-    """Layout Agent → stamp → collision.npz; creates the Level entity
-    (registered in the Bible) carrying spawn/exit/hazards/triggers/brief."""
-    spec = load_skeleton_spec(SCHEMAS_DIR / "level_layout.json")
+    """Layout Agents (one per SECTION) → stitch → collision.npz; creates the
+    Level entity (registered in the Bible) carrying spawn/exit/hazards/
+    triggers/brief. The level is a SEQUENCE of typed sections (sections.py):
+    each is generated at its own local dims and composited into the full grid,
+    then the whole level is repaired (bridge/snap) and validated as one."""
     stage = _stage_for_level(ctx, level_id)
     stage_id = stage.stage_id
     seed = str(getattr(ctx.config, "seed", ""))
     brief = _level_brief(ctx, level_id)
-
-    # Difficulty escalates across the WORLD: stage position + level
-    # position within the stage, clamped to the schema's 1..3 table
-    # (stage 1 → 1,2,3; stage 2 → 2,3,3; stage 3 → 3,3,3). The schema
-    # keys off this context value (depends_on_context) — code computes
-    # the progression, the table stays data.
-    stage_number = _stage_number(ctx, stage_id)
-    roll_context = {
-        "level_number": min(stage_number + index, 3),
-        "stage_number": stage_number,
-    }
-    knobs = roll_skeleton(
-        spec, derive_rng(seed, phase_name, level_id), context=roll_context
+    knobs, width, height, axis = _roll_level_knobs(
+        ctx, level_id, index, phase_name=phase_name,
+        default_width=default_width, default_height=default_height,
     )
-    # Variable dims (GridDims, §4.2): schema-rolled per level; the
-    # defaults are the fallback for schemas without them.
-    width = int(knobs.get("grid_width", default_width))
-    height = int(knobs.get("grid_height", default_height))
     # Per-level camera framing: a deliberate stage-plan exception
     # ("intimate"/"vista"), resolved to cells here so consumers read a
     # number, not a vocabulary. Resume path (stage phase skipped, hints
@@ -158,74 +578,22 @@ def stamp_level_collision(
     if not hint:
         prior = ctx.bible.levels.get(level_id)
         view_cells = prior.view_cells if prior is not None else None
-    last_attempt: dict[str, str | None] = {"content": None}
-    accepted: dict[str, Any] = {"dsl": None, "bridges": []}
-
-    def generate(
-        feedback: list[str] | None = None, max_tokens: int | None = None
-    ) -> str:
-        request = ctx.prompts.layout_generation(
-            level_id, brief, knobs, width, height,
-            movement, rules=rules, tiles=tiles,
-            previous=last_attempt["content"], feedback=feedback,
+    # A vertical level frames by HEIGHT (a tall shaft): show ~view_rows rows.
+    view_rows = graphics.view_rows if axis == "vertical" else None
+    result, dsl_text, fell_back, attempts, bridges, snaps = (
+        _generate_sectioned_level(
+            ctx, level_id=level_id, brief=brief, knobs=knobs,
+            width=width, height=height, axis=axis, movement=movement,
+            rules=rules, tiles=tiles, seed=seed, phase_name=phase_name,
         )
-        if max_tokens is not None:
-            request.max_tokens = max_tokens
-        content = ctx.llm.generate(request, phase=f"{phase_name}:{level_id}")
-        last_attempt["content"] = content
-        return content
-
-    def validate(content: str) -> tuple[bool, list[str]]:
-        # Design problems (DSL errors, spilled pools) go back to the
-        # agent; reachability breaks and spawn/checkpoint COLUMNS are
-        # ARITHMETIC — the bridge/snap tools repair them in code (never
-        # an LLM round-trip; the first multi-stage run lost three levels
-        # to spawn-only failures before spawn joined the snap tools).
-        try:
-            content, spawn_moves = snap_spawn(
-                content, width, height, tiles=tiles
-            )
-            content, snaps = snap_checkpoints(
-                content, width, height, tiles=tiles
-            )
-            repaired, bridges, problems = auto_bridge(
-                content, width, height, movement, rules=rules, tiles=tiles
-            )
-        except DslError as exc:
-            # Final-grid marker checks report every problem at once —
-            # feed them back as separate items, not one blob (the l3
-            # trace showed one-error-per-attempt serializing discovery).
-            return False, list(exc.problems)
-        if problems:
-            return False, problems
-        accepted["dsl"], accepted["bridges"] = repaired, bridges
-        accepted["snaps"] = spawn_moves + snaps
-        return True, []
-
-    fallback_dsl = _fallback_dsl(width)
-    attempts: list[dict[str, Any]] = []
-    raw_text = retry_with_feedback(
-        generate_fn=generate,
-        validate_fn=validate,
-        fallback=fallback_dsl,
-        max_retries=getattr(ctx.config, "max_retries", 3),
-        label=f"{phase_name}:{level_id}",
-        attempt_log=attempts,
-        # Wide difficulty-3 grids need more ops than the prompt's 512-token
-        # default allows — a truncated program is a guaranteed DslError, and
-        # identical caps across retries made that failure unrecoverable.
-        # The initial budget scales with GRID AREA (an 82x23 finale wants
-        # ~2x the ops of a 43x15 opener); escalation still multiplies it.
-        token_escalation=default_token_escalation,
-        initial_max_tokens=max(768, min(2048, width * height)),
     )
-    fell_back = raw_text == fallback_dsl
     if fell_back:
         warn(
             ctx,
-            f"layout {level_id}: LLM output never validated; level is "
-            "the flat FALLBACK layout, not generated content. Attempt "
-            f"trace: review/{stage_id}/{level_id}_layout_attempts.json",
+            f"layout {level_id}: one or more sections never validated; the "
+            "level is (partly) the flat FALLBACK layout, not generated "
+            f"content. Attempt trace: review/{stage_id}/"
+            f"{level_id}_layout_attempts.json",
         )
     trace_rel = f"review/{stage_id}/{level_id}_layout_attempts.json"
     if any(a["outcome"] != "passed" for a in attempts):
@@ -249,22 +617,18 @@ def stamp_level_collision(
         # leftover "fallback": true would contradict the level it sits
         # beside.
         ctx.adapter.resolve_path(trace_rel).unlink(missing_ok=True)
-    dsl_text = accepted["dsl"] or raw_text
-    bridges: list[str] = accepted["bridges"]
     if bridges:
         logger.info(
             "Layout %s: auto-bridged %d reachability break(s) — %s "
             "(agent design kept; geometry is tool work).",
             level_id, len(bridges), ", ".join(bridges),
         )
-    snaps: list[str] = accepted.get("snaps") or []
     if snaps:
         logger.info(
-            "Layout %s: snapped %d checkpoint(s) to valid ground — %s "
+            "Layout %s: snapped %d marker(s) to valid ground — %s "
             "(agent design kept; column lookup is tool work).",
             level_id, len(snaps), ", ".join(snaps),
         )
-    result: StampResult = stamp(dsl_text, width, height, tiles=tiles)
     for note in result.repairs:
         logger.info(
             "Layout %s: stamp repair — %s (agent design kept; the fix "
@@ -284,6 +648,8 @@ def stamp_level_collision(
         grid_width=width,
         grid_height=height,
         view_cells=view_cells,
+        layout_axis=axis,
+        view_rows=view_rows,
         brief=brief,
         spawn=result.spawn,
         exit=result.exit,
@@ -411,6 +777,12 @@ def place_level_entities(
     summary = _cells_summary(sorted(standable_cells(grid, tiles)))
     volume_summary = _volume_summary(grid, tiles)
     air_summary = _air_summary(grid, tiles)
+    # The section ENCOUNTER map (recomputed deterministically — no persisted
+    # field): steers the agent to concentrate enemies in combat/mixed stretches
+    # and keep traversal stretches lighter. Chunk-B archetype character.
+    encounter_summary = section_encounter_summary(
+        level_section_plan(ctx, level), axis=level.layout_axis
+    )
     brief = level.brief or _level_brief(ctx, level_id)
     accepted_holder: dict[str, list[dict]] = {"placements": []}
     last_attempt: dict[str, str | None] = {"content": None}
@@ -421,7 +793,7 @@ def place_level_entities(
         request = ctx.prompts.placement_generation(
             level_id, brief, roster, summary, max_enemies,
             spawn=spawn, volume_summary=volume_summary,
-            air_summary=air_summary,
+            air_summary=air_summary, encounter_summary=encounter_summary,
             variants=variants, rules=rules, combat=combat,
             previous=last_attempt["content"], feedback=feedback,
         )
@@ -694,6 +1066,39 @@ def _cells_summary(cells: list[tuple[int, int]]) -> str:
                     start = cur
         parts.append(f"y={y}: x {', '.join(ranges)}")
     return "; ".join(parts) or "none"
+
+
+def seam_summary(
+    res: StampResult,
+    axis: str = "horizontal",
+    overlap: int = SECTION_OVERLAP,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> str:
+    """One-line hand-off summary of the edge a section passes to its NEIGHBOUR
+    — the standable footing near the boundary as TEXT, never a raw grid (I3).
+    - horizontal: the RIGHT edge (rightmost ``overlap`` columns) → the next
+      section's left.
+    - vertical: the TOP edge (topmost ``overlap`` rows) → the footholds the
+      climber reaches entering the section above.
+    A boundary with no footing says so, so the neighbour doesn't assume ground.
+    """
+    grid = res.grid
+    height, width = grid.shape
+    stand = standable_cells(grid, tiles)
+    if axis == "vertical":
+        hi = min(height, overlap)
+        band = sorted((x, y) for (x, y) in stand if 0 <= y < hi)
+        edge = "top"
+    else:
+        lo = max(0, width - overlap)
+        band = sorted((x, y) for (x, y) in stand if lo <= x < width)
+        edge = "right edge"
+    if not band:
+        return (
+            f"the {edge} has NO footing — it is open air or a pit; do not "
+            "assume the ground continues there"
+        )
+    return f"standable footing near the {edge} — " + _cells_summary(band)
 
 
 # ---------------------------------------------------------------------------

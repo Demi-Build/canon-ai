@@ -996,6 +996,194 @@ def auto_bridge(
         added.append(op)
 
 
+# --------------------------------------------------------------------------
+# Grid-native repair — the sectioned-levels path composites section sub-grids
+# into ONE whole-level grid (sections.composite), so there is no whole-level
+# DSL text for the text tools above to rewrite. These twins run the SAME
+# computable repairs directly on the composited grid + markers, reusing the
+# grid-based cores (check_level / reachable_cells / _locate_break /
+# _suggest_bridge). Same doctrine: geometry/columns are arithmetic (code
+# fixes them), design stays the agent's.
+# --------------------------------------------------------------------------
+
+
+def _floor_id(tiles: TileRegistry) -> int:
+    return next(t.id for t in tiles.tiles if t.name == "floor")
+
+
+def place_exit(
+    grid,
+    tiles: TileRegistry = DEFAULT_TILES,
+    exclude: set[int] | None = None,
+    axis: str = "horizontal",
+) -> tuple[int, int] | None:
+    """Where the stitcher plants the whole-level exit (sections never declare
+    their own — the "goal mode" lives here, not in the DSL).
+
+    - ``horizontal``: the RIGHTMOST ground-floored column with an open standing
+      cell (mirrors ``dsl.stamp``'s side-scroller exit relocation). ``exclude``
+      skips columns (e.g. the spawn).
+    - ``vertical``: the climb SUMMIT — the TOPMOST standable cell (smallest y),
+      leftmost on ties. A vertical level exits at the top, not the right edge.
+
+    None when no such cell exists (a design failure the caller surfaces)."""
+    height, width = grid.shape
+    exclude = exclude or set()
+    if axis == "vertical":
+        stand = standable_cells(grid, tiles)
+        summit = min(
+            (c for c in stand if c[0] not in exclude),
+            key=lambda c: (c[1], c[0]),
+            default=None,
+        )
+        return summit
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = _floor_id(tiles)
+    for x in range(width - 1, -1, -1):
+        if x in exclude:
+            continue
+        if int(grid[ground_row, x]) == floor_id and int(grid[standing_row, x]) == 0:
+            return (x, standing_row)
+    return None
+
+
+def snap_spawn_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    tiles: TileRegistry = DEFAULT_TILES,
+    max_snap: int = MAX_SPAWN_SNAP,
+) -> tuple[tuple[int, int] | None, list[str]]:
+    """Grid twin of :func:`snap_spawn`: move a stranded spawn to the nearest
+    ground-floored, open column within ``max_snap`` (skipping the exit's
+    column). Returns ``(spawn, moves)`` — ``spawn`` unchanged when already
+    valid or unfixable."""
+    if spawn is None:
+        return spawn, []
+    height, width = grid.shape
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = _floor_id(tiles)
+    exit_col = exit_[0] if exit_ else None
+
+    def _valid(col: int) -> bool:
+        return (
+            0 <= col < width
+            and col != exit_col
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    x = spawn[0]
+    if _valid(x):
+        return spawn, []
+    snapped = next(
+        (c for d in range(1, max_snap + 1) for c in (x - d, x + d) if _valid(c)),
+        None,
+    )
+    if snapped is None:
+        return spawn, []
+    return (snapped, standing_row), [f"spawn({x}) -> spawn({snapped})"]
+
+
+def snap_checkpoints_grid(
+    grid,
+    triggers: list[SparseMaskEntry],
+    tiles: TileRegistry = DEFAULT_TILES,
+    max_snap: int = MAX_CHECKPOINT_SNAP,
+) -> tuple[list[SparseMaskEntry], list[str]]:
+    """Grid twin of :func:`snap_checkpoints`: move each checkpoint trigger
+    whose column lost its floor (or whose standing cell is occupied) to the
+    nearest valid column within ``max_snap``, never colliding two onto one
+    column. Non-checkpoint triggers ride through untouched. Returns
+    ``(triggers, moves)``."""
+    height, width = grid.shape
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = _floor_id(tiles)
+
+    def _valid(col: int, taken: set[int]) -> bool:
+        return (
+            0 <= col < width
+            and col not in taken
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    out: list[SparseMaskEntry] = []
+    moves: list[str] = []
+    taken: set[int] = set()
+    for t in triggers:
+        if t.type != "checkpoint":
+            out.append(t)
+            continue
+        x = t.x
+        if _valid(x, taken):
+            taken.add(x)
+            out.append(t)
+            continue
+        snapped = next(
+            (
+                c
+                for d in range(1, max_snap + 1)
+                for c in (x - d, x + d)
+                if _valid(c, taken)
+            ),
+            None,
+        )
+        if snapped is None:
+            taken.add(x)  # unfixable here — check_level's error is the feedback
+            out.append(t)
+            continue
+        taken.add(snapped)
+        out.append(t.model_copy(update={"x": snapped, "y": standing_row}))
+        moves.append(f"checkpoint({x}) -> checkpoint({snapped})")
+    return out, moves
+
+
+def auto_bridge_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    movement: PlayerMovementSpec,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+    triggers: list[SparseMaskEntry] | None = None,
+    free_volume: set | None = None,
+    max_bridges: int = MAX_AUTO_BRIDGES,
+) -> tuple[object, list[str], list[str]]:
+    """Grid twin of :func:`auto_bridge`: stamp computed ``platform`` bridges
+    DIRECTLY onto the composited grid (non-empty-wins) until ``check_level``
+    passes. Mutates and returns ``grid``. ``added`` lists the bridge ops for
+    the log; ``problems`` is non-empty only when a DESIGN problem remains
+    (never repaired here — that is the owning section's to fix)."""
+    from examples.platformer_pack.dsl import stamp
+
+    height, width = grid.shape
+    added: list[str] = []
+    while True:
+        problems = check_level(
+            grid, spawn, exit_, movement, rules=rules, tiles=tiles,
+            triggers=triggers, free_volume=free_volume,
+        )
+        if not problems:
+            return grid, added, []
+        if not all("is not reachable from spawn" in p for p in problems):
+            return grid, added, problems
+        if len(added) >= max_bridges:
+            return grid, added, problems
+        stand = standable_cells(grid, tiles)
+        reached = reachable_cells(grid, spawn, movement, tiles)
+        frontier, nearest = _locate_break(stand, reached)
+        if nearest is None:  # pragma: no cover — guarded by check_level
+            return grid, added, problems
+        op = _suggest_bridge(grid, frontier, nearest, movement, tiles)
+        if op is None or op in added:
+            return grid, added, problems
+        sub = stamp(op, width, height, tiles=tiles, validate_markers=False)
+        mask = sub.grid != 0
+        grid[mask] = sub.grid[mask]  # non-empty wins (bridge lands in air)
+        added.append(op)
+
+
 #: How far a spawn-crowding placement may be column-nudged to the nearest
 #: valid cell — WHERE an enemy roughly goes is design; the exact clear
 #: column is arithmetic (the snap_checkpoints precedent).

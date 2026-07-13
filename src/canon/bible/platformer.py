@@ -173,6 +173,15 @@ class Level(ArtifactMeta):
     #: GraphicsSpec.view_cells. Sparse by design: scale stays consistent
     #: within a game except where zooming out should instill emotion.
     view_cells: int | None = None
+    #: Which AXIS the level is composed along (sectioned-levels phase):
+    #: "horizontal" (side-scroll, exit at the right edge) or "vertical" (a
+    #: climb, spawn at the BOTTOM, exit at the TOP). Consumers frame + judge
+    #: the win by this. Additive — pre-sectioned bibles default to horizontal.
+    layout_axis: str = "horizontal"
+    #: Camera framing for a VERTICAL level: how many ROWS span the viewport
+    #: (the height analogue of ``view_cells``). None → the game default. Only
+    #: meaningful when ``layout_axis == "vertical"``.
+    view_rows: int | None = None
     #: The stage-planning brief this level was generated against. Persisted
     #: so per-step REGENERATION (placement/decor re-rolls on a loaded
     #: Bible) prompts with the same context the original run had.

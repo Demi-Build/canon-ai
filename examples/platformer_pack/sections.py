@@ -91,37 +91,80 @@ def plan_sections(
     """Deterministically compose a level of ``width`` into an ordered list of
     sections that tile the axis with ``SECTION_OVERLAP`` shared columns.
 
-    v1 (horizontal): section 0 is always a gentle ``runway`` (a safe spawn +
-    room to build speed); the rest roll from the axis's archetypes, weighted so
-    higher difficulty leans toward the intense ones. Deterministic in ``rng``;
-    an LLM-planned composition is a later enhancement. Returns at least one
-    section (a lone runway for a tiny level)."""
+    Tiles the AXIS dimension (``width`` for horizontal, ``height`` for
+    vertical) into sections sharing ``SECTION_OVERLAP`` cells at each seam:
+    - **horizontal**: section 0 is a gentle ``runway`` (safe spawn + run-up);
+      the rest roll weighted by difficulty. ``x_off`` grows left→right, exit at
+      the right edge.
+    - **vertical**: section 0 is the BOTTOM (spawn, on a ground floor); the
+      last is the TOP (exit — the climb summit). ``y_off`` is mapped so the
+      first section bottom-aligns and the last reaches ``y=0``.
+
+    Deterministic in ``rng`` (LLM-planned composition is a later enhancement).
+    Returns at least one section (a lone section for a tiny level)."""
     pool = [n for n, a in vocab.items() if a.axis == axis]
     if not pool:
         pool = list(vocab)
-    opener = "runway" if "runway" in vocab else pool[0]
+    extent = width if axis == "horizontal" else height
+    # A gentle opener only makes sense horizontally (the runway is a run-up);
+    # a vertical level's first section is just the first climb (it carries the
+    # spawn + ground floor at the bottom instead).
+    opener = "runway" if (axis == "horizontal" and "runway" in vocab) else pool[0]
 
-    sections: list[PlannedSection] = []
-    x = 0
+    laid: list[tuple[str, int, int]] = []  # (name, length, pos-from-start)
+    pos = 0
     first = True
-    # Reserve room so the last section reaches the level's right edge.
-    while x < width - 1:
-        remaining = width - x
+    # Reserve room so the last section reaches the far edge (right / top).
+    while pos < extent - 1:
+        remaining = extent - pos
         name = opener if first else _roll_archetype(pool, vocab, difficulty, rng)
         arch = vocab[name]
         length = _roll_len(arch, rng)
-        # The final section takes whatever is left (so exit lands at the edge).
         if remaining <= arch.max_len + SECTION_OVERLAP:
             length = remaining
         length = max(2, min(length, remaining))
-        sections.append(PlannedSection(name, length, x_off=x, y_off=0))
-        x += length - SECTION_OVERLAP
+        laid.append((name, length, pos))
+        pos += length - SECTION_OVERLAP
         first = False
         if length >= remaining:
             break
-    if not sections:
-        sections.append(PlannedSection(opener, max(2, width), 0, 0))
+    if not laid:
+        laid.append((opener, max(2, extent), 0))
+
+    sections: list[PlannedSection] = []
+    for name, length, p in laid:
+        if axis == "horizontal":
+            sections.append(PlannedSection(name, length, x_off=p, y_off=0))
+        else:
+            # y grows DOWNWARD, so distance-from-bottom p maps to a top-origin
+            # y_off: section 0 (p=0) bottom-aligns, the last reaches y_off=0.
+            sections.append(
+                PlannedSection(name, length, x_off=0, y_off=extent - p - length)
+            )
     return sections
+
+
+def section_owner_of_cell(
+    plan: list[PlannedSection], x: int, y: int, axis: str = "horizontal"
+) -> int:
+    """Which section index a whole-level cell belongs to — routed by x-range
+    (horizontal) or y-range (vertical). The LAST planned section whose range
+    contains the coord wins the shared overlap (matching :func:`composite`'s
+    non-empty-wins layering). Used to route a whole-level validator failure
+    back to the section that owns it, so only THAT section regenerates."""
+    coord = x if axis == "horizontal" else y
+    owner = 0
+    for i, ps in enumerate(plan):
+        off = ps.x_off if axis == "horizontal" else ps.y_off
+        if off <= coord < off + ps.length:
+            owner = i
+    return owner
+
+
+def section_owner_of_x(plan: list[PlannedSection], x: int) -> int:
+    """Horizontal-axis form of :func:`section_owner_of_cell` (kept for the
+    existing horizontal call sites/tests)."""
+    return section_owner_of_cell(plan, x, 0, "horizontal")
 
 
 def _roll_len(arch: SectionArchetype, rng: Any) -> int:

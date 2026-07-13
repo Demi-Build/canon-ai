@@ -95,6 +95,84 @@ def _fake_layout(
     return "\n".join(lines)
 
 
+def _fake_section(
+    width: int,
+    height: int,
+    archetype: str,
+    index: int,
+    total: int,
+    vol: str,
+    haz: str,
+) -> str:
+    """Deterministic per-SECTION layout for the $0 fake run (the sectioned
+    ``stamp_level_collision`` calls the Layout Agent once PER section). Sized
+    to the section's LOCAL dims; the FIRST section plants the spawn, NO section
+    declares the exit (the stitcher places it). Each archetype draws a
+    recognisably different shape so a stitched level's block render shows its
+    seams. All terrain stays jump-reachable, so the whole level composes clean
+    without bridges (the bridge path has its own test).
+
+    ``climb`` is VERTICAL: ``width`` is the shaft width, ``height`` is the
+    section's own ROW-extent, and it builds a staggered ladder of platforms
+    rising UP (no floor except the bottom section) — spawn at the bottom, exit
+    (summit) placed by the stitcher at the top."""
+    g = height - 2  # ground row; players stand on g-1
+    right = width - 1
+    mid = width // 2
+    if archetype == "climb":
+        lines = []
+        if index == 0:
+            # The base: a ground floor + spawn at the very bottom.
+            lines += [f"floor(0,{right})", "spawn(2)"]
+        # A staggered climbing ladder: platforms every 2 rows, x alternating
+        # 2/3 (dx 1, rise 2 — every step jumpable), from near the bottom up.
+        y = g - 2
+        i = 0
+        while y >= 1:
+            lines.append(f"platform({2 + i % 2},{y},3)")
+            y -= 2
+            i += 1
+        # A floating 2-row water pocket mid-shaft (swimmers need 2 rows;
+        # containment-exempt) so a climb level still carries swimmable water.
+        if height >= 12 and right - 2 >= 0:
+            my = height // 2
+            lines.append(f"volume_block({vol},{max(0, right - 3)},{my - 1},{right - 1},{my})")
+        return "\n".join(lines)
+    lines = [f"floor(0,{right})"]
+    if index == 0:
+        lines.append("spawn(2)")
+    # Each interior archetype gets a recognisably different shape AND a small
+    # floating water pocket (a 3x2 water_block at cols 4-6, left interior —
+    # clear of the archetype's air features and inside the section's own owned
+    # columns, so it survives the seam overlap). It is 2 rows DEEP (swimmers
+    # need 2) and containment-exempt (free water FEATURE), and it exercises the
+    # registry-driven volume vocabulary at $0 (water in the default world, lava
+    # in a lava world) — every non-runway section carries one, so every level
+    # has swimmable water.
+    pocket = [f"volume_block({vol},4,{g - 4},6,{g - 3})"]
+    if archetype == "gauntlet" and width >= 16:
+        lines += [
+            f"platform({mid},{g - 3},3)",
+            f"platform({mid + 4},{g - 5},3)",
+        ] + pocket
+    elif archetype == "cave" and width >= 14:
+        # Ceiling stalactites hanging from the top — enclosed, ground clear.
+        lines += [
+            f"wall({mid - 3},1,{g - 6})",
+            f"wall({mid + 3},1,{g - 6})",
+        ] + pocket
+    elif archetype == "islands" and width >= 18:
+        # A small walk-jumpable gap + a stepping platform, pocket on the left.
+        lines += [
+            f"gap({mid + 2},{mid + 3})",
+            f"platform({mid + 5},{g - 3},3)",
+        ] + pocket
+    # A mid-section checkpoint on every non-spawn section (a respawn point).
+    if index != 0 and width >= 10:
+        lines.append(f"checkpoint({mid})")
+    return "\n".join(lines)
+
+
 #: Reference dims per level id (the OLD fixed schema dims) — what the
 #: direct-stamp unit tests render against. The live run rolls dims from
 #: the schema's difficulty bands and generates layouts to fit.
@@ -438,10 +516,25 @@ def make_fake_responder():
                 if grid_match
                 else (48, 16)
             )
+            vol = vol_match.group(1) if vol_match else "water"
+            haz = haz_match.group(1) if haz_match else "spike"
+            # Sectioned levels: one layout prompt PER section carries a
+            # "### SECTION: <archetype> (<i> of <n>)" marker + LOCAL dims.
+            # Emit a per-section sub-layout so the whole stitched level is
+            # exercised at $0.
+            sec_match = re.search(
+                r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg
+            )
+            if sec_match:
+                return _fake_section(
+                    width, height,
+                    archetype=sec_match.group(1),
+                    index=int(sec_match.group(2)) - 1,
+                    total=int(sec_match.group(3)),
+                    vol=vol, haz=haz,
+                )
             return _fake_layout(
-                width, height,
-                vol=vol_match.group(1) if vol_match else "water",
-                haz=haz_match.group(1) if haz_match else "spike",
+                width, height, vol=vol, haz=haz,
                 difficulty=int(diff_match.group(1)) if diff_match else 1,
             )
         if task == "placement":

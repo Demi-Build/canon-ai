@@ -40,6 +40,7 @@ const BODY_R := 0.85
 # Camera framing + actor overdraw come from the manifest's GraphicsSpec
 # (per-game data). Defaults match the spec model's defaults.
 var view_w_cells := 20.0
+var view_rows_cells := 16.0  # rows visible for a VERTICAL (climb) level
 var actor_scale := 1.4
 # Combat tuning (manifest "combat" block; defaults mirror combat.py).
 var max_hearts := 3
@@ -85,6 +86,7 @@ var grid: Array = []
 var terrain: Array = []
 var grid_w := 0
 var grid_h := 0
+var layout_axis := "horizontal"  # "vertical" climbs win at the summit ROW
 var spawn := Vector2.ZERO
 var exit_cell := Vector2.ZERO
 var respawn_point := Vector2.ZERO
@@ -165,6 +167,7 @@ func _ready() -> void:
 		)
 	var gfx: Dictionary = manifest.get("graphics", {})
 	view_w_cells = float(gfx.get("view_cells", 20))
+	view_rows_cells = float(gfx.get("view_rows", 16))
 	actor_scale = float(gfx.get("actor_scale", 1.4))
 	var combat: Dictionary = manifest.get("combat", {})
 	max_hearts = int(combat.get("player_max_hearts", 3))
@@ -525,17 +528,25 @@ func _load_level(index: int) -> void:
 	spawn = Vector2(level["spawn"][0], level["spawn"][1])
 	exit_cell = Vector2(level["exit"][0], level["exit"][1])
 	respawn_point = spawn
-	# Per-level framing override (level.json "view_cells", null = game
-	# default) — a deliberate stage-plan exception (intimate/vista).
-	# Framing is CAMERA ZOOM at a stable window, never a window resize:
-	# view_cells spans the viewport width, clamped so the view can't show
-	# past the level bounds. (Runtime window resizes are also ignored by
-	# the 4.x editor's embedded play window — zoom works everywhere.)
-	var view_override: Variant = level.get("view_cells")
-	var eff_view_cells: float = float(view_override) if view_override != null else view_w_cells
-	eff_view_cells = minf(float(grid_w), eff_view_cells)
+	# Framing is CAMERA ZOOM at a stable window, never a window resize.
+	# HORIZONTAL levels frame by WIDTH (view_cells columns span the viewport,
+	# a deliberate intimate/vista exception overriding it); VERTICAL (climb)
+	# levels frame by HEIGHT (view_rows rows span the viewport — a tall shaft
+	# you scroll up). Either way the zoom is clamped so the view can't show
+	# past the level bounds.
 	var vp := get_viewport_rect().size
-	var k := vp.x / (eff_view_cells * CELL)
+	layout_axis = str(level.get("layout_axis", "horizontal"))
+	var k: float
+	if layout_axis == "vertical":
+		var vr_override: Variant = level.get("view_rows")
+		var eff_view_rows: float = float(vr_override) if vr_override != null else view_rows_cells
+		eff_view_rows = minf(float(grid_h), eff_view_rows)
+		k = vp.y / (eff_view_rows * CELL)
+	else:
+		var view_override: Variant = level.get("view_cells")
+		var eff_view_cells: float = float(view_override) if view_override != null else view_w_cells
+		eff_view_cells = minf(float(grid_w), eff_view_cells)
+		k = vp.x / (eff_view_cells * CELL)
 	k = maxf(k, vp.x / (grid_w * CELL))
 	k = maxf(k, vp.y / (grid_h * CELL))
 	camera.zoom = Vector2(k, k)
@@ -1774,8 +1785,15 @@ func _process(delta: float) -> void:
 		(player_pos.x + 0.5) * CELL, (player_pos.y + 0.5) * CELL
 	)
 
-	# --- exit: the whole column, any height (leave to the right) ---
-	if not won and int(player_pos.x) == int(exit_cell.x):
+	# --- exit: horizontal → the whole exit COLUMN (leave right); vertical →
+	# the exit ROW at the summit, any column (climb to the top). Mirrors
+	# platformer_play.py (parity). ---
+	var reached_exit := (
+		int(player_pos.y) <= int(exit_cell.y)
+		if layout_axis == "vertical"
+		else int(player_pos.x) == int(exit_cell.x)
+	)
+	if not won and reached_exit:
 		won = true
 		_play_sfx("win")
 		var lid := str(level_ids[level_index])

@@ -618,41 +618,49 @@ class TestValidators:
     def test_unreachable_layout_is_bridged_not_retried(
         self, tmp_path: Path
     ) -> None:
-        """E2E: an unreachable-but-well-designed layout is accepted on
-        attempt 1 with tool bridges — no retry, no fallback, playable."""
+        """E2E (sectioned): an unreachable-but-well-designed section is
+        accepted with WHOLE-GRID tool bridges — no section retry, no
+        fallback, playable. The grid-native auto_bridge repairs the composited
+        level, mirroring the single-blob behaviour."""
         good = make_fake_responder()
-        layout_calls: list[str] = []
         sent: dict[str, str] = {}
 
         def responder(request):
             msg = request.user_message
-            if "### TASK: layout" in msg and "### LEVEL: l1" in msg:
-                layout_calls.append(msg)
-                # Dims are schema-rolled ranges — build the unreachable
-                # layout against whatever grid the prompt advertises: a
-                # 9-wide gap (dx 10, beyond a running jump's ~7-cell reach)
-                # between two floor runs.
-                m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
-                right = int(m.group(1)) - 1
-                sent["gap_dsl"] = (
-                    f"floor(0,{right - 19})\nfloor({right - 9},{right})\n"
-                    f"checkpoint(20)\nspawn(2)\nexit({right - 2})"
-                )
-                return sent["gap_dsl"]
+            m = re.search(r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg)
+            gm = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            if "### LEVEL: l1" in msg and m and gm:
+                idx, total = int(m.group(2)) - 1, int(m.group(3))
+                lw = int(gm.group(1))
+                # Only the LAST section (whose cells all survive the seam
+                # overlap) and only once: a 9-wide gap centred in its floor —
+                # beyond a running jump's ~7-cell reach, so the whole-level
+                # bridger must add a stepping platform.
+                if idx == total - 1 and "gap_dsl" not in sent and lw >= 20:
+                    mid = lw // 2
+                    sent["gap_dsl"] = (
+                        f"floor(0,{lw - 1})\ngap({mid - 4},{mid + 4})"
+                    )
+                    return sent["gap_dsl"]
             return good(request)
 
         ctx = _run_slice(tmp_path / "run", responder=responder)
-        assert len(layout_calls) == 1  # accepted first try — tool repaired
+        assert "gap_dsl" in sent, "the wide-gap section was never generated"
         assert not any(
             "layout" in w for w in ctx.artifacts.get("slice_warnings", [])
         )
         dsl_text = ctx.artifacts["dsl_texts"]["l1"]
-        assert dsl_text.startswith(sent["gap_dsl"]) and "# auto-bridge" in dsl_text
-        # The stored collision layer IS the bridged, traversable level.
+        assert sent["gap_dsl"] in dsl_text and "# auto-bridge" in dsl_text
+        # The stored collision layer IS the bridged, TRAVERSABLE level — the
+        # exit is reachable from spawn across the once-uncrossable gap.
+        # (check_level's containment rule needs the free_volume set, which the
+        # persisted grid drops; reachability is the property we assert here.)
+        from examples.platformer_pack.validate import reachable_cells
+
         with np.load(tmp_path / "run" / ctx.bible.levels["l1"].collision) as d:
             grid = d["collision"]
         level = ctx.bible.levels["l1"]
-        assert not check_level(grid, level.spawn, level.exit, DEFAULT_MOVEMENT)
+        assert level.exit in reachable_cells(grid, level.spawn, DEFAULT_MOVEMENT)
 
 
     def test_unstandable_spawn_feedback_names_the_occupant(self) -> None:
@@ -696,16 +704,15 @@ class TestValidators:
             msg = request.user_message
             if "### TASK: layout" in msg:
                 layout_calls.append(msg)
-                if not failed_once["done"]:
+                # Fail the FIRST section (its LOCAL width) with a DESIGN
+                # failure: a pool poured over a gap the same section cut —
+                # the sunlit run's un-repairable class, section-scoped now.
+                if not failed_once["done"] and "### SECTION:" in msg:
                     failed_once["done"] = True
-                    # Pour a pool over a gap the same program cut — the
-                    # sunlit run's un-repairable design failure class.
                     m = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
-                    width = int(m.group(1))
+                    lw = int(m.group(1))
                     sent["bad_dsl"] = (
-                        f"floor(0,{width - 1})\ngap(10,13)\n"
-                        f"pool(water,10,13)\n"
-                        f"spawn(2)\nexit({width - 3})"
+                        f"floor(0,{lw - 1})\ngap(4,5)\npool(water,4,5)\nspawn(2)"
                     )
                     return sent["bad_dsl"]
             return good(request)
@@ -719,6 +726,44 @@ class TestValidators:
         assert "changing as little as possible" in retries[0]
         # And the diagnosis rides along with the rejected output.
         assert "cannot sink in" in retries[0]
+
+    def test_whole_level_design_failure_retries_owning_section(
+        self, tmp_path: Path
+    ) -> None:
+        """A section can pass LOCAL validation (stamp) yet break the WHOLE
+        level — an UNCONTAINED pool spills only when composited. The stitcher
+        routes that whole-level failure to the owning section by x-range and
+        regenerates only IT (located feedback), never the flat whole-level
+        fallback."""
+        good = make_fake_responder()
+        failed = {"done": False}
+        seams: dict[str, str] = {}
+
+        def responder(request):
+            msg = request.user_message
+            m = re.search(r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg)
+            gm = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            # Break an INTERIOR section (not the first) once, with an
+            # uncontained volume — legal locally, spills whole-level.
+            if m and gm and not failed["done"] and int(m.group(2)) > 1:
+                failed["done"] = True
+                lw, h = int(gm.group(1)), int(gm.group(2))
+                g = h - 2
+                seams["bad"] = f"floor(0,{lw - 1})\nvolume(water,4,6,{g - 2})"
+                return seams["bad"]
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=responder)
+        assert failed["done"], "no interior section was broken"
+        # Repaired by regenerating the owning section — NOT a whole-level
+        # fallback (no layout warning, the level is genuine generated content).
+        assert not any(
+            "layout" in w for w in ctx.artifacts.get("slice_warnings", [])
+        )
+        assert all(
+            level.layout_fallback is False
+            for level in ctx.bible.levels.values()
+        )
 
     def test_placement_retry_prompt_carries_previous_attempt(
         self, tmp_path: Path
@@ -759,6 +804,54 @@ class TestValidators:
         _run_slice(tmp_path / "run", responder=spy)
         assert placement_prompts
         assert all("Player spawn: [" in m for m in placement_prompts)
+
+    def test_placement_prompt_carries_section_encounter_map(
+        self, tmp_path: Path
+    ) -> None:
+        """Chunk B: the placement prompt carries the per-section ENCOUNTER map
+        (recomputed deterministically) so enemies concentrate in combat/mixed
+        stretches. The map matches the plan the layout phase actually
+        stitched (parsed from the combined section DSL)."""
+        import re as _re
+
+        from examples.platformer_pack.level import (
+            level_section_plan,
+            section_encounter_summary,
+        )
+
+        good = make_fake_responder()
+        placement_prompts: dict[str, str] = {}
+
+        def spy(request):
+            msg = request.user_message
+            if "### TASK: placement" in msg:
+                lid = _re.search(r"### LEVEL: (\w+)", msg).group(1)
+                placement_prompts[lid] = msg
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=spy)
+        assert placement_prompts
+        for m in placement_prompts.values():
+            assert "Section map" in m and "cols 0-" in m
+
+        # The recomputed plan MATCHES the plan the layout phase stitched: the
+        # combined DSL records each section as "### SECTION i: arch @x=X"
+        # (horizontal) or "@y=Y" (vertical).
+        for lid, level in ctx.bible.levels.items():
+            plan = level_section_plan(ctx, level)
+            stitched = _re.findall(
+                r"### SECTION \d+: (\w+) @[xy]=(\d+)",
+                ctx.artifacts["dsl_texts"][lid],
+            )
+            off = "x_off" if level.layout_axis == "horizontal" else "y_off"
+            assert [(a, int(o)) for a, o in stitched] == [
+                (ps.archetype, getattr(ps, off)) for ps in plan
+            ], lid
+            # …and that plan's encounter map is what the prompt carried.
+            assert (
+                section_encounter_summary(plan, axis=level.layout_axis)
+                in placement_prompts[lid]
+            )
 
     def test_placement_rules(self) -> None:
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
@@ -1080,11 +1173,15 @@ class TestEndToEnd:
             )
             trace = json.loads(trace_path.read_text())
             assert trace["fallback"] is True
-            assert len(trace["attempts"]) == retries
+            # Sectioned levels aggregate EVERY section's attempts — each of
+            # the N sections burned all `retries` before falling back.
+            assert trace["attempts"]
+            assert len(trace["attempts"]) % retries == 0
             for a in trace["attempts"]:
                 assert a["outcome"] == "failed_validation"
                 assert a["reasons"]
                 assert a["content"] == "not a dsl at all"
+                assert "section" in a  # tagged to its owning section
             # The flag round-trips through level.json for status tools.
             level_doc = json.loads(
                 (
@@ -1096,7 +1193,10 @@ class TestEndToEnd:
 
     def test_layout_retries_escalate_token_budget(self, tmp_path: Path) -> None:
         """The l3 class: identical caps across retries make a truncated
-        program unrecoverable — layout attempts must climb 768→1152→1728."""
+        program unrecoverable — a section's layout attempts must ESCALATE
+        (×1.5) across retries. (Sectioned levels budget per section by LOCAL
+        area, so the base value varies; the escalation ratio is the invariant.)
+        """
         good = make_fake_responder()
         seen: list[int | None] = []
 
@@ -1107,7 +1207,10 @@ class TestEndToEnd:
             return good(request)
 
         _run_slice(tmp_path / "run", responder=broken_layouts)
-        assert seen[:3] == [768, 1152, 1728]
+        # The first section's three attempts climb base → 1.5x → 2.25x.
+        assert seen[0] is not None
+        assert seen[1] == int(seen[0] * 1.5)
+        assert seen[2] == int(seen[1] * 1.5)
 
     def test_clean_run_writes_no_attempt_trace(self, tmp_path: Path) -> None:
         """Attempt traces are failure evidence only — a clean run must not
@@ -1722,6 +1825,35 @@ class TestGenericOps:
         assert "wall(19, 12, 13)" in req.user_message  # worked example
         assert "NOT a rectangle" in req.user_message
 
+    def test_section_prompt_reflects_archetype_character(self) -> None:
+        """Chunk B: a section prompt translates the archetype's feature_bias
+        into a DISTINCT op backbone, plus intensity pacing + water level — so
+        a gauntlet, a cave, and a runway read as different sections to the
+        Layout Agent (same legal vocabulary throughout)."""
+        from examples.platformer_pack.sections import DEFAULT_VOCAB
+
+        p = PlatformerPrompts()
+
+        def sec(name: str) -> str:
+            a = DEFAULT_VOCAB[name]
+            return p.section_layout(
+                "l1", "b", name, a.flavor, a.feature_bias, 1, 3, 24, H,
+                DEFAULT_MOVEMENT, intensity=a.intensity, water=a.water,
+            ).user_message
+
+        g, c, r = sec("gauntlet"), sec("cave"), sec("runway")
+        # Distinct backbone families -> distinct ops emphasised.
+        assert "build it mostly from platform, ledge, gap, pit" in g
+        assert "build it mostly from floor, wall, carve" in c
+        assert "build it mostly from floor" in r
+        assert "do NOT use gap, pit, hazard_strip" in r
+        # Water dimension: a dry runway vs an optional-water gauntlet.
+        assert "DRY — place NO water" in r
+        assert "Water is OPTIONAL here" in g
+        # Intensity pacing differs (high gauntlet vs low runway).
+        assert "dense and demanding" in g
+        assert "breather" in r
+
     def test_enemy_system_prompt_forbids_extra_fields(self) -> None:
         """Per-task system prompt: the enemy agent returns only the named
         fields and never restates the rolled mechanics (schema-aware
@@ -2314,6 +2446,39 @@ class TestCarve:
             h.x for h in result.hazards if h.type.startswith("floor_")
         )
         assert spike_xs == [20, 21, 23, 24]
+
+
+class TestVerticalSections:
+    """Chunk C: some later-stage levels are VERTICAL climbs — tall + narrow,
+    spawn at the bottom, exit at the summit, stitched bottom-to-top."""
+
+    def test_vertical_climb_generates_reachable_and_framed(
+        self, tmp_path: Path
+    ) -> None:
+        from examples.platformer_pack.validate import reachable_cells
+
+        # A 3-stage world: stage-1 levels stay horizontal (intros), later
+        # stages roll some vertical climbs.
+        ctx = _run_slice(tmp_path / "run", num_stages=3)
+        verticals = [
+            lv for lv in ctx.bible.levels.values()
+            if lv.layout_axis == "vertical"
+        ]
+        assert verticals, "no vertical climb rolled in a 3-stage world"
+        # Stage-1 levels (a world's intro) are ALWAYS horizontal.
+        for lid in ("l1", "l2", "l3"):
+            assert ctx.bible.levels[lid].layout_axis == "horizontal"
+        for lv in verticals:
+            assert lv.grid_height > lv.grid_width  # a tall shaft
+            assert lv.view_rows is not None  # framed by height
+            # spawn at the BOTTOM, exit (summit) at the TOP.
+            assert lv.spawn[1] > lv.grid_height // 2
+            assert lv.exit[1] < lv.grid_height // 2
+            assert lv.layout_fallback is False
+            # The climb is beatable: the summit is reachable from the base.
+            with np.load(tmp_path / "run" / lv.collision) as d:
+                grid = d["collision"]
+            assert lv.exit in reachable_cells(grid, lv.spawn, DEFAULT_MOVEMENT)
 
 
 class TestPerLevelView:

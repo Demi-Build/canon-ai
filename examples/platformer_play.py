@@ -162,6 +162,9 @@ def main() -> None:
 
     spawn = {"x": level["spawn"][0], "y": level["spawn"][1]}
     exit_ = {"x": level["exit"][0], "y": level["exit"][1]}
+    # A VERTICAL (climb) level is won by reaching the exit's ROW at the summit,
+    # not its column — the exit sits at the TOP, not the right edge.
+    layout_axis = level.get("layout_axis", "horizontal")
     # Checkpoints from the triggers layer (3b): crossing one moves the
     # respawn point there.
     checkpoints = [
@@ -1047,8 +1050,15 @@ def main() -> None:
                 checkpoint["active"] = True
                 respawn_point = {"x": checkpoint["x"], "y": checkpoint["y"]}
                 play_sfx("checkpoint")
-        # Exit zone: the exit's whole COLUMN, any height (leave right).
-        if not won and int(px) == exit_["x"]:
+        # Exit zone: horizontal → the exit's whole COLUMN (leave right);
+        # vertical → the exit's ROW at the summit, any column (climb to the
+        # top). Same reach model both surfaces (parity with main.gd).
+        reached_exit = (
+            int(py) <= exit_["y"]
+            if layout_axis == "vertical"
+            else int(px) == exit_["x"]
+        )
+        if not won and reached_exit:
             won = True
             play_sfx("win")
 

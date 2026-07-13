@@ -80,6 +80,85 @@ def _volume_blurb(tile) -> str:
     return f"{tile.name} ({', '.join(traits)})"
 
 
+def _physics_guidance(movement: PlayerMovementSpec) -> str:
+    """The RUN-UP MOMENTUM physics paragraph shared by the whole-level and
+    per-section layout prompts (ends with a newline)."""
+    return (
+        f"Player physics (RUN-UP MOMENTUM): max jump rise "
+        f"{movement.jump_height} cells (RISING COSTS RANGE — at full "
+        f"rise the player clears only "
+        f"{max_dx_for_rise(movement, movement.jump_height)} columns "
+        "sideways, so high steps must be nearly overhead). A "
+        f"standing/walking jump clears a gap up to "
+        f"{movement.jump_width - 1} columns. A RUNNING jump (the "
+        f"player builds speed over ~{int(movement.run_up_cells)} clear "
+        "flat columns) clears up to ~6 columns — but ONLY with that "
+        "runway: a wide gap right after a wall, ledge, or narrow "
+        "platform (no room to build speed) is UNBEATABLE. So keep "
+        f"MOST gaps at most {movement.jump_width - 1} columns (ordinary "
+        "jumps); you MAY sprinkle in the occasional WIDE (4-6 column) "
+        "gap as a deliberate run-and-jump challenge, but ALWAYS give "
+        f"~{int(movement.run_up_cells)} clear flat columns of runway "
+        "right before it. Any gap wider than ~6 columns needs a "
+        "stepping platform. Each platform step must sit within "
+        f"{movement.jump_height} rows above the previous foothold, and "
+        "the higher the step the closer it must be.\n"
+    )
+
+
+#: A feature_bias FAMILY -> the concrete DSL ops it favours. The archetype
+#: vocab (sections.json) speaks in families (floor/platform/gap/...); the
+#: section prompt translates them to the ops the agent actually emits, so a
+#: cave leans on wall/carve and a gauntlet on platform/gap — distinct
+#: character, same legal vocabulary (any op stays available).
+_FEATURE_OPS = {
+    "floor": "floor",
+    "platform": "platform, ledge",
+    "gap": "gap, pit",
+    "hazard": "hazard_strip",
+    "wall": "wall, carve",
+    "stairs": "stairs_up, stairs_down, pyramid",
+    "water": "pool, water_wall, water_block",
+    "ledge": "ledge",
+}
+
+_INTENSITY_HINT = {
+    "low": "a breather — keep it sparse, easy, and readable",
+    "medium": "a steady rhythm of moderate challenges",
+    "high": "dense and demanding — pack the challenges close together",
+}
+
+_WATER_HINT = {
+    "dry": "This section is DRY — place NO water.",
+    "optional": "Water is OPTIONAL here — use it only where it fits the shape.",
+    "submerged": "This section is largely SUBMERGED — water fills most of it.",
+}
+
+
+def _bias_guidance(feature_bias: dict[str, float]) -> str:
+    """Turn a section archetype's ``feature_bias`` weights into a prescriptive
+    prompt line: the BACKBONE families (weight >= 3, mapped to their ops), the
+    minor accents (0 < weight < 3), and the families to AVOID (weight <= 0).
+    Steers the mix without overriding the vocabulary — every op stays legal."""
+    if not feature_bias:
+        return ""
+    ranked = sorted(feature_bias.items(), key=lambda kv: (-kv[1], kv[0]))
+    backbone = [k for k, w in ranked if w >= 3]
+    minor = [k for k, w in ranked if 0 < w < 3]
+    avoid = [k for k, w in ranked if w <= 0]
+    ops = lambda fams: ", ".join(_FEATURE_OPS.get(f, f) for f in fams)  # noqa: E731
+    parts = []
+    if backbone:
+        parts.append(f"build it mostly from {ops(backbone)}")
+    if minor:
+        parts.append(f"sprinkle in {ops(minor)}")
+    if avoid:
+        parts.append(f"do NOT use {ops(avoid)}")
+    if not parts:
+        return ""
+    return "Feature mix — " + "; ".join(parts) + ".\n"
+
+
 class PlatformerPrompts:
     def world_generation(
         self, pitch: str, seed: str, num_stages: int = 1
@@ -263,37 +342,17 @@ class PlatformerPrompts:
             max_tokens=512,
         )
 
-    def layout_generation(
+    def _ops_and_vocab(
         self,
-        level_id: str,
-        brief: str,
-        knobs: dict,
-        width: int,
+        tiles: TileRegistry,
+        rules: GameRules,
         height: int,
-        movement: PlayerMovementSpec,
-        rules: GameRules = DEFAULT_RULES,
-        tiles: TileRegistry = DEFAULT_TILES,
-        previous: str | None = None,
-        feedback: list[str] | None = None,
-    ) -> LLMRequest:
-        # Repair, don't re-roll: on retry the model sees its own rejected
-        # output next to the diagnosis, so it can patch one design instead
-        # of rolling a fresh (differently broken) one each attempt.
-        fb = ""
-        if feedback:
-            prev = (
-                f"\nYour previous layout attempt:\n{previous}\n"
-                if previous
-                else "\n"
-            )
-            fb = (
-                f"{prev}It was rejected because:\n- "
-                + "\n- ".join(feedback)
-                + "\nReturn a corrected layout, changing as little as possible.\n"
-            )
-
-        # Op vocabulary from the game's tile registry — a game with lava
-        # and lasers advertises those, one without water never mentions it.
+    ) -> tuple[list[str], list[str]]:
+        """The op VOCABULARY and its guidance lines, from the game's tile
+        registry — shared by the whole-level :meth:`layout_generation` and the
+        per-section :meth:`section_layout` (both advertise the same features;
+        a game with lava/lasers offers those, one without water never mentions
+        it)."""
         volumes = tiles.named("volume")
         hazards = tiles.named("hazard")
         ops = [
@@ -377,6 +436,43 @@ class PlatformerPrompts:
                 + ", ".join(t.name for t in hazards)
                 + " (touching one kills — they sit on floor)."
             )
+        return ops, vocab_lines
+
+    @staticmethod
+    def _layout_feedback(previous: str | None, feedback: list[str] | None) -> str:
+        """Retry preamble shared by whole-level and per-section layout: show
+        the model its own rejected attempt beside the diagnosis so it patches
+        one design instead of re-rolling a fresh (differently broken) one."""
+        if not feedback:
+            return ""
+        prev = (
+            f"\nYour previous layout attempt:\n{previous}\n" if previous else "\n"
+        )
+        return (
+            f"{prev}It was rejected because:\n- "
+            + "\n- ".join(feedback)
+            + "\nReturn a corrected layout, changing as little as possible.\n"
+        )
+
+    def layout_generation(
+        self,
+        level_id: str,
+        brief: str,
+        knobs: dict,
+        width: int,
+        height: int,
+        movement: PlayerMovementSpec,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        previous: str | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        # Repair, don't re-roll: on retry the model sees its own rejected
+        # output next to the diagnosis, so it can patch one design instead
+        # of rolling a fresh (differently broken) one each attempt.
+        fb = self._layout_feedback(previous, feedback)
+        volumes = tiles.named("volume")
+        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height)
         return LLMRequest(
             system=_SYSTEM_LAYOUT,
             user_message=(
@@ -387,25 +483,7 @@ class PlatformerPrompts:
                 f"Grid: {width} wide x {height} tall; row 0 is the TOP; the "
                 f"ground floor row is {height - 2}; players stand one row "
                 "above the surface they walk on.\n"
-                f"Player physics (RUN-UP MOMENTUM): max jump rise "
-                f"{movement.jump_height} cells (RISING COSTS RANGE — at full "
-                f"rise the player clears only "
-                f"{max_dx_for_rise(movement, movement.jump_height)} columns "
-                "sideways, so high steps must be nearly overhead). A "
-                f"standing/walking jump clears a gap up to "
-                f"{movement.jump_width - 1} columns. A RUNNING jump (the "
-                f"player builds speed over ~{int(movement.run_up_cells)} clear "
-                "flat columns) clears up to ~6 columns — but ONLY with that "
-                "runway: a wide gap right after a wall, ledge, or narrow "
-                "platform (no room to build speed) is UNBEATABLE. So keep "
-                f"MOST gaps at most {movement.jump_width - 1} columns (ordinary "
-                "jumps); you MAY sprinkle in the occasional WIDE (4-6 column) "
-                "gap as a deliberate run-and-jump challenge, but ALWAYS give "
-                f"~{int(movement.run_up_cells)} clear flat columns of runway "
-                "right before it. Any gap wider than ~6 columns needs a "
-                "stepping platform. Each platform step must sit within "
-                f"{movement.jump_height} rows above the previous foothold, and "
-                "the higher the step the closer it must be.\n"
+                + _physics_guidance(movement)
                 + "\n".join(vocab_lines)
                 + f"\n{fb}\n"
                 "Emit the level as DSL ops, one per line, nothing else:\n"
@@ -432,6 +510,168 @@ class PlatformerPrompts:
             max_tokens=512,
         )
 
+    def section_layout(
+        self,
+        level_id: str,
+        brief: str,
+        section_name: str,
+        flavor: str,
+        feature_bias: dict[str, float],
+        index: int,
+        total: int,
+        width: int,
+        height: int,
+        movement: PlayerMovementSpec,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        seam: str | None = None,
+        intensity: str = "medium",
+        water: str = "optional",
+        axis: str = "horizontal",
+        previous: str | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        """Prompt for ONE section of a stitched level. Same op vocabulary and
+        physics as :meth:`layout_generation`, framed for a bounded sub-region:
+        the archetype's CHARACTER steers what it builds, a seam summary
+        describes the hand-off from the neighbour, and the markers depend on
+        position — only the FIRST section spawns, NO section declares the exit
+        (the stitcher places it). ``axis`` picks the framing: horizontal
+        sections tile left→right (exit at the right edge); vertical (climb)
+        sections stack bottom→top (the FIRST is the base with a ground floor +
+        spawn, the exit is the summit). Local ``width``/``height`` are the
+        SECTION's own dims — every coordinate is section-local."""
+        fb = self._layout_feedback(previous, feedback)
+        volumes = tiles.named("volume")
+        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height)
+        character = (
+            f"Section character — {section_name}: {flavor}\n"
+            + _bias_guidance(feature_bias)
+            + f"Pacing ({intensity}): {_INTENSITY_HINT.get(intensity, '')}.\n"
+            + (_WATER_HINT.get(water, "") + "\n" if water in _WATER_HINT else "")
+        )
+        first = index == 0
+        last = index == total - 1
+        right = width - 1
+
+        if axis == "vertical":
+            stitch_line = (
+                "This is ONE SECTION of a taller CLIMB, stacked BOTTOM-to-TOP. "
+                f"Design ONLY this {height}-row stretch; it joins to the "
+                "sections below and above.\n"
+            )
+            if first:
+                marker_rule = (
+                    f"This is the FIRST (BOTTOM) section: lay a ground "
+                    f"floor(0,{right}) at the bottom and place exactly ONE "
+                    "spawn(x) on it near the left (e.g. spawn(2)). Then build a "
+                    "stack of STAGGERED platforms/ledges rising UP from it."
+                )
+            else:
+                marker_rule = (
+                    "Do NOT place a spawn — the player climbs up from below. "
+                    "Build a stack of STAGGERED platforms/ledges the player "
+                    "jumps UP through. Do NOT lay a full-width floor (it would "
+                    "wall off the climb)."
+                )
+            if last:
+                marker_rule += (
+                    " This is the FINAL (TOP) section: put a reachable "
+                    "standable platform near the TOP (rows 1-3) — the exit "
+                    "(summit) is placed there automatically."
+                )
+            seam_line = ""
+            if seam and not first:
+                seam_line = (
+                    "Entering from BELOW — the section under you offers these "
+                    f"top footholds: {seam}. Put your LOWEST platforms within "
+                    f"{movement.jump_height} rows of them so the climb "
+                    "continues.\n"
+                )
+            tail_rule = (
+                f"Rules: {marker_rule} platforms/ledges are the backbone "
+                "(smaller y = HIGHER); each platform must sit within "
+                f"{movement.jump_height} rows of a lower foothold AND close "
+                "horizontally (rising costs range — high steps go nearly "
+                "overhead); hazards need floor/platform under them; keep the "
+                "spawn column clear. Do NOT place checkpoints."
+            )
+        else:
+            stitch_line = (
+                "This is ONE SECTION of a larger level, stitched together "
+                f"left-to-right. Design ONLY this {width}-column stretch; "
+                "it joins to its neighbours at the left and right edges.\n"
+            )
+            if first:
+                marker_rule = (
+                    "This is the FIRST section: place exactly ONE spawn(x) "
+                    "near the LEFT on clear flat floor (e.g. spawn(2)). Do NOT "
+                    "place an exit — the level's exit is added automatically at "
+                    "the far right of the WHOLE level."
+                )
+            else:
+                marker_rule = (
+                    "Do NOT place a spawn — the player arrives from the "
+                    "previous section. Do NOT place an exit — the level's exit "
+                    "is added automatically at the whole level's far right. You "
+                    "MAY place ONE checkpoint(x) on clear flat floor near the "
+                    "middle of THIS section (a mid-level respawn point)."
+                )
+            if last:
+                marker_rule += (
+                    f" This is the FINAL section: keep the far-RIGHT columns "
+                    f"(around {right}) solid FLAT ground so the exit lands "
+                    "cleanly there."
+                )
+            seam_line = ""
+            if seam and not first:
+                seam_line = (
+                    "Entering from the LEFT — the previous section hands the "
+                    f"player off here: {seam}. Continue the ground so the "
+                    "player crosses the left seam WITHOUT dropping into an "
+                    "unintended gap.\n"
+                )
+            tail_rule = (
+                f"Rules: start from floor(0,{right}) then carve; {marker_rule} "
+                "hazards need floor under them; platform/ledge rows are ABOVE "
+                "the ground (smaller y = higher); volumes fill DOWN from their "
+                "surface row and need solid floor beneath (never pour one over "
+                "a gap or pit)"
+                + (
+                    "; every pool must be CONTAINED — put wall() columns at "
+                    "both sides of the volume (a basin lip the player jumps "
+                    "over), unless the pool reaches the section edge"
+                    if rules.water_containment == "contained" and volumes
+                    else ""
+                )
+                + "; keep the spawn and checkpoint columns clear — no "
+                "platform, wall, hazard, volume, or gap may cover them or "
+                "remove the floor beneath them."
+            )
+
+        return LLMRequest(
+            system=_SYSTEM_LAYOUT,
+            user_message=(
+                "### TASK: layout\n"
+                f"### LEVEL: {level_id}\n"
+                f"### SECTION: {section_name} ({index + 1} of {total})\n"
+                f"Brief: {brief}\n"
+                + character
+                + stitch_line
+                + f"Grid: {width} wide x {height} tall; row 0 is the TOP; the "
+                f"ground floor row is {height - 2}; players stand one row "
+                "above the surface they walk on.\n"
+                + seam_line
+                + _physics_guidance(movement)
+                + "\n".join(vocab_lines)
+                + f"\n{fb}\n"
+                "Emit the section as DSL ops, one per line, nothing else:\n"
+                + "  ".join(ops) + "\n"
+                + tail_rule
+            ),
+            max_tokens=512,
+        )
+
     @staticmethod
     def _rarity_caps_line(rules: GameRules) -> str:
         caps = getattr(rules, "rarity_caps", {}) or {}
@@ -452,6 +692,7 @@ class PlatformerPrompts:
         spawn: tuple[int, int] | None = None,
         volume_summary: str = "none",
         air_summary: str = "none",
+        encounter_summary: str = "",
         variants: VariantSet = DEFAULT_VARIANTS,
         rules: GameRules = DEFAULT_RULES,
         combat: CombatSpec = DEFAULT_COMBAT,
@@ -500,7 +741,15 @@ class PlatformerPrompts:
                 f"Volume cells by tile (swimmers ONLY go here): {volume_summary}\n"
                 f"Open-air cells (FLYERS hover here, above the ground): "
                 f"{air_summary}\n"
-                f"Player spawn: {list(spawn) if spawn else 'unknown'}\n{fb}\n"
+                f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
+                + (
+                    "Section map (concentrate enemies in COMBAT/MIXED "
+                    "stretches, keep TRAVERSAL stretches lighter): "
+                    f"{encounter_summary}\n"
+                    if encounter_summary
+                    else ""
+                )
+                + f"{fb}\n"
                 f"Place 1..{max_enemies} enemies to fit the brief. Spread "
                 "them out; put slower enemies on patrol routes and ranged/"
                 "sentry types guarding key jumps. Swimmer-archetype enemies "
