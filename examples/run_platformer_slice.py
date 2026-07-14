@@ -104,6 +104,8 @@ def _fake_section(
     vol: str,
     haz: str,
     has_breakable: bool = False,
+    has_water_cloud: bool = False,
+    has_reward: bool = False,
 ) -> str:
     """Deterministic per-SECTION layout for the $0 fake run (the sectioned
     ``stamp_level_collision`` calls the Layout Agent once PER section). Sized
@@ -120,6 +122,15 @@ def _fake_section(
     g = height - 2  # ground row; players stand on g-1
     right = width - 1
     mid = width // 2
+
+    def _water(x1: int, y1: int, x2: int, y2: int) -> str:
+        """A floating volume FEATURE, in the REGISTRY-GENERIC spelling so it
+        plays any game (water in the default world, lava in a lava world): a
+        puffy swim-up cloud (Chunk E) when the prompt advertises the cloud op,
+        else the older rectangular block. Both take the volume tile NAME."""
+        op = "volume_cloud" if has_water_cloud else "volume_block"
+        return f"{op}({vol},{x1},{y1},{x2},{y2})"
+
     if archetype == "climb":
         lines = []
         if index == 0:
@@ -133,24 +144,32 @@ def _fake_section(
             lines.append(f"platform({2 + i % 2},{y},3)")
             y -= 2
             i += 1
-        # A floating 2-row water pocket mid-shaft (swimmers need 2 rows;
-        # containment-exempt) so a climb level still carries swimmable water.
-        if height >= 12 and right - 2 >= 0:
+        # A floating water cloud on the RIGHT of the shaft (clear of the
+        # left-hand ladder) — a swim-up pocket you rise through mid-climb, and
+        # the swimmable water every level is expected to carry.
+        if height >= 12 and right - 5 >= 6:
             my = height // 2
-            lines.append(f"volume_block({vol},{max(0, right - 3)},{my - 1},{right - 1},{my})")
+            lines.append(_water(right - 5, my - 1, right - 1, my + 1))
+        elif height >= 12 and right - 2 >= 0:
+            my = height // 2
+            lines.append(_water(max(0, right - 3), my - 1, right - 1, my))
         return "\n".join(lines)
     lines = [f"floor(0,{right})"]
     if index == 0:
         lines.append("spawn(2)")
-    # Each interior archetype gets a recognisably different shape AND a small
-    # floating water pocket (a 3x2 water_block at cols 4-6, left interior —
-    # clear of the archetype's air features and inside the section's own owned
-    # columns, so it survives the seam overlap). It is 2 rows DEEP (swimmers
-    # need 2) and containment-exempt (free water FEATURE), and it exercises the
-    # registry-driven volume vocabulary at $0 (water in the default world, lava
-    # in a lava world) — every non-runway section carries one, so every level
-    # has swimmable water.
-    pocket = [f"volume_block({vol},4,{g - 4},6,{g - 3})"]
+    # Each interior archetype gets a recognisably different shape AND a floating
+    # water cloud (a puffy 5x3 pocket at cols 2-6, floating a couple rows above
+    # the floor — a swim-up feature clear of the archetype's air features and
+    # inside the section's own owned columns, so it survives the seam overlap).
+    # It is 3 rows tall (swimmers need a 2x2 body) and containment-exempt (free
+    # water FEATURE), exercising the registry-driven volume vocabulary at $0
+    # (water in the default world, lava in a lava world) — every non-runway
+    # section carries one, so every level has swimmable water.
+    cx2 = min(6, right - 1)
+    if cx2 - 2 >= 3 and g - 5 >= 1:
+        cloud = [_water(2, g - 5, cx2, g - 3)]
+    else:
+        cloud = [_water(4, g - 4, 6, g - 3)]
     if archetype == "gauntlet" and width >= 16:
         # A short crumbling stretch on the ground (breakable floor, Chunk D —
         # only if the registry has the tile) + floating platform tiers.
@@ -160,22 +179,32 @@ def _fake_section(
         lines += crumble + [
             f"platform({mid},{g - 3},3)",
             f"platform({mid + 4},{g - 5},3)",
-        ] + pocket
+        ] + cloud
     elif archetype == "cave" and width >= 14:
         # Ceiling stalactites hanging from the top — enclosed, ground clear.
         lines += [
             f"wall({mid - 3},1,{g - 6})",
             f"wall({mid + 3},1,{g - 6})",
-        ] + pocket
+        ] + cloud
+        if has_reward and g - 6 >= 1:
+            # A SECRET ALCOVE (Chunk E): a reward tucked into a hidden niche
+            # near the ceiling between the stalactites — a solid ledge roof
+            # over a walled-back pocket, open on the right so a curious player
+            # can jump in. Off the floor path (never blocks traversal).
+            ax = mid - 1
+            lines += [
+                f"ledge({ax},{ax + 1},2)",
+                f"wall({ax},3,4)",
+                f"reward({ax + 1},3)",
+            ]
     elif archetype == "islands" and width >= 18:
-        # A small walk-jumpable gap + a stepping platform, pocket on the left.
+        # A small walk-jumpable gap + a stepping platform, cloud on the left.
         lines += [
             f"gap({mid + 2},{mid + 3})",
             f"platform({mid + 5},{g - 3},3)",
-        ] + pocket
-    # A mid-section checkpoint on every non-spawn section (a respawn point).
-    if index != 0 and width >= 10:
-        lines.append(f"checkpoint({mid})")
+        ] + cloud
+    # Checkpoints are STITCHER-placed from the blueprint now (count scales with
+    # the section count, reachable by construction) — sections never emit them.
     return "\n".join(lines)
 
 
@@ -287,9 +316,23 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
         return out
 
     deep_first = sorted(water_set, key=lambda c: (-_depth(c), c))
-    surface_cells = sorted(
-        c for c in water_set if (c[0], c[1] - 1) not in water_set
-    )
+    # A SURFACE anchor is the top of a water column that also has a same-row
+    # neighbour whose top is ALSO open — i.e. a >=2-wide FLAT top a 2-wide
+    # surface swimmer (the widest the fake places) actually fits on. This
+    # excludes the single-cell "shoulders" a rounded water_cloud exposes (a
+    # trimmed corner leaves a lone top cell with submerged neighbours), which
+    # the validator's full-footprint check would reject.
+    def _flat_surface(c: tuple[int, int]) -> bool:
+        # A 2-wide surface body anchors here and extends RIGHT, so the cell AND
+        # its right neighbour must both be top-of-water (open air above).
+        x, y = c
+        return (
+            (x, y - 1) not in water_set
+            and (x + 1, y) in water_set
+            and (x + 1, y - 1) not in water_set
+        )
+
+    surface_cells = sorted(c for c in water_set if _flat_surface(c))
     pocket_cells = [
         c
         for c in deep_first
@@ -539,10 +582,18 @@ def make_fake_responder():
                     index=int(sec_match.group(2)) - 1,
                     total=int(sec_match.group(3)),
                     vol=vol, haz=haz,
-                    # Only emit breakable() when the registry advertises it
-                    # (the prompt gates the op) — a game without a breakable
-                    # tile (e.g. the lava world) must not receive the op.
+                    # Only emit an op when the prompt advertises it (the
+                    # vocabulary gates it) — a game without a breakable tile
+                    # (e.g. the lava world) must not receive breakable(); a
+                    # game without volume tiles gets no cloud. The cloud op is
+                    # advertised as water_cloud (water game) OR volume_cloud
+                    # (lava game) — accept either spelling.
                     has_breakable="breakable(x1,x2)" in msg,
+                    has_water_cloud=(
+                        "water_cloud(x1,y1,x2,y2)" in msg
+                        or "volume_cloud(name,x1,y1,x2,y2)" in msg
+                    ),
+                    has_reward="reward(x,y)" in msg,
                 )
             return _fake_layout(
                 width, height, vol=vol, haz=haz,

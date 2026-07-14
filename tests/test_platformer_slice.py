@@ -82,7 +82,8 @@ class TestDsl:
             ("floor(0,47)\nspawn(2)", "missing exit"),
             ("floor(0,47)\nexit(45)", "missing spawn"),
             ("floor(0,47)\nspawn(2)\nspawn(3)\nexit(4)", "more than once"),
-            ("floor(0,5)\nspike(10,11)\nspawn(2)\nexit(4)", "no ground"),
+            # (spike over no-ground now AUTO-CONVERTS to a pit — see
+            # TestSteppedSlopes.test_hazard_strip_over_gap_becomes_a_pit.)
             ("floor(0,5)\nwater(10,12,12)\nspawn(2)\nexit(4)", "no solid basin"),
             ("floor(0,47)\ngap(20,24)\nwater(20,24,12)\nspawn(2)\nexit(45)", "no solid basin"),
             ("floor(0,47)\nledge(5,9,15)\nspawn(2)\nexit(45)", "outside 1"),
@@ -355,7 +356,7 @@ class TestValidators:
         # (this is one auto_bridge iteration, applied at the grid level).
         stand = standable_cells(g)
         reached = reachable_cells(g, spawn, m)
-        frontier, nearest = _locate_break(stand, reached)
+        frontier, nearest = _locate_break(stand, reached, exit_)
         op = _suggest_bridge(g, frontier, nearest, m)
         assert op is not None, "no valid bridge found for the l1 cliff"
         col, row, length = map(
@@ -635,8 +636,9 @@ class TestValidators:
                 # Only the LAST section (whose cells all survive the seam
                 # overlap) and only once: a 9-wide gap centred in its floor —
                 # beyond a running jump's ~7-cell reach, so the whole-level
-                # bridger must add a stepping platform.
-                if idx == total - 1 and "gap_dsl" not in sent and lw >= 20:
+                # bridger must add a stepping platform. (>=18: fits a centred
+                # gap(mid-4,mid+4) with floor margins on both sides.)
+                if idx == total - 1 and "gap_dsl" not in sent and lw >= 18:
                     mid = lw // 2
                     sent["gap_dsl"] = (
                         f"floor(0,{lw - 1})\ngap({mid - 4},{mid + 4})"
@@ -764,6 +766,126 @@ class TestValidators:
             level.layout_fallback is False
             for level in ctx.bible.levels.values()
         )
+
+    def test_repairable_geometry_no_longer_falls_back(
+        self, tmp_path: Path
+    ) -> None:
+        """The paid-run failure storm: a section that pours a hazard over a gap
+        (and stairs off the ground) used to hard-raise every retry -> flat
+        fallback. Now stamp() auto-repairs it (hazard->pit, floor under stairs),
+        so the section validates on attempt 1 and the level ships REAL content
+        with no fallback + no layout warning."""
+        good = make_fake_responder()
+        hit = {"done": False}
+
+        def responder(request):
+            msg = request.user_message
+            m = re.search(r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg)
+            gm = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            if m and gm and int(m.group(2)) == 2 and int(m.group(3)) >= 3:
+                hit["done"] = True
+                lw = int(gm.group(1))
+                # A hazard over a gap + stairs off the ground — both were
+                # hard-raises before the code-not-LLM repairs.
+                return (
+                    f"floor(0,{lw - 1})\ngap(6,9)\nhazard_strip(spike,6,9)\n"
+                    "stairs_up(11,13)\ncarve(11,1,13,1)"
+                )
+            return good(request)
+
+        ctx = _run_slice(tmp_path / "run", responder=responder)
+        assert hit["done"], "no >=3-section level exercised the repair"
+        assert not any(
+            "layout" in w for w in ctx.artifacts.get("slice_warnings", [])
+        )
+        assert all(lv.layout_fallback is False for lv in ctx.bible.levels.values())
+
+    def test_terminal_fallback_is_local_not_a_whole_level_nuke(
+        self, tmp_path: Path
+    ) -> None:
+        """G3: when a section can't be repaired, ONLY it falls back — the
+        sections that passed SURVIVE (the 1z bug nuked the whole composite to a
+        flat floor, discarding good sections). An interior section that ALWAYS
+        spills whole-level (uncontained pool) drives the outer loop to its
+        terminal branch; the level must still carry real above-floor content."""
+        import numpy as np
+
+        good = make_fake_responder()
+        broke: set[str] = set()
+
+        def responder(request):
+            msg = request.user_message
+            lm = re.search(r"### LEVEL: (\w+)", msg)
+            m = re.search(r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg)
+            gm = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            # Section index 1 (0-based) of a >=3-section level, ALWAYS: a
+            # locally-valid full-height WALL barrier — the exit past it is
+            # UNbridgeable (no air above the wall for a platform) and it is not
+            # a containment spill, so neither auto_bridge nor the containment
+            # repair fixes it. The owner regenerates the same wall every retry,
+            # so the outer loop exhausts and hits the terminal branch.
+            if m and gm and lm and int(m.group(2)) == 2 and int(m.group(3)) >= 3:
+                broke.add(lm.group(1))
+                lw, h = int(gm.group(1)), int(gm.group(2))
+                return f"floor(0,{lw - 1})\nwall({lw // 2},0,{h - 3})"
+            return good(request)
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run, responder=responder)
+        assert broke, "no >=3-section level was broken"
+        fallbacks = [
+            lv for lv in ctx.bible.levels.values() if lv.layout_fallback
+        ]
+        assert fallbacks, "the unfixable section should flag a (partial) fallback"
+        for lv in fallbacks:
+            with np.load(run / lv.collision) as d:
+                grid = d["collision"]
+            # NOT a whole-level flat nuke: the surviving sections put real
+            # content ABOVE the two floor rows (a flat fallback is empty there).
+            assert (grid[: lv.grid_height - 2, :] != 0).any(), (
+                f"{lv.level_id} was flat-nuked — passed sections were discarded"
+            )
+            # Still walkable: spawn + exit are real standable cells.
+            assert lv.spawn is not None and lv.exit is not None
+
+    def test_containment_spill_repairs_to_free_water_no_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """G4 (code-not-LLM): an interior section that ALWAYS pours an
+        uncontained pool used to loop to a fallback; now the spill is
+        re-interpreted as free-standing water in CODE — the level ships clean
+        (no fallback, no layout warning) with the water preserved."""
+        import numpy as np
+
+        good = make_fake_responder()
+        broke: set[str] = set()
+
+        def responder(request):
+            msg = request.user_message
+            lm = re.search(r"### LEVEL: (\w+)", msg)
+            m = re.search(r"### SECTION: (\w+) \((\d+) of (\d+)\)", msg)
+            gm = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            if m and gm and lm and int(m.group(2)) == 2 and int(m.group(3)) >= 3:
+                broke.add(lm.group(1))
+                lw, h = int(gm.group(1)), int(gm.group(2))
+                g = h - 2
+                # An uncontained pool at the section's left interior — spills,
+                # but is code-repairable to a free-water feature.
+                return f"floor(0,{lw - 1})\nvolume(water,4,6,{g - 2})"
+            return good(request)
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run, responder=responder)
+        assert broke, "no >=3-section level was broken"
+        # No layout warning, no fallback anywhere — the spill was repaired.
+        assert not any(
+            "layout" in w for w in ctx.artifacts.get("slice_warnings", [])
+        )
+        affected = [lv for lv in ctx.bible.levels.values() if lv.level_id in broke]
+        for lv in affected:
+            assert lv.layout_fallback is False, f"{lv.level_id} fell back"
+            with np.load(run / lv.collision) as d:
+                assert (d["collision"] == int(TileType.WATER)).any()  # water kept
 
     def test_placement_retry_prompt_carries_previous_attempt(
         self, tmp_path: Path
@@ -1303,9 +1425,9 @@ class TestEndToEnd:
         # Variable dims: schema-rolled RANGES, banded by difficulty —
         # rolled values land inside their band and escalate in width.
         bands = {
-            "l1": ((40, 52), (14, 16)),
-            "l2": ((52, 66), (16, 20)),
-            "l3": ((64, 84), (16, 24)),
+            "l1": ((48, 72), (14, 16)),
+            "l2": ((72, 104), (16, 20)),
+            "l3": ((100, 132), (18, 26)),
         }
         for lid, ((w_lo, w_hi), (h_lo, h_hi)) in bands.items():
             level = levels[lid]
@@ -1865,7 +1987,9 @@ class TestGenericOps:
         )
         assert "argument COUNT" in req.system
         assert "never more" in req.system.lower()
-        assert "wall(19, 12, 13)" in req.user_message  # worked example
+        # A worked, in-bounds wall example (column anchored to width now).
+        wm = re.search(r"Example: wall\((\d+), (\d+), (\d+)\)", req.user_message)
+        assert wm and int(wm.group(1)) < W
         assert "NOT a rectangle" in req.user_message
 
     def test_section_prompt_reflects_archetype_character(self) -> None:
@@ -1896,6 +2020,53 @@ class TestGenericOps:
         # Intensity pacing differs (high gauntlet vs low runway).
         assert "dense and demanding" in g
         assert "breather" in r
+
+    def test_section_prompt_teaches_clouds_and_alcoves(self) -> None:
+        """Chunk E: the section vocabulary offers water_cloud + reward, teaches
+        floating swim-up clouds and secret alcoves, and a cave's feature_bias
+        translates the new families (cloud -> water_cloud, secret -> reward)."""
+        from examples.platformer_pack.sections import DEFAULT_VOCAB
+
+        a = DEFAULT_VOCAB["cave"]
+        msg = PlatformerPrompts().section_layout(
+            "l1", "b", "cave", a.flavor, a.feature_bias, 1, 3, 24, H,
+            DEFAULT_MOVEMENT, intensity=a.intensity, water=a.water,
+        ).user_message
+        # Ops advertised.
+        assert "water_cloud(x1,y1,x2,y2)" in msg
+        assert "reward(x,y)" in msg
+        # Feature guidance present.
+        assert "floating CLOUD of water" in msg
+        assert "Secret alcoves" in msg
+        # Cave bias (cloud:1, secret:2) sprinkles the new ops in.
+        assert "sprinkle in" in msg and "water_cloud" in msg and "reward" in msg
+
+    def test_section_prompt_example_coords_fit_a_narrow_vertical(self) -> None:
+        """G5: worked-example COLUMNS are anchored to the section width, so a
+        narrow vertical shaft never advertises out-of-bounds columns (the
+        hardcoded 19/20/25/26 overran a 16-26-wide climb and the model copied
+        them into a DslError). The floorless branch also frames the valid
+        columns and forbids the floor-dependent ops."""
+        W, H = 16, 24
+        m = PlatformerPrompts().section_layout(
+            "x/l7", "climb", "ascent", "up", {}, 1, 3, W, H,
+            DEFAULT_MOVEMENT, axis="vertical", water="optional",
+        ).user_message
+        first = [
+            int(c)
+            for c in re.findall(
+                r"(?:wall|platform|ledge|carve|floor|gap)\((\d+)", m
+            )
+        ]
+        second = [
+            int(c)
+            for c in re.findall(
+                r"(?:pool|volume|water_cloud|water_block)\(\w+,(\d+)", m
+            )
+        ]
+        assert first and all(c < W for c in first + second)  # all in-bounds
+        assert "NO ground floor" in m and f"valid columns 0..{W - 1}" in m
+        assert "do NOT use floor/pool/hazard_strip" in m
 
     def test_enemy_system_prompt_forbids_extra_fields(self) -> None:
         """Per-task system prompt: the enemy agent returns only the named
@@ -1928,6 +2099,84 @@ class TestCheckpoints:
                 "floor(0,47)\ncheckpoint(20)\ncheckpoint(20)\n"
                 "spawn(2)\nexit(45)", W, H,
             )
+
+
+class TestSecretAlcoves:
+    """Chunk E: reward(x,y) marks a hidden collectible inside a carved niche.
+    Layout-only — it lands in the triggers layer (a NEW trigger type) and the
+    play surfaces ignore it, so it survives the stitcher untouched."""
+
+    def test_reward_lands_in_triggers_in_open_air(self) -> None:
+        # A niche carved into a wall, a reward tucked inside.
+        result = stamp(
+            "floor(0,47)\nwall(20,10,13)\ncarve(20,11,20,11)\nreward(20,11)\n"
+            "spawn(2)\nexit(45)", W, H,
+        )
+        assert [(t.x, t.y, t.type) for t in result.triggers] == [
+            (20, 11, "reward")
+        ]
+
+    def test_reward_on_solid_is_dropped_not_raised(self) -> None:
+        # code-not-LLM: a reward on solid is a cosmetic mistake — dropped with a
+        # repair note, never a fallback.
+        result = stamp(
+            "floor(0,47)\nwall(20,10,13)\nreward(20,11)\nspawn(2)\nexit(45)",
+            W, H,
+        )
+        assert not any(t.type == "reward" for t in result.triggers)
+        assert any("reward" in r for r in result.repairs)
+
+    def test_reward_covered_by_a_later_op_is_dropped(self) -> None:
+        """Records mirror the FINAL grid (like hazards): a reward whose cell a
+        later op fills is not emitted as a phantom trigger."""
+        result = stamp(
+            "floor(0,47)\nreward(20,8)\nwall(20,7,9)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert not any(t.type == "reward" for t in result.triggers)
+
+    def test_reward_survives_snap_and_composite(self) -> None:
+        """A reward is a non-checkpoint trigger: snap_checkpoints_grid leaves
+        it untouched, and composite offsets it by the section origin — so it
+        rides through the stitcher into the whole level."""
+        from examples.platformer_pack.sections import composite
+        from examples.platformer_pack.validate import snap_checkpoints_grid
+
+        sec = stamp(
+            "floor(0,23)\nwall(10,10,13)\ncarve(10,11,10,11)\nreward(10,11)\n"
+            "spawn(2)", 24, H, validate_markers=False,
+        )
+        whole = composite([(sec, 30, 0)], 60, H)
+        assert (40, 11, "reward") in [
+            (t.x, t.y, t.type) for t in whole.triggers
+        ]
+        kept, moves = snap_checkpoints_grid(whole.grid, whole.triggers)
+        assert (40, 11, "reward") in [(t.x, t.y, t.type) for t in kept]
+        assert not moves  # only checkpoints move
+
+    def test_fake_cave_section_hides_a_reward_niche(self) -> None:
+        """The $0 fake exercises the alcove path: a cave section (with the
+        reward + cloud ops advertised) stamps clean and tucks a reward into a
+        niche off the floor, plus swimmable cloud water."""
+        from examples.run_platformer_slice import _fake_section
+
+        dsl = _fake_section(
+            24, 16, "cave", 1, 3, "water", "spike",
+            has_water_cloud=True, has_reward=True,
+        )
+        assert "reward(" in dsl
+        res = stamp(dsl, 24, 16, validate_markers=False)
+        assert any(t.type == "reward" for t in res.triggers)
+        assert (res.grid == int(TileType.WATER)).any()  # the cloud
+
+    def test_fake_climb_section_floats_a_water_cloud(self) -> None:
+        from examples.run_platformer_slice import _fake_section
+
+        dsl = _fake_section(
+            18, 40, "climb", 0, 2, "water", "spike", has_water_cloud=True,
+        )
+        assert "volume_cloud(" in dsl  # registry-generic cloud spelling
+        res = stamp(dsl, 18, 40, validate_markers=False)
+        assert (res.grid == int(TileType.WATER)).any()
 
 
 #: Verbatim from review/ashen_grove/l3_layout_attempts.json of the third
@@ -2042,9 +2291,29 @@ class TestSteppedSlopes:
             assert int(hill.grid[top, x]) == int(TileType.FLOOR)
             assert int(hill.grid[top - 1, x]) == 0
 
-    def test_stairs_need_ground_floor(self) -> None:
-        with pytest.raises(DslError, match="stairs_up: column 25 has no ground"):
-            stamp("floor(0,20)\nstairs_up(25,27)\nspawn(2)\nexit(18)", W, H)
+    def test_stairs_auto_lay_floor_when_off_the_ground(self) -> None:
+        # code-not-LLM: a ramp with no ground under it gets floor laid, not a
+        # fallback (the #-heavy real-run failure class).
+        res = stamp("floor(0,20)\nstairs_up(25,27)\nspawn(2)\nexit(18)", W, H)
+        assert int(res.grid[H - 2, 25]) == TileType.FLOOR  # floor laid under it
+        assert int(res.grid[H - 2, 26]) == TileType.FLOOR
+        assert int(res.grid[H - 3, 26]) == TileType.FLOOR  # a step rose
+        assert any("laid floor" in r for r in res.repairs)
+
+    def test_hazard_strip_over_gap_becomes_a_pit(self) -> None:
+        # A hazard with no floor auto-converts to a PIT (hazard at the bottom),
+        # and a hazard over a WALL sits on it (any solid counts, not just floor).
+        pit = stamp(
+            "floor(0,20)\ngap(10,12)\nhazard_strip(spike,10,12)\nspawn(2)\n"
+            "exit(18)", W, H,
+        )
+        assert int(pit.grid[H - 1, 11]) == TileType.SPIKE  # hazard at the bottom
+        assert any("pit" in r for r in pit.repairs)
+        on_wall = stamp(
+            "floor(0,20)\nwall(10,11,14)\nhazard_strip(spike,10,10)\nspawn(2)\n"
+            "exit(18)", W, H,
+        )
+        assert int(on_wall.grid[H - 3, 10]) == TileType.SPIKE  # sits on the wall
 
     def test_tall_stairs_cap_leaves_air_above(self) -> None:
         # A 20-column ramp on a 16-tall grid plateaus instead of sealing
@@ -2129,7 +2398,7 @@ class TestSteppedSlopes:
         reached = reachable_cells(result.grid, result.spawn, DEFAULT_MOVEMENT)
         assert (14, 5) in reached  # standing on the ledge, via the water
 
-    def test_water_block_floats_and_rejects_occupied_cells(self) -> None:
+    def test_water_block_floats_and_clips_occupied_cells(self) -> None:
         result = stamp(
             "floor(0,47)\nwater_block(20,4,22,5)\nspawn(2)\nexit(45)", W, H,
         )
@@ -2140,11 +2409,120 @@ class TestSteppedSlopes:
             free_volume=result.free_volume,
         )
         assert not problems
-        with pytest.raises(DslError, match="must be open air"):
-            stamp(
-                f"floor(0,47)\nwater_block(20,{H - 2},22,{H - 2})\n"
-                "spawn(2)\nexit(45)", W, H,
-            )
+        # code-not-LLM: a block poured ON the ground floor CLIPS to open air
+        # (nothing open here -> dropped, with a repair note) instead of raising.
+        clipped = stamp(
+            f"floor(0,47)\nwater_block(20,{H - 2},22,{H - 2})\n"
+            "spawn(2)\nexit(45)", W, H,
+        )
+        assert int(clipped.grid[H - 2, 21]) == TileType.FLOOR  # floor kept
+        assert (21, H - 2) not in clipped.free_volume  # no water on the floor
+        assert any("clipped" in r for r in clipped.repairs)
+
+    def test_water_cloud_puffs_the_corners_and_is_swim_up(self) -> None:
+        """Chunk E: water_cloud is a free-water swim-up pocket like
+        water_block, but its four corners are trimmed to a rounded silhouette
+        (only when big enough — the swim-up centre column always survives),
+        and it is containment-exempt."""
+        from examples.platformer_pack.validate import reachable_cells
+
+        # 5 wide x 3 tall -> corners trimmed, centre full.
+        result = stamp(
+            "floor(0,47)\nwater_cloud(20,4,24,6)\nspawn(2)\nexit(45)", W, H,
+        )
+        assert int(result.grid[4, 20]) == TileType.EMPTY  # trimmed corner
+        assert int(result.grid[4, 24]) == TileType.EMPTY
+        assert int(result.grid[5, 22]) == TileType.WATER  # centre body
+        assert int(result.grid[6, 20]) == TileType.EMPTY  # trimmed corner
+        assert (22, 5) in result.free_volume
+        # Containment-exempt (free water FEATURE), reachable as a swim path.
+        assert not check_level(
+            result.grid, result.spawn, result.exit, DEFAULT_MOVEMENT,
+            free_volume=result.free_volume,
+        )
+        # A high ledge reachable ONLY by swimming up through the cloud (same
+        # geometry the water_wall climb test proves, via free-water swim rules).
+        climb = stamp(
+            "floor(0,47)\nledge(13,16,6)\nwater_cloud(10,5,11,13)\n"
+            "spawn(2)\nexit(45)", W, H,
+        )
+        reached = reachable_cells(climb.grid, climb.spawn, DEFAULT_MOVEMENT)
+        assert (14, 5) in reached  # standing on the high ledge, via the cloud
+
+    def test_water_cloud_small_stays_rectangular_and_clips_solids(self) -> None:
+        """A 2-tall (or narrow) cloud keeps every cell — no degenerate trim —
+        and, like any free-water op, it CLIPS around terrain it overlaps."""
+        result = stamp(
+            "floor(0,47)\nwater_cloud(20,4,23,5)\nspawn(2)\nexit(45)", W, H,
+        )
+        # height 2 -> no corner trim; all four corners are water.
+        for x, y in ((20, 4), (23, 4), (20, 5), (23, 5)):
+            assert int(result.grid[y, x]) == TileType.WATER
+        # code-not-LLM: a cloud overlapping a wall clips to the open cells (the
+        # wall column stays a wall, the rest of the pocket fills) — no raise.
+        clipped = stamp(
+            "floor(0,47)\nwall(21,4,6)\nwater_cloud(20,4,23,6)\n"
+            "spawn(2)\nexit(45)", W, H,
+        )
+        assert int(clipped.grid[4, 21]) == TileType.WALL  # wall untouched
+        assert int(clipped.grid[5, 20]) == TileType.WATER  # rest of pocket fills
+        assert any("clipped" in r for r in clipped.repairs)
+
+    def test_fake_surface_anchors_skip_cloud_shoulders(self) -> None:
+        """Regression (Chunk E): a rounded water_cloud exposes single-cell
+        'shoulder' surface cells (a trimmed top corner leaves a lone top cell
+        whose neighbour is submerged). The fake placement picker must offer only
+        2-wide-capable FLAT-TOP anchors, or a 2-wide surface swimmer gets
+        dropped by the footprint check (masked on emberfall_001, hit on others)."""
+        from examples.run_platformer_slice import _fake_spots
+
+        # A trimmed 5x3 cloud: top row cols 3-5, middle 2-6, bottom 3-5.
+        vol = "water: y=8: x 3-5; y=9: x 2-6; y=10: x 3-5"
+        msg = (
+            "Standable cells (x, y are grid coords, y from top): \n"
+            f"Volume cells by tile (swimmers ONLY go here): {vol}\n"
+            "Open-air cells (FLYERS hover here, above the ground): none\n"
+            "Player spawn: [0, 0]\n"
+        )
+        water = {(3, 8), (4, 8), (5, 8), (2, 9), (3, 9), (4, 9), (5, 9),
+                 (6, 9), (3, 10), (4, 10), (5, 10)}
+        surface = _fake_spots(msg)["surface"]
+        assert surface  # some anchor IS offered
+        for x, y in surface:
+            # top-of-water AND a right neighbour that is ALSO top-of-water,
+            # so a 2-wide surface body fits (cols x, x+1 both on the surface).
+            assert (x, y - 1) not in water
+            assert (x + 1, y) in water and (x + 1, y - 1) not in water
+        # the shoulders (cols 2 & 6 at row 9) are never offered.
+        assert (2, 9) not in surface and (6, 9) not in surface
+
+    def test_water_less_volume_world_is_offered_generic_cloud_ops(self) -> None:
+        """A lava world (volume tile, no 'water') must be advertised the
+        registry-generic volume_* free-water ops — NOT the water_* aliases,
+        which resolve the absent 'water' tile and would fail. Both the op it is
+        told to use AND the fake it drives must stamp clean."""
+        lava = _registry(
+            _BASE_TILES
+            + [
+                {"id": 10, "name": "spike", "category": "hazard"},
+                {"id": 20, "name": "lava", "category": "volume",
+                 "params": {"damage_per_second": 5}},
+            ]
+        )
+        msg = PlatformerPrompts().section_layout(
+            "l1", "b", "islands", "f", {"cloud": 2}, 1, 3, 24, 16,
+            DEFAULT_MOVEMENT, tiles=lava,
+        ).user_message
+        assert "volume_cloud(name,x1,y1,x2,y2)" in msg
+        assert "water_cloud(x1,y1,x2,y2)" not in msg  # would break in lava
+        assert "water_block(x1,y1,x2,y2)" not in msg
+        assert "CLOUD of lava" in msg
+        # The advertised op actually stamps in this registry.
+        res = stamp(
+            "floor(0,23)\nvolume_cloud(lava,5,3,9,6)\nspawn(2)\nexit(22)",
+            24, 16, tiles=lava,
+        )
+        assert (res.grid == lava.by_name["lava"].id).any()
 
     def test_unreachable_checkpoint_flagged(self) -> None:
         """check_level validates checkpoints like spawn/exit — standable

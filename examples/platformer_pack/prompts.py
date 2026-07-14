@@ -119,8 +119,10 @@ _FEATURE_OPS = {
     "wall": "wall, carve",
     "stairs": "stairs_up, stairs_down, pyramid",
     "water": "pool, water_wall, water_block",
+    "cloud": "water_cloud",
     "ledge": "ledge",
     "breakable": "breakable",
+    "secret": "reward",
 }
 
 _INTENSITY_HINT = {
@@ -348,19 +350,38 @@ class PlatformerPrompts:
         tiles: TileRegistry,
         rules: GameRules,
         height: int,
+        width: int = 48,
     ) -> tuple[list[str], list[str]]:
         """The op VOCABULARY and its guidance lines, from the game's tile
         registry — shared by the whole-level :meth:`layout_generation` and the
         per-section :meth:`section_layout` (both advertise the same features;
         a game with lava/lasers offers those, one without water never mentions
-        it)."""
+        it). Worked-example COLUMNS are anchored to ``width`` so they stay
+        in-bounds on a narrow (vertical shaft) section — hardcoded cols 19-26
+        overran a 16-26-wide climb and the model copied them into a DslError."""
         volumes = tiles.named("volume")
         hazards = tiles.named("hazard")
+        # A safe left anchor for illustrative multi-column examples: the pool
+        # recipe spans ex..ex+7, so keep ex+7 < width.
+        ex = max(1, min(width // 2, width - 9))
+        # Free-water FEATURE ops come in two spellings: the ergonomic water_*
+        # aliases (which resolve the "water" tile) and the registry-generic
+        # volume_*(name,...) forms. Advertise the ergonomic ones ONLY when the
+        # game actually HAS a water tile; a lava world (or any water-less
+        # volume game) is offered the generic forms with its own liquid — being
+        # told to emit water_* it can't stamp is the bug this guards.
+        water_tile = tiles.by_name.get("water")
+        has_water = water_tile is not None and water_tile.category == "volume"
+        liquid = "water" if has_water else (volumes[0].name if volumes else "water")
+        _pfx, _nm = ("water", "") if has_water else ("volume", "name,")
+        wall_op = f"{_pfx}_wall({_nm}x1,x2,y_top)"
+        block_op = f"{_pfx}_block({_nm}x1,y1,x2,y2)"
+        cloud_op = f"{_pfx}_cloud({_nm}x1,y1,x2,y2)"
         ops = [
             "floor(x1,x2)", "gap(x1,x2)", "pit(x1,x2)", "platform(x,y,len)",
             "ledge(x1,x2,y)", "wall(x,y1,y2)", "carve(x1,y1,x2,y2)",
             "stairs_up(x1,x2)", "stairs_down(x1,x2)", "pyramid(x1,x2)",
-            "checkpoint(x)", "spawn(x)", "exit(x)",
+            "checkpoint(x)", "reward(x,y)", "spawn(x)", "exit(x)",
         ]
         if "breakable" in tiles.by_name:
             ops.append("breakable(x1,x2)")
@@ -369,17 +390,19 @@ class PlatformerPrompts:
         if volumes:
             ops.append("volume(name,x1,x2,y_surface)")
             ops.append("pool(name,x1,x2)")
-            ops.append("water_wall(x1,x2,y_top)")
-            ops.append("water_block(x1,y1,x2,y2)")
+            ops.append(wall_op)
+            ops.append(block_op)
+            ops.append(cloud_op)
         vocab_lines = [
             # The model conflated wall (3 args) with the 4-arg rectangle ops
             # (l8 emitted a 4-arg wall three times into fallback): show wall
             # ISOLATED with a worked example and the explicit contrast.
             "wall(x, y1, y2): ONE solid column x filled from row y1 to row "
             "y2 — exactly THREE numbers (a single column, two row bounds). "
-            "It is NOT a rectangle: carve and water_block take four numbers, "
-            "wall takes three. Example: wall(19, 12, 13) fills column 19 at "
-            "rows 12-13, a 2-tall pillar.",
+            f"It is NOT a rectangle: carve and {_pfx}_block take four numbers, "
+            f"wall takes three. Example: wall({ex}, {height - 4}, {height - 3}) "
+            f"fills column {ex} at rows {height - 4}-{height - 3}, a 2-tall "
+            "pillar.",
             # Shape variety is op work, not coaching: carve notches
             # silhouettes, ledge stacks build tiers — both fully validated.
             "carve(x1,y1,x2,y2): clears a rectangle back to empty air "
@@ -407,31 +430,46 @@ class PlatformerPrompts:
             ground = height - 2
             vocab_lines.append(
                 f"Pool recipe — two correct shapes: (1) SUNKEN, flush "
-                f"with the ground: pool({volumes[0].name},20,25) on solid "
-                "floor — the easiest; never pour volume() over a gap or "
+                f"with the ground: pool({volumes[0].name},{ex + 1},{ex + 6}) on "
+                "solid floor — the easiest; never pour volume() over a gap or "
                 "pit. (2) RAISED basin on top of the floor: the surface "
                 f"row must be OPEN AIR (row {ground} is the ground floor "
-                f"itself and is occupied): wall(19,{ground - 2},{ground - 1})  "
-                f"volume({volumes[0].name},20,25,{ground - 1})  "
-                f"wall(26,{ground - 2},{ground - 1})"
+                f"itself and is occupied): wall({ex},{ground - 2},{ground - 1})  "
+                f"volume({volumes[0].name},{ex + 1},{ex + 6},{ground - 1})  "
+                f"wall({ex + 7},{ground - 2},{ground - 1})"
             )
             # Water-as-a-FEATURE (playtest direction): big deliberate
-            # shapes, not obligatory puddles — and fully optional.
+            # shapes, not obligatory puddles — and fully optional. The op
+            # spelling + liquid word track the registry (water_* + "water"
+            # for a water game, volume_* + the liquid name for a lava game).
             vocab_lines.append(
-                "Water is OPTIONAL — a mostly-airborne level (jump "
-                "gauntlet, canopy hop) is BETTER with no water than with "
-                "a forced pool; treat the rolled pool count as a maximum, "
-                "not a quota. When water fits, prefer BIG deliberate "
-                "features over puddles: water_wall(x1,x2,y_top) drops a "
-                "full column of water from y_top down to the terrain — a "
-                "waterfall/shaft the player swims UP and leaps out of "
-                "(1-3 columns wide, several rows tall; over a pit it runs "
-                "out the bottom and sinking too deep is a fall death — a "
-                "deliberate spout hazard). water_block(x1,y1,x2,y2) "
-                "floats a pocket of water in open air (whimsical worlds "
-                "float their water; make it at least 2x2 so it reads as "
-                "a feature). Both are exempt from the basin/containment "
-                "rules — they are free-standing by design."
+                f"{liquid.capitalize()} is OPTIONAL — a mostly-airborne level "
+                "(jump gauntlet, canopy hop) is BETTER with no "
+                f"{liquid} than with a forced pool; treat the rolled pool "
+                "count as a maximum, not a quota. When "
+                f"{liquid} fits, prefer BIG deliberate features over puddles: "
+                f"{wall_op} drops a full column of {liquid} from y_top down to "
+                "the terrain — a waterfall/shaft the player swims UP and leaps "
+                "out of (1-3 columns wide, several rows tall; over a pit it "
+                "runs out the bottom and sinking too deep is a fall death — a "
+                f"deliberate spout hazard). {block_op} floats a pocket of "
+                f"{liquid} in open air (whimsical worlds float their {liquid}; "
+                "make it at least 2x2 so it reads as a feature). Both are "
+                "exempt from the basin/containment rules — they are "
+                "free-standing by design."
+            )
+            # Floating CLOUDS (Chunk E): the swim-up pocket, used LIBERALLY
+            # where the section wants it (climbs, islands, caves).
+            vocab_lines.append(
+                f"{cloud_op}: a floating CLOUD of {liquid} hanging in open air "
+                "— a SWIM-UP POCKET. The player jumps into it from below and "
+                "swims UP through it to reach heights a jump alone can't, then "
+                "leaps out the top; over a gap it also floats them across. It "
+                "puffs into a rounded cloud shape (make it at least 4 wide x 3 "
+                "tall so it reads as a cloud and holds a swimmable body). Use "
+                "SEVERAL, stacked up a climb or strung over open space, so the "
+                f"player rises or crosses through them. Containment-exempt like "
+                f"{_pfx}_wall/{_pfx}_block."
             )
         if hazards:
             vocab_lines.append(
@@ -447,6 +485,17 @@ class PlatformerPrompts:
                 "columns) so a moving player can cross before it breaks; use it "
                 "for tension, never as the only footing over a wide gap."
             )
+        # Secret alcoves (Chunk E) — reward the curious explorer. Built from
+        # existing terrain ops (wall/carve/ledge), marked with reward().
+        vocab_lines.append(
+            "Secret alcoves: tuck a HIDDEN niche into the terrain — carve a "
+            "small recess behind a wall, under a ledge, or into a hill/ceiling "
+            "(a pocket of open air the eye skips over) — and drop a reward(x,y) "
+            "marker inside it (a placeholder for a future collectible; the cell "
+            "must be OPEN AIR). Leave a small opening so a thorough player can "
+            "jump in and reach it. Keep them RARE and OFF the main path — a "
+            "bonus for exploring, never a required step."
+        )
         return ops, vocab_lines
 
     @staticmethod
@@ -483,7 +532,7 @@ class PlatformerPrompts:
         # of rolling a fresh (differently broken) one each attempt.
         fb = self._layout_feedback(previous, feedback)
         volumes = tiles.named("volume")
-        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height)
+        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
         return LLMRequest(
             system=_SYSTEM_LAYOUT,
             user_message=(
@@ -554,7 +603,7 @@ class PlatformerPrompts:
         SECTION's own dims — every coordinate is section-local."""
         fb = self._layout_feedback(previous, feedback)
         volumes = tiles.named("volume")
-        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height)
+        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
         character = (
             f"Section character — {section_name}: {flavor}\n"
             + _bias_guidance(feature_bias)
@@ -583,7 +632,11 @@ class PlatformerPrompts:
                     "Do NOT place a spawn — the player climbs up from below. "
                     "Build a stack of STAGGERED platforms/ledges the player "
                     "jumps UP through. Do NOT lay a full-width floor (it would "
-                    "wall off the climb)."
+                    "wall off the climb). This section has NO ground floor, so "
+                    f"build ONLY from platform/ledge/wall/carve/free-water "
+                    f"(valid columns 0..{right}, ledge/platform rows "
+                    f"1..{height - 3}); do NOT use floor/pool/hazard_strip/"
+                    "stairs, which need solid ground beneath them."
                 )
             if last:
                 marker_rule += (
@@ -623,10 +676,9 @@ class PlatformerPrompts:
             else:
                 marker_rule = (
                     "Do NOT place a spawn — the player arrives from the "
-                    "previous section. Do NOT place an exit — the level's exit "
-                    "is added automatically at the whole level's far right. You "
-                    "MAY place ONE checkpoint(x) on clear flat floor near the "
-                    "middle of THIS section (a mid-level respawn point)."
+                    "previous section. Do NOT place an exit or a checkpoint — "
+                    "the level's exit and its checkpoints are added "
+                    "automatically at the right cells."
                 )
             if last:
                 marker_rule += (
@@ -655,9 +707,8 @@ class PlatformerPrompts:
                     if rules.water_containment == "contained" and volumes
                     else ""
                 )
-                + "; keep the spawn and checkpoint columns clear — no "
-                "platform, wall, hazard, volume, or gap may cover them or "
-                "remove the floor beneath them."
+                + "; keep the spawn column clear — no platform, wall, hazard, "
+                "volume, or gap may cover it or remove the floor beneath it."
             )
 
         return LLMRequest(

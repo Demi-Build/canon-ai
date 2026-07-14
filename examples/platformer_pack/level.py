@@ -45,7 +45,7 @@ from examples.platformer_pack.sections import (
     PlannedSection,
     SectionArchetype,
     composite,
-    plan_sections,
+    plan_level,
     section_owner_of_cell,
 )
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
@@ -53,8 +53,9 @@ from examples.platformer_pack.validate import (
     auto_bridge_grid,
     check_placements,
     flyer_spot_exists,
+    place_checkpoints_grid,
     place_exit,
-    snap_checkpoints_grid,
+    repair_containment_grid,
     snap_spawn_grid,
     standable_cells,
     swimmer_spot_exists,
@@ -76,6 +77,24 @@ def _fallback_dsl(width: int) -> str:
     """A guaranteed-valid layout so a fully misbehaving LLM still yields a
     walkable (if boring) level instead of a dead pipeline."""
     return f"floor(0,{width - 1})\nspawn(2)\nexit({width - 3})"
+
+
+def _whole_fallback(
+    width: int, height: int, axis: str, tiles: TileRegistry
+) -> StampResult:
+    """The last-resort WHOLE-level fallback (used only when even a local
+    section fallback can't stitch a walkable level): a flat floor for a
+    horizontal level, a climbable LADDER with a summit exit for a vertical one —
+    so a climb never degenerates into a side-scrolling floor (G6)."""
+    if axis == "vertical":
+        res = stamp(
+            _section_fallback_dsl(width, height, 0, "vertical"),
+            width, height, tiles=tiles, validate_markers=False,
+        )
+        exclude = {res.spawn} if res.spawn else set()
+        res.exit = place_exit(res.grid, tiles, exclude=exclude, axis="vertical")
+        return res
+    return stamp(_fallback_dsl(width), width, height, tiles=tiles)
 
 
 def _stage_for_level(ctx: Any, level_id: str):
@@ -143,9 +162,10 @@ def _roll_level_axis(ctx: Any, level_id: str, phase_name: str, stage_number: int
 def _vertical_dims(width: int, height: int) -> tuple[int, int]:
     """Recast a rolled (wide, short) level into TALL + NARROW for a climb: the
     wide dimension becomes the HEIGHT (the ascent), the short becomes the WIDTH
-    (a shaft). Clamped to sane bands (Chunk F widens them)."""
-    v_width = min(max(height, 16), 22)
-    v_height = min(max(width, 40), 56)
+    (a shaft). Clamped to sane bands — Chunk F widened them for taller climbs
+    (a shaft up to 26 wide / 96 tall) now that horizontal levels reach ~132."""
+    v_width = min(max(height, 16), 26)
+    v_height = min(max(width, 48), 96)
     return v_width, v_height
 
 
@@ -209,11 +229,11 @@ def level_section_plan(
     )
     difficulty = int(knobs.get("difficulty", 1))
     seed = str(getattr(ctx.config, "seed", ""))
-    return plan_sections(
+    return plan_level(
         level.grid_width, level.grid_height, difficulty,
         derive_rng(seed, layout_phase, level.level_id, "plan"),
         axis=axis,
-    )
+    ).sections
 
 
 def section_encounter_summary(
@@ -368,16 +388,27 @@ def _stitch_and_repair(
     movement: PlayerMovementSpec,
     rules: GameRules,
     tiles: TileRegistry,
+    checkpoint_sections: list[int],
 ) -> tuple[StampResult, list[str], list[str], list[str]]:
     """Composite the section sub-grids into the whole level, place the
     whole-level exit (right edge for horizontal, the climb SUMMIT for vertical —
-    "goal mode"), run the COMPUTABLE repairs (snap spawn/checkpoints +
-    auto_bridge) on the whole grid, and return ``(result, bridges, snaps,
-    problems)`` — ``problems`` is the whole-level ``check_level`` residue
-    (DESIGN failures the owning section must fix)."""
+    "goal mode"), run the COMPUTABLE repairs (snap spawn + auto_bridge) on the
+    whole grid, PLACE the blueprint's checkpoints on the final grid, and return
+    ``(result, bridges, snaps, problems)`` — ``problems`` is the whole-level
+    ``check_level`` residue (DESIGN failures the owning section must fix)."""
     parts = [(st.res, st.ps.x_off, st.ps.y_off) for st in states]
     whole = composite(parts, width, height)
-    exclude = {whole.spawn[0]} if whole.spawn else set()
+    # Code-not-LLM containment repair: a pool that spills only once composited
+    # (e.g. at a pit lip or a seam) becomes a free-standing water FEATURE rather
+    # than a design failure routed to the LLM — the water stays, no fallback is
+    # burned. Done BEFORE validation so check_level (via auto_bridge) sees it.
+    if rules.water_containment == "contained":
+        spilled, cont_notes = repair_containment_grid(
+            whole.grid, tiles, whole.free_volume
+        )
+        whole.free_volume |= spilled
+        whole.repairs.extend(cont_notes)
+    exclude = {whole.spawn} if whole.spawn else set()
     exit_ = place_exit(whole.grid, tiles, exclude=exclude, axis=axis)
     if exit_ is None:
         whole.exit = None
@@ -391,16 +422,22 @@ def _stitch_and_repair(
     whole.spawn, spawn_moves = snap_spawn_grid(
         whole.grid, whole.spawn, exit_, tiles
     )
-    whole.triggers, cp_moves = snap_checkpoints_grid(
-        whole.grid, whole.triggers, tiles
-    )
     grid, bridges, problems = auto_bridge_grid(
         whole.grid, whole.spawn, exit_, movement, rules=rules, tiles=tiles,
         triggers=whole.triggers, free_volume=whole.free_volume,
     )
     whole.grid = grid
     whole.exit = exit_
-    return whole, bridges, spawn_moves + cp_moves, problems
+    # Checkpoints are STITCHER-owned (the blueprint decides count + which
+    # sections). Strip any that slipped out of a section's DSL, then place the
+    # blueprint's on the FINAL (bridged) grid at reachable standable cells —
+    # count-capped + reachable by construction, both axes.
+    whole.triggers = [t for t in whole.triggers if t.type != "checkpoint"]
+    whole.triggers += place_checkpoints_grid(
+        grid, whole.spawn, exit_,
+        [st.ps for st in states], checkpoint_sections, axis, movement, tiles,
+    )
+    return whole, bridges, spawn_moves, problems
 
 
 def _owner_of_problem(
@@ -408,7 +445,18 @@ def _owner_of_problem(
 ) -> int:
     """Route the first whole-level problem to the section that owns its cell
     (by x-range for horizontal, y-range for vertical); a cell-less message
-    (exit/containment at the far edge) goes to the LAST section."""
+    (exit/containment at the far edge) goes to the LAST section.
+
+    A reachability break carries a machine-readable ``[break@x,y]`` tag for the
+    GAP cell (the midpoint of the break) — routed FIRST, so the section that
+    owns the gap regenerates, not the one holding the far-off target coord that
+    the prose prints before it (the horizontal-bias misroute the audit found)."""
+    for p in problems:
+        m = re.search(r"\[break@(\d+),(\d+)\]", p)
+        if m:
+            return section_owner_of_cell(
+                plan, int(m.group(1)), int(m.group(2)), axis
+            )
     for p in problems:
         m = re.search(r"\((\d+),\s*(\d+)\)", p)
         if m:
@@ -470,10 +518,11 @@ def _generate_sectioned_level(
     plus the combined DSL record, the fallback flag, the aggregated attempt
     log, and the bridge/snap notes for logging."""
     difficulty = int(knobs.get("difficulty", 1))
-    plan = plan_sections(
+    level_plan = plan_level(
         width, height, difficulty,
         derive_rng(seed, phase_name, level_id, "plan"), axis=axis,
     )
+    plan = level_plan.sections
     total = len(plan)
     max_retries = getattr(ctx.config, "max_retries", 3)
 
@@ -503,16 +552,34 @@ def _generate_sectioned_level(
     whole_fallback = False
     for attempt in range(max_retries + 1):
         result, bridges, snaps, problems = _stitch_and_repair(
-            states, width, height, axis, movement, rules, tiles
+            states, width, height, axis, movement, rules, tiles,
+            level_plan.checkpoint_sections,
         )
         if not problems:
             break
         if attempt == max_retries:
-            # Out of retries: fall the WHOLE level back to a flat guaranteed
-            # layout (a misbehaving model still yields a walkable level).
-            whole_fallback = True
-            result = stamp(_fallback_dsl(width), width, height, tiles=tiles)
-            bridges, snaps = [], []
+            # Terminal: DON'T nuke the sections that passed. Force ONLY the
+            # section that owns the residual problem to its guaranteed-valid
+            # fallback (a flat floor / climbable ladder) and re-stitch once.
+            # Whole-flat is the LAST resort — only if a locally-repaired
+            # composite still can't stitch a walkable level (a spawn/exit
+            # section or a cross-section structural break).
+            owner = _owner_of_problem(plan, problems, axis)
+            lw, lh = _section_local_dims(plan[owner], width, height, axis)
+            fb_dsl = _section_fallback_dsl(lw, lh, owner, axis)
+            states[owner] = _SectionState(
+                ps=plan[owner], dsl=fb_dsl,
+                res=stamp(fb_dsl, lw, lh, tiles=tiles, validate_markers=False),
+                fell_back=True, attempts=states[owner].attempts,
+            )
+            result, bridges, snaps, problems = _stitch_and_repair(
+                states, width, height, axis, movement, rules, tiles,
+                level_plan.checkpoint_sections,
+            )
+            if problems:
+                whole_fallback = True
+                result = _whole_fallback(width, height, axis, tiles)
+                bridges, snaps = [], []
             break
         owner = _owner_of_problem(plan, problems, axis)
         ps = plan[owner]
@@ -529,7 +596,11 @@ def _generate_sectioned_level(
     section_fallbacks = sum(1 for st in states if st.fell_back)
     attempts: list[dict[str, Any]] = [a for st in states for a in st.attempts]
     if whole_fallback:
-        dsl_text = _fallback_dsl(width)
+        dsl_text = (
+            _section_fallback_dsl(width, height, 0, "vertical")
+            if axis == "vertical"
+            else _fallback_dsl(width)
+        )
     else:
         dsl_text = "\n".join(
             f"### SECTION {i}: {st.ps.archetype} "

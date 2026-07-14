@@ -7,12 +7,12 @@
       "depends_on_context": "level_number"
     },
     "grid_width": {
-      "lookup": [[1, [40, 52]], [2, [52, 66]], [3, [64, 84]]],
+      "lookup": [[1, [48, 72]], [2, [72, 104]], [3, [100, 132]]],
       "depends_on": "difficulty",
       "lookup_ranges": true
     },
     "grid_height": {
-      "lookup": [[1, [14, 16]], [2, [16, 20]], [3, [16, 24]]],
+      "lookup": [[1, [14, 16]], [2, [16, 20]], [3, [18, 26]]],
       "depends_on": "difficulty",
       "lookup_ranges": true
     },

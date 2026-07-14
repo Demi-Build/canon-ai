@@ -542,17 +542,68 @@ def check_volume_containment(
     return problems[:3]  # a few located examples beat a wall of repeats
 
 
+def _spilling_cells(
+    grid, tiles: TileRegistry = DEFAULT_TILES, exempt: set | None = None
+) -> set[tuple[int, int]]:
+    """The volume cells that SPILL under the 'contained' rule — a non-exempt
+    volume cell with an open (non-solid, non-volume) horizontal neighbour inside
+    the grid. (An exempt cell still HOLDS its neighbours; it is only skipped as
+    a subject.) Shared by :func:`check_volume_containment` and the repair."""
+    height, width = grid.shape
+    holds = tiles.ids("solid") | tiles.ids("volume")
+    exempt = exempt or frozenset()
+    out: set[tuple[int, int]] = set()
+    for x, y in volume_cells(grid, tiles):
+        if (x, y) in exempt:
+            continue
+        for nx in (x - 1, x + 1):
+            if 0 <= nx < width and int(grid[y, nx]) not in holds:
+                out.add((x, y))
+                break
+    return out
+
+
+def repair_containment_grid(
+    grid, tiles: TileRegistry = DEFAULT_TILES, free_volume: set | None = None
+) -> tuple[set[tuple[int, int]], list[str]]:
+    """Code-not-LLM containment repair: re-interpret a spilling CONTAINED pool
+    as a free-standing water FEATURE — its spilling cells join ``free_volume``,
+    which the containment rule exempts. The water STAYS (still swimmable, same
+    tile), no basin is forced, and no LLM round-trip / whole-level fallback is
+    burned. Mirrors :func:`auto_bridge_grid`'s doctrine (auto_bridge computes a
+    reachability fix; this computes a containment fix). Returns the newly-
+    exempted cells + a repair note (empty set / list when nothing spills)."""
+    spilled = _spilling_cells(grid, tiles, free_volume or set())
+    if not spilled:
+        return set(), []
+    return spilled, [
+        f"containment: {len(spilled)} spilling pool cell(s) re-interpreted as "
+        "free-standing water (a swim-up feature) — no basin required."
+    ]
+
+
 def _locate_break(
-    stand: set[tuple[int, int]], reached: set[tuple[int, int]]
+    stand: set[tuple[int, int]],
+    reached: set[tuple[int, int]],
+    target: tuple[int, int],
 ) -> tuple[tuple[int, int], tuple[int, int] | None]:
-    """(frontier, nearest unreachable foothold) of a reachability break."""
-    frontier = max(reached, key=lambda c: (c[0], -c[1]))
+    """(frontier, nearest unreachable foothold) of a reachability break, located
+    RELATIVE TO ``target`` (the unreachable exit/checkpoint) so it works on BOTH
+    axes and for any future multi-exit: the frontier is the reached cell nearest
+    the target (the edge of progress toward it), the nearest is the unreached
+    foothold closest to that frontier. A fixed max-column frontier used to pin
+    the break at the bottom-right FLOOR corner on a vertical climb and build a
+    junk bridge there."""
+    def _md(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    if not reached:  # pragma: no cover — spawn unstandable is caught earlier
+        return target, None
+    frontier = min(reached, key=lambda c: (_md(c, target), c[0], -c[1]))
     unreached = stand - reached
     if not unreached:
         return frontier, None
-    nearest = min(
-        unreached, key=lambda c: abs(c[0] - frontier[0]) + abs(c[1] - frontier[1])
-    )
+    nearest = min(unreached, key=lambda c: (_md(c, frontier), _md(c, target)))
     return frontier, nearest
 
 
@@ -646,9 +697,16 @@ def _describe_reachability_break(
     located-but-arithmetic fix ('between columns 32 and 37, within 3
     rows above') still did. Name the frontier cell, the unreachable
     foothold, the failing constraint, and the exact op to add."""
-    frontier, nearest = _locate_break(stand, reached)
+    frontier, nearest = _locate_break(stand, reached, target)
     if nearest is None:  # pragma: no cover — target is standable, so nonempty
-        return f"{label} at {target} is not reachable from spawn {spawn}."
+        return (
+            f"{label} at {target} is not reachable from spawn {spawn}. "
+            f"[break@{target[0]},{target[1]}]"
+        )
+    # The GAP cell (midpoint of the break) as a machine-readable tag so the
+    # section router regenerates the section that OWNS the gap, not the one
+    # holding the far-off target coord printed first.
+    gap = ((frontier[0] + nearest[0]) // 2, (frontier[1] + nearest[1]) // 2)
     dx = abs(nearest[0] - frontier[0])
     rise = frontier[1] - nearest[1]
     constraints = []
@@ -686,14 +744,16 @@ def _describe_reachability_break(
         return (
             f"{base} No stepping platform fits here — open up the "
             f"terrain between {frontier} and {nearest} (widen the "
-            f"passage or lower the ledge) so a path can exist."
+            f"passage or lower the ledge) so a path can exist. "
+            f"[break@{gap[0]},{gap[1]}]"
         )
     return (
         f"{base} Fix: ADD THIS ONE LINE to your layout, "
         f"changing nothing else: {bridge} — it is jumpable from "
         f"{frontier} and bridges toward {nearest}. "
         f"Remember: a flat gap wider than {movement.jump_width - 1} columns "
-        "is impossible to cross without a stepping platform."
+        f"is impossible to cross without a stepping platform. "
+        f"[break@{gap[0]},{gap[1]}]"
     )
 
 
@@ -989,7 +1049,7 @@ def auto_bridge(
             return text, added, problems
         stand = standable_cells(result.grid, tiles)
         reached = reachable_cells(result.grid, result.spawn, movement, tiles)
-        frontier, nearest = _locate_break(stand, reached)
+        frontier, nearest = _locate_break(stand, reached, result.exit)
         if nearest is None:  # pragma: no cover — guarded by check_level
             return text, added, problems
         op = _suggest_bridge(result.grid, frontier, nearest, movement, tiles)
@@ -1020,25 +1080,27 @@ def _floor_id(tiles: TileRegistry) -> int:
 def place_exit(
     grid,
     tiles: TileRegistry = DEFAULT_TILES,
-    exclude: set[int] | None = None,
+    exclude: set[tuple[int, int]] | None = None,
     axis: str = "horizontal",
 ) -> tuple[int, int] | None:
     """Where the stitcher plants the whole-level exit (sections never declare
     their own — the "goal mode" lives here, not in the DSL).
 
     - ``horizontal``: the RIGHTMOST ground-floored column with an open standing
-      cell (mirrors ``dsl.stamp``'s side-scroller exit relocation). ``exclude``
-      skips columns (e.g. the spawn).
+      cell (mirrors ``dsl.stamp``'s side-scroller exit relocation).
     - ``vertical``: the climb SUMMIT — the TOPMOST standable cell (smallest y),
       leftmost on ties. A vertical level exits at the top, not the right edge.
 
-    None when no such cell exists (a design failure the caller surfaces)."""
+    ``exclude`` is a set of CELLS to skip (e.g. the spawn cell) so the exit never
+    lands ON the spawn — a per-CELL exclude (not per-column) so a vertical summit
+    directly ABOVE the spawn is not wrongly dropped. None when no such cell
+    exists (a design failure the caller surfaces)."""
     height, width = grid.shape
     exclude = exclude or set()
     if axis == "vertical":
         stand = standable_cells(grid, tiles)
         summit = min(
-            (c for c in stand if c[0] not in exclude),
+            (c for c in stand if c not in exclude),
             key=lambda c: (c[1], c[0]),
             default=None,
         )
@@ -1046,7 +1108,7 @@ def place_exit(
     ground_row, standing_row = height - 2, height - 3
     floor_id = _floor_id(tiles)
     for x in range(width - 1, -1, -1):
-        if x in exclude:
+        if (x, standing_row) in exclude:
             continue
         if int(grid[ground_row, x]) == floor_id and int(grid[standing_row, x]) == 0:
             return (x, standing_row)
@@ -1145,6 +1207,60 @@ def snap_checkpoints_grid(
     return out, moves
 
 
+def place_checkpoints_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    sections: list,
+    checkpoint_sections: list[int],
+    axis: str,
+    movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> list[SparseMaskEntry]:
+    """The blueprint owns checkpoint COUNT + which sections host them; the
+    stitcher PLACES each at a REACHABLE standable cell inside its section's
+    range (a column for horizontal, a platform ROW for vertical). This unifies
+    both axes, guarantees reachable + count-capped checkpoints by construction
+    (no snap needed — the sectioned analogue of :func:`place_exit`), and lets a
+    vertical climb carry mid-climb respawns. Returns the checkpoint triggers.
+
+    Skips a section whose range holds no reachable standable cell (a checkpoint
+    there would be unfair); never places two on the same cell."""
+    if not checkpoint_sections or spawn is None:
+        return []
+    stand = standable_cells(grid, tiles)
+    reached = reachable_cells(grid, spawn, movement, tiles)
+
+    def _coord(c: tuple[int, int]) -> int:
+        return c[0] if axis == "horizontal" else c[1]
+
+    out: list[SparseMaskEntry] = []
+    used: set[tuple[int, int]] = set()
+    for si in checkpoint_sections:
+        if not 0 <= si < len(sections):
+            continue
+        ps = sections[si]
+        lo = ps.x_off if axis == "horizontal" else ps.y_off
+        hi = lo + ps.length
+        center = (lo + hi) // 2
+        cands = [
+            c
+            for c in stand
+            if c in reached
+            and lo <= _coord(c) < hi
+            and c != spawn
+            and c != exit_
+            and c not in used
+        ]
+        if not cands:
+            continue
+        # Nearest the section centre; deterministic tie-break.
+        pick = min(cands, key=lambda c: (abs(_coord(c) - center), c[0], c[1]))
+        used.add(pick)
+        out.append(SparseMaskEntry(x=pick[0], y=pick[1], type="checkpoint"))
+    return out
+
+
 def auto_bridge_grid(
     grid,
     spawn: tuple[int, int] | None,
@@ -1178,7 +1294,7 @@ def auto_bridge_grid(
             return grid, added, problems
         stand = standable_cells(grid, tiles)
         reached = reachable_cells(grid, spawn, movement, tiles)
-        frontier, nearest = _locate_break(stand, reached)
+        frontier, nearest = _locate_break(stand, reached, exit_)
         if nearest is None:  # pragma: no cover — guarded by check_level
             return grid, added, problems
         op = _suggest_bridge(grid, frontier, nearest, movement, tiles)
