@@ -43,7 +43,13 @@ from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
 
 def standable_cells(grid, tiles: TileRegistry = DEFAULT_TILES) -> set[tuple[int, int]]:
-    """Cells a body can stand in: empty with solid/one-way support below."""
+    """Cells a body can stand in: empty with solid/one-way support below.
+
+    A ``breakable`` tile is ``solid`` category, so it counts as support here —
+    reachability treats a crumbling floor as a PERMANENT foothold. v1 does NOT
+    model the break fuse (a consumer-only mechanic), so this is deliberately
+    conservative: a level is never rejected for footing that can break, even
+    though a slow player could fall through it."""
     height, width = grid.shape
     empty = tiles.empty_id
     support = tiles.ids("solid", "one_way")
@@ -536,17 +542,88 @@ def check_volume_containment(
     return problems[:3]  # a few located examples beat a wall of repeats
 
 
+def _spilling_cells(
+    grid, tiles: TileRegistry = DEFAULT_TILES, exempt: set | None = None
+) -> set[tuple[int, int]]:
+    """The volume cells that SPILL under the 'contained' rule — a non-exempt
+    volume cell with an open (non-solid, non-volume) horizontal neighbour inside
+    the grid. (An exempt cell still HOLDS its neighbours; it is only skipped as
+    a subject.) Shared by :func:`check_volume_containment` and the repair."""
+    height, width = grid.shape
+    holds = tiles.ids("solid") | tiles.ids("volume")
+    exempt = exempt or frozenset()
+    out: set[tuple[int, int]] = set()
+    for x, y in volume_cells(grid, tiles):
+        if (x, y) in exempt:
+            continue
+        for nx in (x - 1, x + 1):
+            if 0 <= nx < width and int(grid[y, nx]) not in holds:
+                out.add((x, y))
+                break
+    return out
+
+
+def repair_containment_grid(
+    grid, tiles: TileRegistry = DEFAULT_TILES, free_volume: set | None = None
+) -> tuple[set[tuple[int, int]], list[str]]:
+    """Code-not-LLM containment repair: re-interpret a spilling CONTAINED pool
+    as a free-standing water FEATURE — its spilling cells join ``free_volume``,
+    which the containment rule exempts. The water STAYS (still swimmable, same
+    tile), no basin is forced, and no LLM round-trip / whole-level fallback is
+    burned. Mirrors :func:`auto_bridge_grid`'s doctrine (auto_bridge computes a
+    reachability fix; this computes a containment fix). Returns the newly-
+    exempted cells + a repair note (empty set / list when nothing spills)."""
+    spilled = _spilling_cells(grid, tiles, free_volume or set())
+    if not spilled:
+        return set(), []
+    return spilled, [
+        f"containment: {len(spilled)} spilling pool cell(s) re-interpreted as "
+        "free-standing water (a swim-up feature) — no basin required."
+    ]
+
+
+def _headroom_ok(grid, x: int, y: int, solids) -> bool:
+    """A 2-tall body needs the cell ABOVE the standing cell to be non-solid
+    (one-way platforms don't block). A standable cell under a solid ceiling
+    is a 1-TALL POCKET the simulator can never land in — the plat_seaside4
+    l2 run burned every repair round aiming at one."""
+    return y - 1 < 0 or int(grid[y - 1, x]) not in solids
+
+
+def _body_stand(
+    grid, stand: set[tuple[int, int]], tiles: TileRegistry
+) -> set[tuple[int, int]]:
+    """The standable cells a 2-tall body can actually OCCUPY — repair
+    targets and marker placements must come from this set, not the raw
+    1-cell ``standable_cells``."""
+    solids = tiles.ids("solid")
+    return {
+        (x, y) for (x, y) in stand if _headroom_ok(grid, x, y, solids)
+    }
+
+
 def _locate_break(
-    stand: set[tuple[int, int]], reached: set[tuple[int, int]]
+    stand: set[tuple[int, int]],
+    reached: set[tuple[int, int]],
+    target: tuple[int, int],
 ) -> tuple[tuple[int, int], tuple[int, int] | None]:
-    """(frontier, nearest unreachable foothold) of a reachability break."""
-    frontier = max(reached, key=lambda c: (c[0], -c[1]))
+    """(frontier, nearest unreachable foothold) of a reachability break, located
+    RELATIVE TO ``target`` (the unreachable exit/checkpoint) so it works on BOTH
+    axes and for any future multi-exit: the frontier is the reached cell nearest
+    the target (the edge of progress toward it), the nearest is the unreached
+    foothold closest to that frontier. A fixed max-column frontier used to pin
+    the break at the bottom-right FLOOR corner on a vertical climb and build a
+    junk bridge there."""
+    def _md(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    if not reached:  # pragma: no cover — spawn unstandable is caught earlier
+        return target, None
+    frontier = min(reached, key=lambda c: (_md(c, target), c[0], -c[1]))
     unreached = stand - reached
     if not unreached:
         return frontier, None
-    nearest = min(
-        unreached, key=lambda c: abs(c[0] - frontier[0]) + abs(c[1] - frontier[1])
-    )
+    nearest = min(unreached, key=lambda c: (_md(c, frontier), _md(c, target)))
     return frontier, nearest
 
 
@@ -583,8 +660,19 @@ def _suggest_bridge(
     def _ok(col: int, row: int) -> bool:
         if not (1 <= row <= height - 3) or not (0 <= col <= width - 2):
             return False
-        # Platform cells and the cells stood in above them: open air.
+        # Never pave over the break's own endpoints (both are open standing
+        # cells, so the free-air check alone would happily fill them).
+        if {(col, row), (col + 1, row)} & {frontier, nearest}:
+            return False
+        # Platform cells and the cells stood in above them: open air — and
+        # the HEAD cells above those: non-solid, or the stone is a 1-tall
+        # pocket no body fits into.
         if not all(_free(col + i, row) and _free(col + i, row - 1) for i in range(2)):
+            return False
+        solids = tiles.ids("solid")
+        if not all(
+            _headroom_ok(grid, col + i, row - 1, solids) for i in range(2)
+        ):
             return False
         stand_rise = fy - (row - 1)
         if stand_rise > movement.jump_height:
@@ -618,6 +706,16 @@ def _suggest_bridge(
         range(top, min(height - 3, fy - 1) + 1),
         key=lambda r: abs((r - 1) - ny),
     )
+    # FALLBACK preference: stones at/just below the frontier's own row — a
+    # LATERAL break between narrow zero-runway footholds (a plat_seaside3
+    # climb killer: same-row footholds two columns apart, dead-stop jump ~1
+    # cell) needs a same-level stepping stone the classic above-frontier
+    # window can never offer. Tried only after every classic row fails, so
+    # historical suggestions are unchanged.
+    rows += sorted(
+        range(max(1, fy), min(height - 3, fy + 2) + 1),
+        key=lambda r: abs((r - 1) - ny),
+    )
     for row in rows:
         for col in cols:
             if _ok(col, row):
@@ -640,9 +738,22 @@ def _describe_reachability_break(
     located-but-arithmetic fix ('between columns 32 and 37, within 3
     rows above') still did. Name the frontier cell, the unreachable
     foothold, the failing constraint, and the exact op to add."""
-    frontier, nearest = _locate_break(stand, reached)
-    if nearest is None:  # pragma: no cover — target is standable, so nonempty
-        return f"{label} at {target} is not reachable from spawn {spawn}."
+    frontier, nearest = _locate_break(
+        _body_stand(grid, stand, tiles), reached, target
+    )
+    if nearest is None:
+        return (
+            f"{label} at {target} is not reachable from spawn {spawn}. "
+            f"[break@{target[0]},{target[1]}]"
+        )
+    # The FRONTIER cell (the reached foothold where progress stalls) as a
+    # machine-readable tag so the section router regenerates the section that
+    # owns the stall point, not the one holding the far-off target coord
+    # printed first. The tag used to carry the frontier/nearest MIDPOINT —
+    # on a TALL vertical break that average can land in a section containing
+    # NEITHER endpoint (the plat_seaside3 l7 misroute); the frontier is
+    # always a real endpoint.
+    gap = frontier
     dx = abs(nearest[0] - frontier[0])
     rise = frontier[1] - nearest[1]
     constraints = []
@@ -680,14 +791,16 @@ def _describe_reachability_break(
         return (
             f"{base} No stepping platform fits here — open up the "
             f"terrain between {frontier} and {nearest} (widen the "
-            f"passage or lower the ledge) so a path can exist."
+            f"passage or lower the ledge) so a path can exist. "
+            f"[break@{gap[0]},{gap[1]}]"
         )
     return (
         f"{base} Fix: ADD THIS ONE LINE to your layout, "
         f"changing nothing else: {bridge} — it is jumpable from "
         f"{frontier} and bridges toward {nearest}. "
         f"Remember: a flat gap wider than {movement.jump_width - 1} columns "
-        "is impossible to cross without a stepping platform."
+        f"is impossible to cross without a stepping platform. "
+        f"[break@{gap[0]},{gap[1]}]"
     )
 
 
@@ -983,7 +1096,7 @@ def auto_bridge(
             return text, added, problems
         stand = standable_cells(result.grid, tiles)
         reached = reachable_cells(result.grid, result.spawn, movement, tiles)
-        frontier, nearest = _locate_break(stand, reached)
+        frontier, nearest = _locate_break(stand, reached, result.exit)
         if nearest is None:  # pragma: no cover — guarded by check_level
             return text, added, problems
         op = _suggest_bridge(result.grid, frontier, nearest, movement, tiles)
@@ -994,6 +1107,528 @@ def auto_bridge(
             return text, added, problems
         text = f"{text}\n# auto-bridge\n{op}"
         added.append(op)
+
+
+# --------------------------------------------------------------------------
+# Grid-native repair — the sectioned-levels path composites section sub-grids
+# into ONE whole-level grid (sections.composite), so there is no whole-level
+# DSL text for the text tools above to rewrite. These twins run the SAME
+# computable repairs directly on the composited grid + markers, reusing the
+# grid-based cores (check_level / reachable_cells / _locate_break /
+# _suggest_bridge). Same doctrine: geometry/columns are arithmetic (code
+# fixes them), design stays the agent's.
+# --------------------------------------------------------------------------
+
+
+def _floor_id(tiles: TileRegistry) -> int:
+    return next(t.id for t in tiles.tiles if t.name == "floor")
+
+
+def place_exit(
+    grid,
+    tiles: TileRegistry = DEFAULT_TILES,
+    exclude: set[tuple[int, int]] | None = None,
+    axis: str = "horizontal",
+) -> tuple[int, int] | None:
+    """Where the stitcher plants the whole-level exit (sections never declare
+    their own — the "goal mode" lives here, not in the DSL).
+
+    - ``horizontal``: the RIGHTMOST body-standable cell; at the same column
+      the LOWEST (ground level when it exists — the classic side-scroller
+      exit). The old rule considered GROUND-ROW floor only, so a level whose
+      right side is built up (plat_seaside5 l8: raised terrain covering the
+      entire ground-level standing row from x=34 on) exited at a third of
+      its width — elevated right-edge terrain is a legal exit spot now (the
+      horizontal analogue of the vertical summit).
+    - ``vertical``: the climb SUMMIT — the TOPMOST standable cell (smallest y),
+      leftmost on ties. A vertical level exits at the top, not the right edge.
+
+    ``exclude`` is a set of CELLS to skip (e.g. the spawn cell) so the exit never
+    lands ON the spawn — a per-CELL exclude (not per-column) so a vertical summit
+    directly ABOVE the spawn is not wrongly dropped. None when no such cell
+    exists (a design failure the caller surfaces)."""
+    exclude = exclude or set()
+    # Candidates need HEADROOM — a 1-tall pocket is a goal no body can
+    # stand in (see _body_stand).
+    stand = _body_stand(grid, standable_cells(grid, tiles), tiles)
+    cands = [c for c in stand if c not in exclude]
+    if not cands:
+        return None
+    if axis == "vertical":
+        return min(cands, key=lambda c: (c[1], c[0]))
+    return max(cands, key=lambda c: (c[0], c[1]))
+
+
+def snap_spawn_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    tiles: TileRegistry = DEFAULT_TILES,
+    max_snap: int = MAX_SPAWN_SNAP,
+) -> tuple[tuple[int, int] | None, list[str]]:
+    """Grid twin of :func:`snap_spawn`: move a stranded spawn to the nearest
+    ground-floored, open column within ``max_snap`` (skipping the exit's
+    column). Returns ``(spawn, moves)`` — ``spawn`` unchanged when already
+    valid or unfixable."""
+    if spawn is None:
+        return spawn, []
+    height, width = grid.shape
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = _floor_id(tiles)
+    exit_col = exit_[0] if exit_ else None
+
+    def _valid(col: int) -> bool:
+        return (
+            0 <= col < width
+            and col != exit_col
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    x = spawn[0]
+    if _valid(x):
+        return spawn, []
+    snapped = next(
+        (c for d in range(1, max_snap + 1) for c in (x - d, x + d) if _valid(c)),
+        None,
+    )
+    if snapped is None:
+        return spawn, []
+    return (snapped, standing_row), [f"spawn({x}) -> spawn({snapped})"]
+
+
+def snap_checkpoints_grid(
+    grid,
+    triggers: list[SparseMaskEntry],
+    tiles: TileRegistry = DEFAULT_TILES,
+    max_snap: int = MAX_CHECKPOINT_SNAP,
+) -> tuple[list[SparseMaskEntry], list[str]]:
+    """Grid twin of :func:`snap_checkpoints`: move each checkpoint trigger
+    whose column lost its floor (or whose standing cell is occupied) to the
+    nearest valid column within ``max_snap``, never colliding two onto one
+    column. Non-checkpoint triggers ride through untouched. Returns
+    ``(triggers, moves)``."""
+    height, width = grid.shape
+    ground_row, standing_row = height - 2, height - 3
+    floor_id = _floor_id(tiles)
+
+    def _valid(col: int, taken: set[int]) -> bool:
+        return (
+            0 <= col < width
+            and col not in taken
+            and int(grid[ground_row, col]) == floor_id
+            and int(grid[standing_row, col]) == 0
+        )
+
+    out: list[SparseMaskEntry] = []
+    moves: list[str] = []
+    taken: set[int] = set()
+    for t in triggers:
+        if t.type != "checkpoint":
+            out.append(t)
+            continue
+        x = t.x
+        if _valid(x, taken):
+            taken.add(x)
+            out.append(t)
+            continue
+        snapped = next(
+            (
+                c
+                for d in range(1, max_snap + 1)
+                for c in (x - d, x + d)
+                if _valid(c, taken)
+            ),
+            None,
+        )
+        if snapped is None:
+            taken.add(x)  # unfixable here — check_level's error is the feedback
+            out.append(t)
+            continue
+        taken.add(snapped)
+        out.append(t.model_copy(update={"x": snapped, "y": standing_row}))
+        moves.append(f"checkpoint({x}) -> checkpoint({snapped})")
+    return out, moves
+
+
+def place_checkpoints_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    sections: list,
+    checkpoint_sections: list[int],
+    axis: str,
+    movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> list[SparseMaskEntry]:
+    """The blueprint owns checkpoint COUNT + which sections host them; the
+    stitcher PLACES each at a REACHABLE standable cell inside its section's
+    range (a column for horizontal, a platform ROW for vertical). This unifies
+    both axes, guarantees reachable + count-capped checkpoints by construction
+    (no snap needed — the sectioned analogue of :func:`place_exit`), and lets a
+    vertical climb carry mid-climb respawns. Returns the checkpoint triggers.
+
+    Skips a section whose range holds no reachable standable cell (a checkpoint
+    there would be unfair); never places two on the same cell."""
+    if not checkpoint_sections or spawn is None:
+        return []
+    stand = standable_cells(grid, tiles)
+    reached = reachable_cells(grid, spawn, movement, tiles)
+
+    def _coord(c: tuple[int, int]) -> int:
+        return c[0] if axis == "horizontal" else c[1]
+
+    out: list[SparseMaskEntry] = []
+    used: set[tuple[int, int]] = set()
+    for si in checkpoint_sections:
+        if not 0 <= si < len(sections):
+            continue
+        ps = sections[si]
+        lo = ps.x_off if axis == "horizontal" else ps.y_off
+        hi = lo + ps.length
+        center = (lo + hi) // 2
+        cands = [
+            c
+            for c in stand
+            if c in reached
+            and lo <= _coord(c) < hi
+            and c != spawn
+            and c != exit_
+            and c not in used
+        ]
+        if not cands:
+            continue
+        # Nearest the section centre; deterministic tie-break.
+        pick = min(cands, key=lambda c: (abs(_coord(c) - center), c[0], c[1]))
+        used.add(pick)
+        out.append(SparseMaskEntry(x=pick[0], y=pick[1], type="checkpoint"))
+    return out
+
+
+#: Reachability-repair escalation caps (code-not-LLM, §1b): how many solid
+#: supports may be surgically opened into one-way platforms and how many
+#: climb lanes may be carved per level before the residue goes back to the
+#: owning section as a design problem.
+MAX_MOUNT_CONVERSIONS = 4
+MAX_CLIMB_LANES = 4
+
+
+def _convert_support_to_one_way(
+    grid,
+    nearest: tuple[int, int],
+    tiles: TileRegistry,
+    protect: set[tuple[int, int]] | frozenset = frozenset(),
+    free_volume: set | frozenset = frozenset(),
+) -> list[str]:
+    """Mount-from-below repair: when the unreached foothold's SUPPORT is a
+    solid the jump arc can only bonk into (a real model builds climb rungs
+    from solid ``ledge`` strips — the plat_seaside3 l4 break was a foothold
+    two rows up whose own support sealed the shaft), convert a short strip of
+    that support to the ONE-WAY platform tile so the player can jump up
+    THROUGH it and land on it. Surgical (≤3 cells), never the ground/bedrock
+    rows, never cells adjacent to a volume (a converted basin wall would
+    spill the pool), never ``protect`` cells (spawn/exit + their supports).
+    Returns a repair note, or [] when not applicable."""
+    height, width = grid.shape
+    nx, ny = nearest
+    sup_row = ny + 1
+    if sup_row >= height - 2:  # the walking floor / bedrock stay solid
+        return []
+    solids = tiles.ids("solid")
+    if int(grid[sup_row, nx]) not in solids:
+        return []
+    volume = tiles.ids("volume")
+    lo = nx
+    while lo - 1 >= 0 and int(grid[sup_row, lo - 1]) in solids and nx - lo < 1:
+        lo -= 1
+    hi = nx
+    while hi + 1 < width and int(grid[sup_row, hi + 1]) in solids and hi - nx < 1:
+        hi += 1
+    cells = [(x, sup_row) for x in range(lo, hi + 1)]
+    for x, y in cells:
+        if (x, y) in protect:
+            return []
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            ax, ay = x + dx, y + dy
+            if 0 <= ax < width and 0 <= ay < height:
+                # Contained liquid vetoes (a converted basin wall would
+                # spill it); free clouds/spouts are exempt.
+                if int(grid[ay, ax]) in volume and (ax, ay) not in free_volume:
+                    return []
+    one_way = tiles.by_name["platform"].id
+    for x, y in cells:
+        grid[y, x] = one_way
+    return [
+        f"# repair mount-open: solid support ({lo}..{hi},{sup_row}) under "
+        f"foothold ({nx},{ny}) -> one-way platform (jump up through it)"
+    ]
+
+
+def _carve_door(
+    grid,
+    frontier: tuple[int, int],
+    nearest: tuple[int, int],
+    tiles: TileRegistry,
+    protect: set[tuple[int, int]] | frozenset = frozenset(),
+    hazards: list | None = None,
+    max_cols: int = 8,
+    free_volume: set | frozenset = frozenset(),
+) -> list[str]:
+    """The climb lane's HORIZONTAL analogue: a LATERAL break whose span is
+    walled (the plat_seaside4 l8 stall — a six-tall wall stack on the ground
+    between two same-level footholds, unjumpable and unbridgeable) gets a
+    body-height DOORWAY carved through it at the footholds' level. Solids
+    and hazard cells clear (hazard records dropped); basin walls, ``protect``
+    cells, and the ground/bedrock rows stay. Returns a repair note, or []
+    when not a lateral-walled case / nothing to carve."""
+    height, width = grid.shape
+    fx, fy = frontier
+    nx, ny = nearest
+    if abs(fy - ny) > 1:
+        return []
+    lo, hi = sorted((fx, nx))
+    if hi - lo < 2 or hi - lo > max_cols:
+        return []
+    solids = tiles.ids("solid")
+    hazard_ids = tiles.ids("hazard")
+    volume = tiles.ids("volume")
+
+    def _volume_adjacent(x: int, y: int) -> bool:
+        # Only CONTAINED liquid vetoes a carve (protecting basin walls);
+        # free features (clouds/spouts) are containment-exempt and must not
+        # deadlock the repair.
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            ax, ay = x + dx, y + dy
+            if 0 <= ax < width and 0 <= ay < height:
+                if int(grid[ay, ax]) in volume and (ax, ay) not in free_volume:
+                    return True
+        return False
+
+    top = max(1, min(fy, ny) - 2)
+    bottom = min(height - 3, max(fy, ny))
+    carved = 0
+    cleared_hazards: set[tuple[int, int]] = set()
+    for y in range(top, bottom + 1):
+        for x in range(lo + 1, hi):
+            if (x, y) in protect:
+                continue
+            v = int(grid[y, x])
+            if v in solids and not _volume_adjacent(x, y):
+                grid[y, x] = 0
+                carved += 1
+            elif v in hazard_ids:
+                grid[y, x] = 0
+                carved += 1
+                cleared_hazards.add((x, y))
+    if cleared_hazards and hazards is not None:
+        hazards[:] = [
+            e for e in hazards if (e.x, e.y) not in cleared_hazards
+        ]
+    if not carved:
+        return []
+    return [
+        f"# repair doorway: cols {lo + 1}..{hi - 1} rows {top}..{bottom} "
+        f"(cleared {carved} cell(s)) between ({fx},{fy}) and ({nx},{ny})"
+    ]
+
+
+def _carve_climb_lane(
+    grid,
+    frontier: tuple[int, int],
+    nearest: tuple[int, int],
+    tiles: TileRegistry,
+    protect: set[tuple[int, int]] | frozenset = frozenset(),
+    hazards: list | None = None,
+    max_rows: int = 32,
+    free_volume: set | frozenset = frozenset(),
+) -> list[str]:
+    """Last-resort computable reachability repair: carve a 2-column LANE of
+    open air from the frontier's row up to the unreached foothold and stamp
+    one-way rungs every 2 rows, PARITY-ANCHORED at the foothold so the top
+    hop lands exactly on it — the repair that can fix what an ADDITIVE
+    bridge cannot (a rise beyond jump height inside dense terrain, the class
+    that whole-laddered every plat_seaside3 climb). Rung → standing → rung
+    is rise-2/dx≤1 throughout: feasible from a dead stop, no runway needed.
+
+    Solids AND hazards in the lane band are cleared (a full-width spike row
+    sealed the l9 shaft; clearing a 2-cell notch in it is the pass-through
+    gap a designer would leave) — cleared hazard cells also drop their
+    ``hazards`` RECORDS so no invisible damage cell survives. Volumes stay
+    (already swimmable), ``protect`` cells stay, the ground/bedrock rows
+    stay. Bounded to ``max_rows``. Returns a repair note, or [] when the
+    lane would change nothing."""
+    height, width = grid.shape
+    fx, fy = frontier
+    nx, ny = nearest
+    cx = max(0, min(width - 2, nx))
+    solids = tiles.ids("solid")
+    hazard_ids = tiles.ids("hazard")
+    volume = tiles.ids("volume")
+    one_way = tiles.by_name["platform"].id
+    # The lane band: headroom above the foothold down to the frontier's
+    # standing row (never the walking floor / bedrock rows). The carve
+    # covers the rung columns AND the TAKEOFF column when it adjoins —
+    # the plat_seaside4 l2 trap survived a 2-col lane because the bonk
+    # ceiling sat over the FRONTIER's column, one outside it.
+    lane_cols = {cx, cx + 1}
+    if abs(fx - nx) <= 2 and 0 <= fx < width:
+        lane_cols.add(fx)
+    top = max(1, ny - 2)
+    bottom = min(height - 3, max(fy, ny + 1))
+    if bottom - top > max_rows:
+        bottom = top + max_rows
+    def _volume_adjacent(x: int, y: int) -> bool:
+        # A solid 4-adjacent to CONTAINED volume may be a basin wall —
+        # clearing it would spill the pool into a containment problem
+        # mid-repair. FREE features (clouds/spouts) are containment-exempt
+        # and must not deadlock the lane (the l4 stall: its own clouds).
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            ax, ay = x + dx, y + dy
+            if 0 <= ax < width and 0 <= ay < height:
+                if int(grid[ay, ax]) in volume and (ax, ay) not in free_volume:
+                    return True
+        return False
+
+    carved = 0
+    cleared_hazards: set[tuple[int, int]] = set()
+    for y in range(top, bottom + 1):
+        for x in sorted(lane_cols):
+            if (x, y) in protect:
+                continue
+            v = int(grid[y, x])
+            if v in solids and not _volume_adjacent(x, y):
+                grid[y, x] = 0
+                carved += 1
+            elif v in hazard_ids:
+                grid[y, x] = 0
+                carved += 1
+                cleared_hazards.add((x, y))
+    if cleared_hazards and hazards is not None:
+        hazards[:] = [
+            e for e in hazards if (e.x, e.y) not in cleared_hazards
+        ]
+    # Rungs every 2 rows, anchored at ny+1 (standing row ny == the foothold's
+    # row) and descending to the frontier's row — each hop is rise 2, dx ≤ 1.
+    rungs = 0
+    r = ny + 1
+    while r <= bottom:
+        placed = False
+        for x in (cx, cx + 1):
+            if (x, r) in protect or (x, r) in {frontier, nearest}:
+                continue
+            if int(grid[r, x]) == 0:
+                grid[r, x] = one_way
+                placed = True
+        rungs += 1 if placed else 0
+        r += 2
+    if not carved and not rungs:
+        return []
+    cols_desc = "-".join(str(c) for c in sorted(lane_cols))
+    return [
+        f"# repair climb-lane: cols {cols_desc} rows {top}..{bottom} "
+        f"(cleared {carved} cell(s), {rungs} rung row(s)) from "
+        f"({fx},{fy}) toward foothold ({nx},{ny})"
+    ]
+
+
+def auto_bridge_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    movement: PlayerMovementSpec,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+    triggers: list[SparseMaskEntry] | None = None,
+    free_volume: set | None = None,
+    max_bridges: int = MAX_AUTO_BRIDGES,
+    hazards: list | None = None,
+) -> tuple[object, list[str], list[str]]:
+    """Grid twin of :func:`auto_bridge`: stamp computed ``platform`` bridges
+    DIRECTLY onto the composited grid (non-empty-wins) until ``check_level``
+    passes. Mutates and returns ``grid``. ``added`` lists the bridge ops and
+    ``# repair …`` notes for the log; ``problems`` is non-empty only when a
+    DESIGN problem remains (never repaired here — that is the owning
+    section's to fix). ``hazards`` (the sparse hazard RECORDS) is kept
+    consistent when a climb lane clears a hazard cell.
+
+    Reachability is COMPUTABLE, so it escalates rather than giving up
+    (code-not-LLM, the §1b climb fix): an additive one-way bridge first;
+    where no platform fits, a surgical mount-open (solid support → one-way);
+    finally a carved climb lane. The paid runs proved the old
+    additive-only version could not repair a walled climb — every
+    plat_seaside3 vertical burned its regen rounds against 'No stepping
+    platform fits here' and shipped the whole-ladder fallback."""
+    from examples.platformer_pack.dsl import stamp
+
+    height, width = grid.shape
+    added: list[str] = []
+    bridges = 0
+    conversions = 0
+    lanes = 0
+    seen_ops: set[str] = set()
+    # Two protection tiers: the lane may not CLEAR the spawn/exit cells or
+    # the supports under them (clearing removes footing); the mount-open
+    # only avoids the marker cells themselves — converting a support to
+    # one-way PRESERVES standability, so converting the exit's own support
+    # is legal (and is exactly the fix when a sealing ledge is the summit).
+    protect_cells = {c for c in (spawn, exit_) if c}
+    protect_carve = protect_cells | {(x, y + 1) for (x, y) in protect_cells}
+    while True:
+        problems = check_level(
+            grid, spawn, exit_, movement, rules=rules, tiles=tiles,
+            triggers=triggers, free_volume=free_volume,
+        )
+        if not problems:
+            return grid, added, []
+        if not all("is not reachable from spawn" in p for p in problems):
+            return grid, added, problems
+        # Repair targets must be footholds a 2-tall body can occupy — the
+        # raw standable set includes 1-tall pockets that fixate the break
+        # locator on an impossible cell (the plat_seaside4 l2 loop).
+        stand = _body_stand(grid, standable_cells(grid, tiles), tiles)
+        reached = reachable_cells(grid, spawn, movement, tiles)
+        frontier, nearest = _locate_break(stand, reached, exit_)
+        if nearest is None:
+            return grid, added, problems
+        op = _suggest_bridge(grid, frontier, nearest, movement, tiles)
+        if op is not None and op not in seen_ops and bridges < max_bridges:
+            seen_ops.add(op)
+            sub = stamp(op, width, height, tiles=tiles, validate_markers=False)
+            mask = sub.grid != 0
+            grid[mask] = sub.grid[mask]  # non-empty wins (bridge lands in air)
+            added.append(op)
+            bridges += 1
+            continue
+        rise = frontier[1] - nearest[1]
+        if conversions < MAX_MOUNT_CONVERSIONS and rise <= movement.jump_height:
+            # Opening the foothold's support only helps when the arc can
+            # already REACH its row — a rise beyond jump height needs the
+            # lane's intermediate rungs, not a mount.
+            notes = _convert_support_to_one_way(
+                grid, nearest, tiles, protect_cells,
+                free_volume=free_volume or frozenset(),
+            )
+            if notes:
+                conversions += 1
+                added.extend(notes)
+                continue
+        if lanes < MAX_CLIMB_LANES:
+            # A lateral walled span gets a doorway; a vertical break gets
+            # the climb lane. Both count against the same cap.
+            notes = _carve_door(
+                grid, frontier, nearest, tiles, protect_carve,
+                hazards=hazards, free_volume=free_volume or frozenset(),
+            )
+            if not notes:
+                notes = _carve_climb_lane(
+                    grid, frontier, nearest, tiles, protect_carve,
+                    hazards=hazards, free_volume=free_volume or frozenset(),
+                )
+            if notes:
+                lanes += 1
+                added.extend(notes)
+                continue
+        return grid, added, problems
 
 
 #: How far a spawn-crowding placement may be column-nudged to the nearest

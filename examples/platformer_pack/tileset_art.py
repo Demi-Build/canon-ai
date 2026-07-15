@@ -173,13 +173,30 @@ def conform_to_palette(img: Any, role_hex: str, levels: int | None = None) -> An
     delta = tv - sum(best[i] for i in vis) / len(vis)
     final = [min(1.0, max(0.0, v + delta)) for v in best]
 
+    data = [
+        [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)]
+        for h, s, v in zip(hues, sats, final)
+    ]
+    # FINAL RGB-MEAN RECENTER (the recurring paid-run spike-tile failure):
+    # the HSV shifts land the hue/sat/brightness MEANS, but the QA
+    # code-check scores the ARITHMETIC RGB mean (vlm_qa._mean_rgb) — a
+    # nonlinear mapping, so conformed tiles still failed the euclidean bar
+    # by 85-155 vs tolerance 48 in three consecutive paid runs. Shift every
+    # VISIBLE pixel by the constant per-channel delta that puts the region
+    # mean exactly on the role hex; per-pixel variation survives untouched.
+    # A few passes, because clamping at 0/255 can pull the mean off again.
+    target = (tr, tg, tb)
+    for _ in range(8):
+        means = [sum(data[i][ch] for i in vis) / len(vis) for ch in range(3)]
+        deltas = [target[ch] - means[ch] for ch in range(3)]
+        if all(abs(d) < 0.5 for d in deltas):
+            break
+        for i in vis:
+            for ch in range(3):
+                data[i][ch] = min(255, max(0, round(data[i][ch] + deltas[ch])))
+
     out = Image.new("RGBA", img.size)
-    out.putdata(
-        [
-            tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)) + (a,)
-            for h, s, v, a in zip(hues, sats, final, alphas)
-        ]
-    )
+    out.putdata([tuple(px) + (a,) for px, a in zip(data, alphas)])
     return out
 
 

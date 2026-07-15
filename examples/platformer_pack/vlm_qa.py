@@ -221,9 +221,9 @@ def run_code_checks(
                 "subject": "layout",
                 "passed": False,
                 "detail": (
-                    f"level is the flat FALLBACK layout, not generated "
-                    f"content (attempt trace: review/{stage_id}/"
-                    f"{level_id}_layout_attempts.json)"
+                    f"level shipped FALLBACK layout content — whole or "
+                    f"partial, not fully generated design (attempt trace: "
+                    f"review/{stage_id}/{level_id}_layout_attempts.json)"
                 ),
             }
         )

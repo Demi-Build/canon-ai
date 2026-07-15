@@ -7,6 +7,10 @@ values in data, categories in code). Agents never touch grid cells.
 Grammar (one op per line or semicolon-separated)::
 
     floor(x1, x2)        ground segment: floor at row H-2, bedrock below
+    breakable(x1, x2)    a crumbling floor: solid footing at row H-2 over a
+                         bottomless pit — a consumer fuse removes it a moment
+                         after the player stands on it (reachability treats it
+                         as a permanent foothold; v1 ignores the fuse timing)
     gap(x1, x2)          removes ground (fall = respawn)
     pit(x1, x2)          gap with a hazard at the bottom row (visible death)
     platform(x, y, len)  one-way platform at row y, cols x..x+len-1
@@ -35,12 +39,28 @@ Grammar (one op per line or semicolon-separated)::
                          game's registry has no "water" tile
     spike(x1, x2)        alias for hazard_strip(spike, ...)
 
+    water_cloud(x1, y1, x2, y2)       a floating CLOUD of free water (a
+                         swim-up pocket): like water_block but puffed into
+                         a rounded silhouette (its four corners trimmed when
+                         big enough) — jump in from below and swim UP through
+                         it. Containment-exempt free water.
+    volume_cloud(name, x1, y1, x2, y2)  the registry-generic form
+    reward(x, y)         a hidden REWARD marker (a placeholder for a future
+                         collectible) sitting in open air inside a niche —
+                         lands in the triggers layer; the play surfaces
+                         ignore it for now (layout-only, secret alcoves)
+
 ``name`` args are registry tile names; everything else is ints. Rows count
 from the top (row 0). Ground floor row is ``H-2``; the standing row above
 it is ``H-3``. Ops apply in order; later ops overwrite earlier cells. The
-parser is strict: unknown ops, bad arity, or bad args raise ``DslError``
-naming the offending line — the retry-with-feedback loop turns that into
-LLM feedback.
+parser is strict about SYNTAX: unknown ops, bad arity, or bad args raise
+``DslError`` naming the offending line — the retry-with-feedback loop turns
+that into LLM feedback (``stamp(lenient=True)`` additionally skips lines
+that are not even shaped like ops — prose / truncation debris — recording
+each in ``repairs``). Out-of-bounds COORDINATES are geometry, not syntax:
+spans clamp into the grid, fully-outside ops drop, each recorded in
+``StampResult.repairs`` (§1b #2 — the model's own OOB coords, worst on
+narrow vertical shafts, must never void a section).
 
 Point MARKERS (spawn/checkpoint/exit) are validated against the FINAL
 grid, like the hazard records: a marker declared before the floor it
@@ -70,6 +90,7 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: Op signatures: "i" = int arg, "n" = registry tile name arg.
 _SIGNATURES: dict[str, str] = {
     "floor": "ii",
+    "breakable": "ii",
     "gap": "ii",
     "pit": "ii",
     "platform": "iii",
@@ -87,8 +108,11 @@ _SIGNATURES: dict[str, str] = {
     "volume_wall": "niii",
     "water_block": "iiii",
     "volume_block": "niiii",
+    "water_cloud": "iiii",
+    "volume_cloud": "niiii",
     "hazard_strip": "nii",
     "checkpoint": "i",
+    "reward": "ii",
     "spawn": "i",
     "exit": "i",
 }
@@ -99,6 +123,7 @@ _SIGNATURES: dict[str, str] = {
 #: recites the EXACT signature (not just the count) is what breaks the loop.
 _ARG_NAMES: dict[str, str] = {
     "floor": "x1, x2",
+    "breakable": "x1, x2",
     "gap": "x1, x2",
     "pit": "x1, x2",
     "platform": "x, y, len",
@@ -116,11 +141,69 @@ _ARG_NAMES: dict[str, str] = {
     "volume_wall": "name, x1, x2, y_top",
     "water_block": "x1, y1, x2, y2",
     "volume_block": "name, x1, y1, x2, y2",
+    "water_cloud": "x1, y1, x2, y2",
+    "volume_cloud": "name, x1, y1, x2, y2",
     "hazard_strip": "name, x1, x2",
     "checkpoint": "x",
+    "reward": "x, y",
     "spawn": "x",
     "exit": "x",
 }
+
+
+#: Which int args of each op are COLUMN (x) vs ROW (y) coordinates, for
+#: :func:`rebase_dsl` — mirrors ``_SIGNATURES`` (name args excluded there).
+#: "n" = a non-coordinate int (a length/count) that never shifts.
+_ARG_ROLES: dict[str, str] = {
+    "floor": "xx",
+    "breakable": "xx",
+    "gap": "xx",
+    "pit": "xx",
+    "platform": "xyn",
+    "ledge": "xxy",
+    "wall": "xyy",
+    "stairs_up": "xx",
+    "stairs_down": "xx",
+    "pyramid": "xx",
+    "spike": "xx",
+    "carve": "xyxy",
+    "water": "xxy",
+    "volume": "xxy",
+    "pool": "xx",
+    "water_wall": "xxy",
+    "volume_wall": "xxy",
+    "water_block": "xyxy",
+    "volume_block": "xyxy",
+    "water_cloud": "xyxy",
+    "volume_cloud": "xyxy",
+    "hazard_strip": "xx",
+    "checkpoint": "x",
+    "reward": "xy",
+    "spawn": "x",
+    "exit": "x",
+}
+
+
+def rebase_dsl(text: str, dx: int, dy: int) -> str:
+    """Re-express a section's DSL in a NEIGHBOUR's local coordinates by
+    shifting every column arg by ``dx`` and every row arg by ``dy`` —
+    deterministic frame translation for the sequential-handoff prompt (the
+    seam frame bug proved models cannot be trusted to do this arithmetic
+    themselves). Coordinates may go negative / past the receiver's edge —
+    that is the point: they show where the neighbour's content lies relative
+    to the receiver. Lines that don't parse are dropped (they never stamped
+    either); name args ride through untouched."""
+    out: list[str] = []
+    for name, args in parse_dsl(text, skipped=[]):
+        roles = _ARG_ROLES[name]
+        ints = [a for a in args if isinstance(a, int)]
+        names = [a for a in args if not isinstance(a, int)]
+        shifted = [
+            v + (dx if role == "x" else dy if role == "y" else 0)
+            for v, role in zip(ints, roles)
+        ]
+        out.append(f"{name}({','.join(map(str, names + shifted))})")
+    return "\n".join(out)
 
 
 class DslError(ValueError):
@@ -154,9 +237,18 @@ class StampResult:
     free_volume: set = field(default_factory=set)
 
 
-def parse_dsl(text: str) -> list[tuple[str, list]]:
+def parse_dsl(
+    text: str, skipped: list[str] | None = None
+) -> list[tuple[str, list]]:
     """Parse a DSL string into ``(op, args)`` tuples. Strict. Name args
-    stay strings; int args become ints."""
+    stay strings; int args become ints.
+
+    When ``skipped`` is a list, a line that is not even SHAPED like an op —
+    prose ("Looking at the error: …"), a truncated ``carve(18,0,20``, a bare
+    word — is skipped and recorded there instead of raising (§1b: real
+    models emit those under token pressure, and one bad line must not void
+    sixty good ones). A well-formed op with a wrong arity/argument still
+    raises — the retry loop demonstrably fixes those."""
     ops: list[tuple[str, list]] = []
     # Accept newline- and semicolon-separated ops; ignore blanks + comments.
     raw_lines = [
@@ -170,6 +262,13 @@ def parse_dsl(text: str) -> list[tuple[str, list]]:
             continue
         match = _OP_RE.match(stripped)
         if match is None:
+            if skipped is not None:
+                snippet = stripped if len(stripped) <= 60 else stripped[:57] + "..."
+                skipped.append(
+                    f"line {lineno}: {snippet!r} skipped — not a valid op "
+                    "(prose or a truncated line)."
+                )
+                continue
             raise DslError(
                 f"line {lineno}: {stripped!r} is not a valid op. "
                 f"Expected name(arg, ...) with name in {sorted(_SIGNATURES)!r}."
@@ -229,30 +328,60 @@ def _resolve(
     return tile
 
 
+def _cloud_cells(
+    x1: int, y1: int, x2: int, y2: int
+) -> list[tuple[int, int]]:
+    """The cells of a water CLOUD — a filled rectangle with its four corners
+    trimmed to give a rounded, puffy silhouette. Corners are removed only when
+    the rectangle is at least 3x3, so the vertical centre column (the swim-up
+    path) and a full-width middle row always survive; a 2-tall or narrow cloud
+    stays a plain rectangle. Deterministic, order-stable (row-major)."""
+    trim = (x2 - x1) >= 2 and (y2 - y1) >= 2
+    corners = {(x1, y1), (x2, y1), (x1, y2), (x2, y2)} if trim else set()
+    return [
+        (x, y)
+        for y in range(y1, y2 + 1)
+        for x in range(x1, x2 + 1)
+        if (x, y) not in corners
+    ]
+
+
 def stamp(
     text: str, width: int, height: int, tiles: TileRegistry = DEFAULT_TILES,
-    validate_markers: bool = True,
+    validate_markers: bool = True, lenient: bool = False,
 ) -> StampResult:
     """Expand a DSL string into the collision grid (int8, registry-id
     valued).
 
     Deterministic: same string + dims + registry → same grid, always.
-    Raises DslError for out-of-bounds coordinates, unknown tile names, or
+    Raises DslError for unknown ops/tile names, bad arity, or
     missing/duplicate spawn/exit — the messages are written to be fed back
-    to the Layout Agent verbatim.
+    to the Layout Agent verbatim. Out-of-bounds COORDINATES are GEOMETRY,
+    not syntax, so they auto-repair (§1b #2): a span is clamped into the
+    grid, a point/row op that lies fully outside is dropped — each recorded
+    in ``result.repairs``, never raised (the #1 remaining paid-run raise
+    class after G7, worst on narrow vertical shafts).
 
     ``validate_markers=False`` skips the final-grid spawn/exit/checkpoint
     checks (and their missing-marker requirements) — for the snap repair
     TOOLS, which probe the terrain a program builds in order to CHOOSE
     valid marker columns; the real stamp afterwards still validates.
+
+    ``lenient=True`` additionally SKIPS lines that are not even shaped like
+    ops (prose / truncation debris — see :func:`parse_dsl`), recording each
+    in ``result.repairs`` — for LLM-authored content; code-authored DSL
+    (fallbacks, bridges, tests) stays strict so our own typos still fail.
     """
     import numpy as np
 
-    ops = parse_dsl(text)
+    skipped: list[str] | None = [] if lenient else None
+    ops = parse_dsl(text, skipped=skipped)
     grid = np.zeros((height, width), dtype=np.int8)
     ground_row = height - 2
     standing_row = height - 3
     result = StampResult(grid=grid)
+    if skipped:
+        result.repairs.extend(skipped)
 
     by_name = tiles.by_name
     floor_id = by_name["floor"].id
@@ -262,35 +391,102 @@ def stamp(
     solid_ids = tiles.ids("solid")
     hazard_tiles = tiles.named("hazard")
 
-    def _check_x(op: str, *xs: int) -> None:
-        for x in xs:
-            if not 0 <= x < width:
-                raise DslError(f"{op}: column {x} outside 0..{width - 1}.")
+    def _clamp_span(op: str, x1: int, x2: int) -> tuple[int, int] | None:
+        """OOB-column auto-repair: order the span, clamp it into the grid,
+        DROP it (with a note) when it lies entirely outside. Returns the
+        usable (x1, x2) or None."""
+        if x1 > x2:
+            x1, x2 = x2, x1
+        c1, c2 = max(x1, 0), min(x2, width - 1)
+        if c1 > c2:
+            result.repairs.append(
+                f"{op}: column span {x1}..{x2} lies outside 0..{width - 1} "
+                "— op dropped."
+            )
+            return None
+        if (c1, c2) != (x1, x2):
+            result.repairs.append(
+                f"{op}: column span {x1}..{x2} clamped to {c1}..{c2} "
+                f"(columns run 0..{width - 1})."
+            )
+        return c1, c2
+
+    def _clamp_row(op: str, y: int, lo: int, hi: int) -> int:
+        """OOB-row auto-repair: clamp a row into its legal band, recorded."""
+        c = max(lo, min(hi, y))
+        if c != y:
+            result.repairs.append(
+                f"{op}: row {y} clamped to {c} (valid rows {lo}..{hi})."
+            )
+        return c
+
+    def _point_in_grid(op: str, x: int) -> bool:
+        """OOB point-op auto-repair: a marker/column op fully outside the
+        grid is dropped with a note (False = drop)."""
+        if 0 <= x < width:
+            return True
+        result.repairs.append(
+            f"{op}: column {x} outside 0..{width - 1} — op dropped."
+        )
+        return False
 
     def _stamp_hazard_strip(op: str, tile: TileDef, x1: int, x2: int) -> None:
-        _check_x(op, x1, x2)
+        # CODE-NOT-LLM repair (was the #1 real-run fallback driver): a hazard
+        # needs something solid beneath it — rather than hard-raise, adapt each
+        # column. On SOLID ground (floor OR a wall the model stacked over the
+        # floor) the hazard sits on the standing row; over a GAP it auto-becomes
+        # a PIT (hazard at the bottom edge — a visible death, the fix the old
+        # message only SUGGESTED); over open water it is dropped (a hazard can't
+        # float on liquid). Every adaptation is logged in ``repairs``.
+        span = _clamp_span(f"{op}({tile.name},{x1},{x2})", x1, x2)
+        if span is None:
+            return
+        x1, x2 = span
+        pitted: list[int] = []
+        dropped: list[int] = []
         for x in range(x1, x2 + 1):
-            if grid[ground_row, x] != floor_id:
-                raise DslError(
-                    f"{op}: column {x} has no ground under it — hazards "
-                    "sit on floor; use pit() for bottomless hazards."
+            below = int(grid[ground_row, x])
+            if below in solid_ids:
+                grid[standing_row, x] = tile.id
+                result.hazards.append(
+                    SparseMaskEntry(
+                        x=x, y=standing_row, type=f"floor_{tile.name}",
+                        params=dict(tile.params),
+                    )
                 )
-            grid[standing_row, x] = tile.id
-            result.hazards.append(
-                SparseMaskEntry(
-                    x=x, y=standing_row, type=f"floor_{tile.name}",
-                    params=dict(tile.params),
+            elif below == empty_id:
+                grid[height - 1, x] = tile.id
+                result.hazards.append(
+                    SparseMaskEntry(
+                        x=x, y=height - 1, type=f"pit_{tile.name}",
+                        params=dict(tile.params),
+                    )
                 )
+                pitted.append(x)
+            else:
+                dropped.append(x)
+        if pitted:
+            result.repairs.append(
+                f"{op}({tile.name},{x1},{x2}): column(s) {pitted} had no ground "
+                "— auto-converted to a pit (hazard at the bottom of the gap)."
+            )
+        if dropped:
+            result.repairs.append(
+                f"{op}({tile.name},{x1},{x2}): column(s) {dropped} sit over "
+                "liquid — hazard dropped there (it can't float on water)."
             )
 
     def _stamp_volume(
         op: str, tile: TileDef, x1: int, x2: int, y_surface: int
     ) -> None:
-        _check_x(op, x1, x2)
-        if not 1 <= y_surface <= height - 2:
-            raise DslError(
-                f"{op}: surface row {y_surface} outside 1..{height - 2}."
-            )
+        span = _clamp_span(f"{op}({tile.name},{x1},{x2},{y_surface})", x1, x2)
+        if span is None:
+            return
+        x1, x2 = span
+        y_surface = _clamp_row(
+            f"{op}({tile.name},{x1},{x2},{y_surface})", y_surface,
+            1, height - 2,
+        )
         # Pour aimed AT the ground floor row over solid floor: the fix is
         # arithmetic (the old error message literally computed it — "use
         # surface row N-1"), so when the row above is open air the tool
@@ -316,21 +512,14 @@ def stamp(
                     f"{y_surface}; the pool now sits on top of the floor."
                 )
             else:
-                named: dict[str, list[int]] = {}
-                for x in blockers:
-                    occupant = tiles.by_id.get(int(grid[y_surface - 1, x]))
-                    occ = occupant.name if occupant else "?"
-                    named.setdefault(occ, []).append(x)
-                where = "; ".join(
-                    f"{occ} at column(s) {', '.join(map(str, xs))}"
-                    for occ, xs in named.items()
-                )
-                raise DslError(
-                    f"{op}: row {y_surface} IS the ground floor row — "
-                    f"pools sit ON TOP of the floor, at surface row "
-                    f"{y_surface - 1} — but that row is not open air over "
-                    f"columns {x1}-{x2}: {where}. Move the pool span or "
-                    "clear those cells; they cannot share the surface."
+                # §1b #3: the snap-up is still the right fix — apply it and
+                # let the per-column walk DROP the blocked columns (recorded
+                # below) instead of raising the whole op away.
+                y_surface -= 1
+                result.repairs.append(
+                    f"{op}({tile.name},{x1},{x2},{y_surface + 1}): surface "
+                    f"was the ground floor row — snapped to row {y_surface}; "
+                    f"blocked column(s) {blockers} will be dropped."
                 )
         # General terrain snap (playtest l4: the model poured a surface onto
         # a hill/wall, three rejects into fallback). Finding the first row
@@ -352,54 +541,43 @@ def stamp(
                 )
                 y_surface = lifted
 
+        # §1b #3 (the l8 whole-flat killer): a contained pour used to
+        # hard-raise per bad column — over a gap ("no solid basin") or onto
+        # an occupied surface — and three retries never converged. Both are
+        # GEOMETRY: a bottomless column becomes FREE water (the G4
+        # re-interpretation — a deliberate spout, exactly water_wall-over-pit
+        # semantics), an occupied-surface column is dropped. Recorded, never
+        # raised.
+        spouted: list[int] = []
+        dropped: list[int] = []
         for x in range(x1, x2 + 1):
             # Fill EMPTY cells from the surface down until solid ground.
-            # A volume over a gap/pit would drain — demand a basin.
             y = y_surface
-            filled = False
+            column_cells: list[tuple[int, int]] = []
             while y < height and int(grid[y, x]) == empty_id:
                 grid[y, x] = tile.id
-                filled = True
+                column_cells.append((x, y))
                 y += 1
+            if not column_cells:
+                dropped.append(x)
+                continue
             if y >= height or int(grid[y, x]) not in solid_ids:
-                raise DslError(
-                    f"{op}: column {x} has no solid basin beneath the "
-                    f"surface — {tile.name} needs floor under it; don't "
-                    "pour it over gaps or pits. For a pool sunk INTO the "
-                    f"ground use pool({tile.name},{x1},{x2}) on solid "
-                    "floor instead — it carves the surface and the banks "
-                    "contain it."
-                )
-            if not filled:
-                occupant = tiles.by_id.get(int(grid[y_surface, x]))
-                occ_name = (
-                    occupant.name if occupant else str(int(grid[y_surface, x]))
-                )
-                # Observed real-model failure loop: surface row poured ON
-                # the ground floor row, three identical retries into
-                # fallback. The message must carry the recipe, not just
-                # the diagnosis (validator messages are prompts).
-                if y_surface == ground_row:
-                    pour = (
-                        f"volume({tile.name},{x1},{x2},{y_surface - 1})"
-                        if op == "volume"
-                        else f"{op}({x1},{x2},{y_surface - 1})"
-                    )
-                    hint = (
-                        f" Row {y_surface} IS the ground floor row — pools "
-                        f"sit ON TOP of the floor. Use surface row "
-                        f"{y_surface - 1} and wall both sides: "
-                        f"wall({x1 - 1},{y_surface - 2},{y_surface - 1})  "
-                        f"{pour}  "
-                        f"wall({x2 + 1},{y_surface - 2},{y_surface - 1})."
-                    )
-                else:
-                    hint = " Pick an open surface row above the terrain."
-                raise DslError(
-                    f"{op}: column {x} at surface row {y_surface} is "
-                    f"occupied by {occ_name} — the surface row must be "
-                    f"open air.{hint}"
-                )
+                # No basin below — keep the liquid as a FREE feature.
+                result.free_volume.update(column_cells)
+                spouted.append(x)
+        if spouted:
+            result.repairs.append(
+                f"{op}({tile.name},{x1},{x2},{y_surface}): column(s) "
+                f"{spouted} have no solid basin — re-interpreted as "
+                "free-standing water (a spout/fall feature, containment-"
+                "exempt)."
+            )
+        if dropped:
+            result.repairs.append(
+                f"{op}({tile.name},{x1},{x2},{y_surface}): column(s) "
+                f"{dropped} had an occupied surface cell — dropped there "
+                "(the surface row must be open air)."
+            )
 
     def _floor_ranges() -> str:
         """Compact 'a-b, c, d-e' of ground-floor columns — markers
@@ -437,16 +615,44 @@ def stamp(
     # end, against the FINAL grid (only duplicates are op-order facts).
     spawn_col: int | None = None
     checkpoint_cols: list[int] = []
+    #: Reward markers (x, y) — a niche collectible placed in open air; kept
+    #: only if the FINAL grid leaves the cell empty (mirrors hazards).
+    reward_cells: list[tuple[int, int]] = []
 
     for name, args in ops:
         if name == "floor":
             x1, x2 = args
-            _check_x(name, x1, x2)
+            span = _clamp_span(f"floor({x1},{x2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
             grid[ground_row, x1 : x2 + 1] = floor_id
             grid[height - 1, x1 : x2 + 1] = wall_id  # bedrock
+        elif name == "breakable":
+            # A crumbling bridge: a SOLID foothold on the ground row (so the
+            # player walks/stands on it and reachability treats it as normal
+            # footing), but with a BOTTOMLESS PIT below — when a consumer's
+            # break fuse fires the tile is removed and the player falls. Keep
+            # spans SHORT: v1 reachability assumes it is crossable and does
+            # NOT model the fuse timing.
+            x1, x2 = args
+            if "breakable" not in by_name:
+                raise DslError(
+                    "breakable: this game's tile registry has no 'breakable' "
+                    "tile."
+                )
+            span = _clamp_span(f"breakable({x1},{x2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            grid[ground_row, x1 : x2 + 1] = by_name["breakable"].id
+            grid[height - 1, x1 : x2 + 1] = empty_id  # pit below — fall on break
         elif name in ("gap", "pit"):
             x1, x2 = args
-            _check_x(name, x1, x2)
+            span = _clamp_span(f"{name}({x1},{x2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
             grid[ground_row, x1 : x2 + 1] = empty_id
             if name == "pit":
                 if not hazard_tiles:
@@ -468,27 +674,30 @@ def stamp(
                 grid[height - 1, x1 : x2 + 1] = empty_id
         elif name == "platform":
             x, y, length = args
-            _check_x(name, x, x + length - 1)
-            if not 1 <= y <= height - 3:
-                raise DslError(
-                    f"platform: row {y} outside 1..{height - 3} "
-                    "(leave headroom above, ground below)."
-                )
             if length < 1:
-                raise DslError(f"platform: length must be >= 1, got {length}.")
+                result.repairs.append(
+                    f"platform({x},{y},{length}): length must be >= 1 — "
+                    "op dropped."
+                )
+                continue
+            span = _clamp_span(f"platform({x},{y},{length})", x, x + length - 1)
+            if span is None:
+                continue
+            x, length = span[0], span[1] - span[0] + 1
+            y = _clamp_row(f"platform({x},{y},{length})", y, 1, height - 3)
             grid[y, x : x + length] = platform_id
         elif name == "ledge":
             x1, x2, y = args
-            _check_x(name, x1, x2)
-            if not 1 <= y <= height - 3:
-                raise DslError(
-                    f"ledge: row {y} outside 1..{height - 3} "
-                    "(leave headroom above, ground below)."
-                )
+            span = _clamp_span(f"ledge({x1},{x2},{y})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            y = _clamp_row(f"ledge({x1},{x2},{y})", y, 1, height - 3)
             grid[y, x1 : x2 + 1] = floor_id
         elif name == "wall":
             x, y1, y2 = args
-            _check_x(name, x)
+            if not _point_in_grid(f"wall({x},{y1},{y2})", x):
+                continue
             if y1 > y2:
                 y1, y2 = y2, y1
             grid[max(y1, 0) : min(y2, height - 1) + 1, x] = wall_id
@@ -497,13 +706,30 @@ def stamp(
             # ground, one riser per column (jumpable with the existing
             # physics; smooth slopes are a v2+ collision category).
             x1, x2 = args
-            if x1 > x2:
-                x1, x2 = x2, x1
-            _check_x(name, x1, x2)
+            clamped = _clamp_span(f"{name}({x1},{x2})", x1, x2)
+            if clamped is None:
+                continue
+            x1, x2 = clamped
             span = x2 - x1 + 1
             # Keep at least two air rows above the tallest stack so a
             # slope can never seal the level shut.
             h_cap = max(1, ground_row - 2)
+            # CODE-NOT-LLM repair: a stepped slope stacks ON the ground, so lay
+            # floor under any column of the span that lacks it (a gap, or a cell
+            # a prior op overwrote) rather than raising — the ramp gets its
+            # ground, the fix the old message only suggested.
+            laid = [
+                x for x in range(x1, x2 + 1)
+                if int(grid[ground_row, x]) != floor_id
+            ]
+            for x in laid:
+                grid[ground_row, x] = floor_id
+                grid[height - 1, x] = wall_id  # bedrock
+            if laid:
+                result.repairs.append(
+                    f"{name}({x1},{x2}): laid floor under column(s) {laid} so "
+                    "the slope has ground to stack on."
+                )
             for i in range(span):
                 if name == "stairs_up":
                     h = i + 1
@@ -513,12 +739,6 @@ def stamp(
                     h = min(i, span - 1 - i) + 1
                 h = min(h, h_cap)
                 x = x1 + i
-                if grid[ground_row, x] != floor_id:
-                    raise DslError(
-                        f"{name}: column {x} has no ground floor under "
-                        f"it — steps stack ON the ground; lay "
-                        f"floor({x1},{x2}) first or move the slope."
-                    )
                 grid[ground_row - h : ground_row, x] = floor_id
         elif name == "volume":
             tile_name, x1, x2, y_surface = args
@@ -527,30 +747,39 @@ def stamp(
         elif name == "pool":
             tile_name, x1, x2 = args
             tile = _resolve(tiles, name, tile_name, "volume")
-            _check_x(name, x1, x2)
-            # Name what ACTUALLY occupies each bad column — the old "lay
-            # floor there first" hint was unfollowable when the program's
-            # own wall/gap had overwritten/removed floor it DID lay (the
-            # sunlit run's l3 repeated the same rejected pool verbatim
-            # three times against it).
+            span = _clamp_span(f"pool({tile_name},{x1},{x2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            # §1b #3 (the l8 whole-flat killer): a pool poured where an
+            # earlier op removed/overwrote the floor used to hard-raise —
+            # and the model shuffled the water op for three retries without
+            # ever touching its own gap(). The fix is GEOMETRY: CLIP the
+            # pool to the columns whose ground row is still solid floor and
+            # drop the rest, recorded — never raise.
             id_names = {t.id: t.name for t in tiles.tiles}
+            good = [
+                x
+                for x in range(x1, x2 + 1)
+                if grid[ground_row, x] == floor_id
+            ]
             bad = [
                 f"{x} ({id_names.get(int(grid[ground_row, x]), 'unknown')})"
                 for x in range(x1, x2 + 1)
                 if grid[ground_row, x] != floor_id
             ]
             if bad:
-                raise DslError(
-                    f"pool: ground-row column(s) {', '.join(bad)} are not "
-                    f"solid floor, so the pool cannot sink in — an earlier "
-                    f"op of yours removed or overwrote the floor there "
-                    f"(gap/pit leaves 'empty'; wall/volume replace it). "
-                    f"Move the pool to columns whose ground row is still "
-                    f"floor, or stop overlapping it with those ops."
+                result.repairs.append(
+                    f"pool({tile.name},{x1},{x2}): ground-row column(s) "
+                    f"{', '.join(bad)} are not solid floor — pool clipped "
+                    "to the floored columns"
+                    + ("" if good else " (none — op dropped)")
+                    + "."
                 )
             # Replace the walking surface; bedrock below is the basin and
             # the surrounding floor forms the banks — contained by shape.
-            grid[ground_row, x1 : x2 + 1] = tile.id
+            for x in good:
+                grid[ground_row, x] = tile.id
         elif name == "water":
             x1, x2, y_surface = args
             tile = _resolve(tiles, name, "water", "volume")
@@ -567,73 +796,113 @@ def stamp(
             else:
                 tile_name, x1, x2, y_top = args
                 tile = _resolve(tiles, name, tile_name, "volume")
-            if x1 > x2:
-                x1, x2 = x2, x1
-            _check_x(name, x1, x2)
-            if not 0 <= y_top < height:
-                raise DslError(
-                    f"{name}: top row {y_top} outside 0..{height - 1}."
-                )
+            span = _clamp_span(f"{name}({x1},{x2},{y_top})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            y_top = _clamp_row(
+                f"{name}({x1},{x2},{y_top})", y_top, 0, height - 1
+            )
+            # CODE-NOT-LLM repair: if the wall's top row is occupied, CLIP it
+            # down to the first open cell rather than raising — the waterfall
+            # simply starts below the terrain instead of failing the level.
+            clipped_cols: list[int] = []
             for x in range(x1, x2 + 1):
-                if grid[y_top, x] != empty_id:
-                    raise DslError(
-                        f"{name}: column {x} at top row {y_top} is occupied "
-                        f"by {tiles.by_id[int(grid[y_top, x])].name} — the "
-                        "wall's top must start in open air."
-                    )
                 y = y_top
+                while y < height and grid[y, x] != empty_id:
+                    y += 1  # skip solid/occupied cells at/under the top
+                if y != y_top and y < height:
+                    clipped_cols.append(x)
                 while y < height and grid[y, x] == empty_id:
                     grid[y, x] = tile.id
                     result.free_volume.add((x, y))
                     y += 1
-        elif name in ("water_block", "volume_block"):
+            if clipped_cols:
+                result.repairs.append(
+                    f"{name}({x1},{x2},{y_top}): column(s) {clipped_cols} had "
+                    "terrain at the top — the waterfall was clipped to start "
+                    "below it."
+                )
+        elif name in ("water_block", "volume_block", "water_cloud", "volume_cloud"):
             # FREE water feature: a floating pocket of liquid (whimsy is
             # allowed — some worlds float their water). Every target cell
-            # must be open air. Exempt from containment.
-            if name == "water_block":
+            # must be open air. Exempt from containment. A *_cloud puffs the
+            # rectangle into a rounded silhouette (a swim-up pocket); a
+            # *_block fills the whole rectangle.
+            is_cloud = name in ("water_cloud", "volume_cloud")
+            if name in ("water_block", "water_cloud"):
                 x1, y1, x2, y2 = args
                 tile = _resolve(tiles, name, "water", "volume")
             else:
                 tile_name, x1, y1, x2, y2 = args
                 tile = _resolve(tiles, name, tile_name, "volume")
-            if x1 > x2:
-                x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
-            _check_x(name, x1, x2)
-            if not 0 <= y1 <= y2 < height:
-                raise DslError(
-                    f"{name}: rows {y1}..{y2} outside 0..{height - 1}."
+            span = _clamp_span(f"{name}({x1},{y1},{x2},{y2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            r1, r2 = max(y1, 0), min(y2, height - 1)
+            if r1 > r2:
+                result.repairs.append(
+                    f"{name}({x1},{y1},{x2},{y2}): rows {y1}..{y2} lie "
+                    f"outside 0..{height - 1} — op dropped."
                 )
-            occupied = [
-                f"({x}, {y}) is {tiles.by_id[int(grid[y, x])].name}"
-                for y in range(y1, y2 + 1)
-                for x in range(x1, x2 + 1)
-                if grid[y, x] != empty_id
-            ]
-            if occupied:
-                raise DslError(
-                    f"{name}: target cells must be open air, but "
-                    f"{'; '.join(occupied[:4])} — move the block or clear "
-                    "the space first."
+                continue
+            if (r1, r2) != (y1, y2):
+                result.repairs.append(
+                    f"{name}({x1},{y1},{x2},{y2}): rows {y1}..{y2} clamped "
+                    f"to {r1}..{r2}."
                 )
-            for y in range(y1, y2 + 1):
-                for x in range(x1, x2 + 1):
-                    grid[y, x] = tile.id
-                    result.free_volume.add((x, y))
+            y1, y2 = r1, r2
+            cells = (
+                _cloud_cells(x1, y1, x2, y2)
+                if is_cloud
+                else [
+                    (x, y)
+                    for y in range(y1, y2 + 1)
+                    for x in range(x1, x2 + 1)
+                ]
+            )
+            # CODE-NOT-LLM repair: rather than reject a pocket that overlaps
+            # terrain (a top real-run fallback driver), CLIP it to the open-air
+            # cells — the water fills the empty part of the shape and the solid
+            # part stays solid. Dropped entirely (with a note) if nothing is open.
+            open_cells = [(x, y) for (x, y) in cells if int(grid[y, x]) == empty_id]
+            clipped = len(cells) - len(open_cells)
+            for (x, y) in open_cells:
+                grid[y, x] = tile.id
+                result.free_volume.add((x, y))
+            if clipped:
+                shape = "cloud" if is_cloud else "block"
+                result.repairs.append(
+                    f"{name}(...): {clipped} of {len(cells)} {shape} cell(s) "
+                    "overlapped terrain — clipped to the open-air part"
+                    + ("" if open_cells else " (nothing open — dropped)")
+                    + "."
+                )
         elif name == "carve":
             x1, y1, x2, y2 = args
-            if x1 > x2:
-                x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
-            _check_x(name, x1, x2)
-            if not 0 <= y1 <= y2 <= standing_row:
-                raise DslError(
-                    f"carve: rows {y1}..{y2} outside 0..{standing_row} — "
-                    "carve clears air/structure above the ground row only; "
-                    "break the ground with gap() or pit() instead."
+            span = _clamp_span(f"carve({x1},{y1},{x2},{y2})", x1, x2)
+            if span is None:
+                continue
+            x1, x2 = span
+            r1, r2 = max(y1, 0), min(y2, standing_row)
+            if r1 > r2:
+                result.repairs.append(
+                    f"carve({x1},{y1},{x2},{y2}): rows {y1}..{y2} lie "
+                    f"outside 0..{standing_row} (carve clears above the "
+                    "ground row only) — op dropped."
                 )
+                continue
+            if (r1, r2) != (y1, y2):
+                result.repairs.append(
+                    f"carve({x1},{y1},{x2},{y2}): rows {y1}..{y2} clamped "
+                    f"to {r1}..{r2} (carve clears above the ground row only)."
+                )
+            y1, y2 = r1, r2
             grid[y1 : y2 + 1, x1 : x2 + 1] = empty_id
         elif name == "hazard_strip":
             tile_name, x1, x2 = args
@@ -645,19 +914,53 @@ def stamp(
             _stamp_hazard_strip(name, tile, x1, x2)
         elif name == "checkpoint":
             (x,) = args
-            _check_x(name, x)
+            if not _point_in_grid(f"checkpoint({x})", x):
+                continue
             if x in checkpoint_cols:
                 raise DslError(
                     f"checkpoint: column {x} declared more than once."
                 )
             checkpoint_cols.append(x)
+        elif name == "reward":
+            # A hidden collectible marker (secret alcoves, Chunk E): it sits
+            # in OPEN AIR (inside a carved niche), lands in the triggers layer,
+            # and is inert on the play surfaces for now (future item system).
+            x, y = args
+            if not _point_in_grid(f"reward({x},{y})", x):
+                continue
+            if not 0 <= y < height:
+                result.repairs.append(
+                    f"reward({x},{y}): row {y} outside 0..{height - 1} — "
+                    "op dropped."
+                )
+                continue
+            # CODE-NOT-LLM: a reward sits in open air. If the cell is occupied,
+            # DROP the marker (a cosmetic placeholder — never worth a fallback)
+            # rather than raise; the final-grid filter also drops any a later op
+            # buries.
+            if int(grid[y, x]) != empty_id:
+                occ = tiles.by_id.get(int(grid[y, x]))
+                result.repairs.append(
+                    f"reward({x},{y}): cell was occupied by "
+                    f"{occ.name if occ else '?'} — reward marker dropped "
+                    "(it needs open air)."
+                )
+            else:
+                reward_cells.append((x, y))
         elif name in ("spawn", "exit"):
             (x,) = args
+            # A marker column outside the grid clamps in (recorded) — the
+            # marker checks/snaps below own the rest.
+            clamped_x = max(0, min(width - 1, x))
+            if clamped_x != x:
+                result.repairs.append(
+                    f"{name}({x}): column {x} clamped to {clamped_x} "
+                    f"(columns run 0..{width - 1})."
+                )
             if name == "spawn":
-                _check_x(name, x)
                 if spawn_col is not None:
                     raise DslError("spawn: declared more than once.")
-                spawn_col = x
+                spawn_col = clamped_x
             else:
                 # exit(x)'s x is ADVISORY: the exit relocates to the
                 # rightmost floored column after all ops (below) — levels
@@ -665,8 +968,7 @@ def stamp(
                 # stays required so a layout still DECLARES its exit.
                 if result.exit is not None:
                     raise DslError("exit: declared more than once.")
-                _check_x(name, x)
-                result.exit = (x, standing_row)
+                result.exit = (clamped_x, standing_row)
 
     # ---- Final-grid post-pass: records mirror the FINISHED level. ----
     # All problems found here report TOGETHER (DslError.problems) — the
@@ -684,6 +986,11 @@ def stamp(
         result.triggers.extend(
             SparseMaskEntry(x=x, y=standing_row, type="checkpoint")
             for x in checkpoint_cols
+        )
+        result.triggers.extend(
+            SparseMaskEntry(x=x, y=y, type="reward")
+            for (x, y) in reward_cells
+            if int(grid[y, x]) == empty_id
         )
         return result
     problems: list[str] = []
@@ -735,5 +1042,10 @@ def stamp(
     result.triggers.extend(
         SparseMaskEntry(x=x, y=standing_row, type="checkpoint")
         for x in checkpoint_cols
+    )
+    result.triggers.extend(
+        SparseMaskEntry(x=x, y=y, type="reward")
+        for (x, y) in reward_cells
+        if int(grid[y, x]) == empty_id
     )
     return result

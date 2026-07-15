@@ -75,6 +75,11 @@ class GameRules(BaseModel):
         "swimmers_only"
     )
     platform_drop_through: bool = True
+    #: Seconds a BREAKABLE floor tile holds once the player stands on it,
+    #: before it crumbles and drops them (both play surfaces read it; the
+    #: reachability sim ignores the timing, treating breakables as permanent
+    #: footholds — v1 conservative).
+    break_delay_s: float = 0.6
     variant_caps: dict[str, int] = {"elite": 1, "champion": 1, "relentless": 1}
     checkpoint_enemy_reset: bool = True
     spawn_grace: Literal["until_move", "off"] = "until_move"

@@ -113,8 +113,8 @@ def _run_warnings(ctx: Any) -> list[str]:
         ):
             continue  # this run's warn() already recorded it
         warnings.append(
-            f"layout {level_id}: level is the flat FALLBACK layout "
-            f"(attempt trace: review/{level.stage_id}/"
+            f"layout {level_id}: level shipped FALLBACK layout content — "
+            f"whole or partial (attempt trace: review/{level.stage_id}/"
             f"{level_id}_layout_attempts.json)."
         )
     # QA findings re-derive from the on-disk report (same strings the QA

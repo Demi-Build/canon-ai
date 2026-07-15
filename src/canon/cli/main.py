@@ -677,6 +677,43 @@ def status_cmd(
     )
 
 
+# ---------------------------------------------------------------------------
+# Platformer read/export verbs — the read half external tooling (Cradle)
+# shells out to instead of re-implementing .npz decoding + the tileset registry.
+# ---------------------------------------------------------------------------
+
+level_app = typer.Typer(help="Platformer level inspection / export.")
+app.add_typer(level_app, name="level")
+
+
+@level_app.command("export")
+def level_export(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root (holds manifest.json)."),
+    level_id: str = typer.Option(..., "--level", help="Level id to export (e.g. l1)."),
+) -> None:
+    """Emit a render-ready JSON bundle for one level.
+
+    Decodes the three dense ``.npz`` grids to nested int lists, inlines the
+    tileset slots + palette, resolves enemy placements against their global
+    definitions, and rewrites asset refs to absolute paths. This is the
+    contract a viewer renders from without needing numpy.
+    """
+    try:
+        from canon.adapters.platformer_read import export_level_bundle
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer reader: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        bundle = export_level_bundle(pack_dir, level_id)  # type: ignore[possibly-unbound]
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"Level export failed: {e}", traceback=traceback.format_exc())
+    _emit({"level": bundle})  # type: ignore[possibly-unbound]
+
+
 def main() -> None:
     app()
 

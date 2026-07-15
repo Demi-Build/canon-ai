@@ -32,6 +32,9 @@ DECOR_COLORS = {
 }
 
 CHECKPOINT_COLOR = "#ffd24a"
+#: Reward markers (secret alcoves, Chunk E) draw as a filled gold GEM — a
+#: distinct shape from the outlined checkpoint boxes so they read at a glance.
+REWARD_COLOR = (255, 208, 74)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +123,16 @@ def render_level(
     for trigger in level.triggers:
         if trigger.type == "checkpoint":
             _marker(trigger.x, trigger.y, CHECKPOINT_COLOR)
+    # Reward markers (secret alcoves, Chunk E): a filled gold gem — a distinct
+    # SHAPE from the outlined checkpoint boxes. Inert on the play surfaces.
+    for trigger in level.triggers:
+        if trigger.type == "reward":
+            cx = trigger.x * SCALE + SCALE // 2
+            cy = trigger.y * SCALE + SCALE // 2
+            draw.polygon(
+                [(cx, cy - 6), (cx + 5, cy), (cx, cy + 6), (cx - 5, cy)],
+                fill=REWARD_COLOR, outline="#ffffff",
+            )
 
     for placement in level.entities:
         enemy_id = placement.ref.split(":", 1)[1]
@@ -195,7 +208,8 @@ def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
     draw.text(
         (pad, y + 3),
         "white outline = variant placement (see manifest variants)   |   "
-        "amber box = checkpoint   |   diamonds = foreground decor",
+        "amber box = checkpoint   |   gold gem = secret reward   |   "
+        "diamonds = foreground decor",
         fill=(170, 170, 180),
     )
     buffer = io.BytesIO()

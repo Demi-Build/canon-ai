@@ -5,6 +5,13 @@
     { "id": 1, "name": "floor", "category": "solid", "color_role": "ground" },
     { "id": 2, "name": "platform", "category": "one_way", "color_role": "platform" },
     { "id": 3, "name": "wall", "category": "solid", "color_role": "wall" },
+    {
+      "id": 4,
+      "name": "breakable",
+      "category": "solid",
+      "color_role": "breakable",
+      "params": { "breakable": true }
+    },
     { "id": 10, "name": "spike", "category": "hazard", "color_role": "danger" },
     {
       "id": 20,

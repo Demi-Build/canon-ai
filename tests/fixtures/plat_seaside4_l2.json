@@ -1,0 +1,31 @@
+{
+ "width": 91,
+ "height": 16,
+ "difficulty": 2,
+ "checkpoint_sections": [
+  1
+ ],
+ "sections": [
+  {
+   "archetype": "runway",
+   "length": 21,
+   "x_off": 0,
+   "y_off": 0,
+   "dsl": "floor(0,20)\nspawn(2)\nstairs_up(5,8)\nplatform(10,10,4)\nledge(13,17,11)\npyramid(3,7)\ncarve(10,9,13,10)\nreward(11,8)\ncheckpoint(18)"
+  },
+  {
+   "archetype": "gauntlet",
+   "length": 42,
+   "x_off": 15,
+   "y_off": 0,
+   "dsl": "floor(0,41)\ncarve(0,0,41,13)\nfloor(0,41)\ngap(6,9)\ngap(15,17)\ngap(22,24)\ngap(29,31)\ngap(36,39)\npit(6,9)\npit(15,17)\npit(22,24)\npit(29,31)\npit(36,39)\nledge(0,2,10)\nledge(3,5,10)\nplatform(10,8,3)\nplatform(13,8,2)\nplatform(18,6,3)\nplatform(21,6,2)\nplatform(25,5,3)\nplatform(28,5,2)\nplatform(32,4,3)\nplatform(35,4,2)\nplatform(40,8,2)\nwall(5,8,13)\nwall(10,6,7)\nwall(14,6,7)\nwall(21,4,5)\nwall(25,3,4)\nwall(32,2,3)\nwall(35,2,3)\nledge(18,21,6)\nledge(25,28,5)\nledge(32,35,4)\nbreakable(13,14)\nbreakable(21,22)\nbreakable(28,29)\nbreakable(35,36)\nhazard_strip(spike,6,8)\nhazard_strip(spike,15,16)\nhazard_strip(spike,22,23)\nhazard_strip(spike,29,30)\nstairs_up(0,5)\nstairs_down(40,41)\ncarve(6,8,9,13)\ncarve(15,8,17,13)\ncarve(22,8,24,13)\ncarve(29,8,31,13)\ncarve(36,8,39,13)\nreward(27,3)\nwall(26,2,4)\ncarve(27,2,27,3)"
+  },
+  {
+   "archetype": "islands",
+   "length": 40,
+   "x_off": 51,
+   "y_off": 0,
+   "dsl": "floor(0,39)\ncarve(1,10,3,13)\ncarve(6,8,8,13)\ncarve(10,6,13,13)\ncarve(15,4,18,13)\ncarve(20,6,22,13)\ncarve(25,4,27,13)\ncarve(29,7,31,13)\ncarve(33,5,35,13)\npit(1,3)\npit(6,8)\npit(10,13)\npit(15,18)\npit(20,22)\npit(25,27)\npit(29,31)\npit(33,35)\nplatform(0,12,1)\nplatform(4,7,2)\nplatform(9,5,3)\nplatform(14,3,3)\nplatform(19,5,2)\nplatform(24,3,3)\nplatform(28,6,3)\nplatform(32,4,3)\nledge(0,3,11)\nledge(5,8,8)\nledge(9,12,6)\nledge(14,17,4)\nledge(19,21,6)\nledge(24,26,4)\nledge(28,30,7)\nledge(32,34,5)\nwall(4,8,13)\nwall(5,8,13)\nwall(9,6,13)\nwall(14,4,13)\nwall(18,4,13)\nwall(19,6,13)\nwall(23,6,13)\nwall(24,4,13)\nwall(28,7,13)\nwall(32,5,13)\nwall(36,5,13)\nbreakable(10,12)\nbreakable(20,21)\nbreakable(29,30)\nhazard_strip(spike,6,7)\nhazard_strip(spike,15,16)\nhazard_strip(spike,25,26)\nwater_cloud(4,5,7,7)\nwater_cloud(14,2,17,4)\nwater_cloud(24,2,27,4)\ncarve(37,5,39,13)\nledge(36,39,5)\nreward(16,3)\ncarve(16,0,17,3)"
+  }
+ ]
+}

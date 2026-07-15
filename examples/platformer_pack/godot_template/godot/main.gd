@@ -40,6 +40,7 @@ const BODY_R := 0.85
 # Camera framing + actor overdraw come from the manifest's GraphicsSpec
 # (per-game data). Defaults match the spec model's defaults.
 var view_w_cells := 20.0
+var view_rows_cells := 16.0  # rows visible for a VERTICAL (climb) level
 var actor_scale := 1.4
 # Combat tuning (manifest "combat" block; defaults mirror combat.py).
 var max_hearts := 3
@@ -85,6 +86,7 @@ var grid: Array = []
 var terrain: Array = []
 var grid_w := 0
 var grid_h := 0
+var layout_axis := "horizontal"  # "vertical" climbs win at the summit ROW
 var spawn := Vector2.ZERO
 var exit_cell := Vector2.ZERO
 var respawn_point := Vector2.ZERO
@@ -104,6 +106,12 @@ var blocking := {}
 var one_way := {}
 var hazard := {}
 var volumes := {}
+# Breakable floors (sectioned-levels D) — the fuse mechanic below MUST match
+# platformer_play.py byte-for-byte (parity, verified via PLAT_TRAJ).
+var breakable_types := {}  # tile_type -> true (solid tiles that crumble)
+var tile_fuses := {}       # Vector2i(col,row) -> seconds of hold LEFT
+var tile_nodes := {}       # Vector2i(col,row) -> Sprite2D (freed on break)
+var break_delay_s := 0.6
 var slot_atlas := {}
 var slot_category := {}
 var bg_color := Color8(24, 24, 32)  # empty-slot sample = style palette
@@ -150,6 +158,7 @@ func _ready() -> void:
 	manifest = _load_json("res://manifest.json")
 	movement = manifest["movement"]
 	rules = manifest.get("rules", {})
+	break_delay_s = float(rules.get("break_delay_s", 0.6))
 	for v in manifest.get("variants", []):
 		variant_defs[str(v["name"])] = v
 	level_ids = manifest["levels"]
@@ -165,6 +174,7 @@ func _ready() -> void:
 		)
 	var gfx: Dictionary = manifest.get("graphics", {})
 	view_w_cells = float(gfx.get("view_cells", 20))
+	view_rows_cells = float(gfx.get("view_rows", 16))
 	actor_scale = float(gfx.get("actor_scale", 1.4))
 	var combat: Dictionary = manifest.get("combat", {})
 	max_hearts = int(combat.get("player_max_hearts", 3))
@@ -498,6 +508,8 @@ func _load_tileset() -> void:
 		match str(slot.get("collision", "")):
 			"solid":
 				blocking[tile_type] = true
+				if bool(slot.get("params", {}).get("breakable", false)):
+					breakable_types[tile_type] = true
 			"one_way":
 				one_way[tile_type] = true
 			"hazard":
@@ -519,23 +531,32 @@ func _load_level(index: int) -> void:
 	var level: Dictionary = _load_json(base + "/level.json")
 	grid = _load_json(base + "/collision.grid.json")["collision"]
 	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
+	tile_fuses.clear()  # per-level breakable state (broken tiles reset on reload)
 	var background: Array = _load_json(base + "/background.grid.json")["background"]
 	grid_h = grid.size()
 	grid_w = grid[0].size() if grid_h > 0 else 0
 	spawn = Vector2(level["spawn"][0], level["spawn"][1])
 	exit_cell = Vector2(level["exit"][0], level["exit"][1])
 	respawn_point = spawn
-	# Per-level framing override (level.json "view_cells", null = game
-	# default) — a deliberate stage-plan exception (intimate/vista).
-	# Framing is CAMERA ZOOM at a stable window, never a window resize:
-	# view_cells spans the viewport width, clamped so the view can't show
-	# past the level bounds. (Runtime window resizes are also ignored by
-	# the 4.x editor's embedded play window — zoom works everywhere.)
-	var view_override: Variant = level.get("view_cells")
-	var eff_view_cells: float = float(view_override) if view_override != null else view_w_cells
-	eff_view_cells = minf(float(grid_w), eff_view_cells)
+	# Framing is CAMERA ZOOM at a stable window, never a window resize.
+	# HORIZONTAL levels frame by WIDTH (view_cells columns span the viewport,
+	# a deliberate intimate/vista exception overriding it); VERTICAL (climb)
+	# levels frame by HEIGHT (view_rows rows span the viewport — a tall shaft
+	# you scroll up). Either way the zoom is clamped so the view can't show
+	# past the level bounds.
 	var vp := get_viewport_rect().size
-	var k := vp.x / (eff_view_cells * CELL)
+	layout_axis = str(level.get("layout_axis", "horizontal"))
+	var k: float
+	if layout_axis == "vertical":
+		var vr_override: Variant = level.get("view_rows")
+		var eff_view_rows: float = float(vr_override) if vr_override != null else view_rows_cells
+		eff_view_rows = minf(float(grid_h), eff_view_rows)
+		k = vp.y / (eff_view_rows * CELL)
+	else:
+		var view_override: Variant = level.get("view_cells")
+		var eff_view_cells: float = float(view_override) if view_override != null else view_w_cells
+		eff_view_cells = minf(float(grid_w), eff_view_cells)
+		k = vp.x / (eff_view_cells * CELL)
 	k = maxf(k, vp.x / (grid_w * CELL))
 	k = maxf(k, vp.y / (grid_h * CELL))
 	camera.zoom = Vector2(k, k)
@@ -683,6 +704,7 @@ func _build_effects() -> void:
 
 
 func _build_tiles() -> void:
+	tile_nodes.clear()
 	for y in range(grid_h):
 		for x in range(grid_w):
 			var slot := int(terrain[y][x])
@@ -695,6 +717,9 @@ func _build_tiles() -> void:
 			sprite.position = Vector2(x, y) * CELL
 			sprite.scale = Vector2(CELL, CELL) / sprite.texture.get_size()
 			world_root.add_child(sprite)
+			# Remember a breakable tile's node so the fuse can free it on break.
+			if breakable_types.has(int(grid[y][x])):
+				tile_nodes[Vector2i(x, y)] = sprite
 
 
 func _build_markers(triggers: Array) -> void:
@@ -1477,6 +1502,34 @@ func _process(delta: float) -> void:
 		player_pos.y = new_y
 		on_ground = false
 
+	# Breakable floors — byte-identical to platformer_play.py: the SAME
+	# deterministic foot probe (never the on_ground flag), the SAME countdown
+	# arithmetic, and a sorted deduped column list. At zero the collision cell
+	# is cleared (the player falls next tick) and the tile node freed.
+	if not breakable_types.is_empty():
+		var bfoot := int(player_pos.y + 1.01)
+		if player_vy >= -0.01:
+			var bcols := {}
+			bcols[int(player_pos.x + BODY_L)] = true
+			bcols[int(player_pos.x + BODY_R)] = true
+			var sorted_cols := bcols.keys()
+			sorted_cols.sort()
+			for bx in sorted_cols:
+				if bx < 0 or bx >= grid_w or bfoot < 0 or bfoot >= grid_h:
+					continue
+				if not breakable_types.has(int(grid[bfoot][bx])):
+					continue
+				var bkey := Vector2i(bx, bfoot)
+				var rem: float = float(tile_fuses.get(bkey, break_delay_s)) - delta
+				if rem <= 0.0:
+					grid[bfoot][bx] = 0  # crumble — empty, player falls
+					tile_fuses.erase(bkey)
+					if tile_nodes.has(bkey):
+						(tile_nodes[bkey] as Node).queue_free()
+						tile_nodes.erase(bkey)
+				else:
+					tile_fuses[bkey] = rem
+
 	# Damaging volumes (swimmable lava): drain hearts continuously —
 	# every accumulated point costs one heart; the fraction resets on
 	# safe ground. (The old DAMAGE_BUDGET stand-in is gone: one heart
@@ -1774,8 +1827,15 @@ func _process(delta: float) -> void:
 		(player_pos.x + 0.5) * CELL, (player_pos.y + 0.5) * CELL
 	)
 
-	# --- exit: the whole column, any height (leave to the right) ---
-	if not won and int(player_pos.x) == int(exit_cell.x):
+	# --- exit: horizontal → the whole exit COLUMN (leave right); vertical →
+	# the exit ROW at the summit, any column (climb to the top). Mirrors
+	# platformer_play.py (parity). ---
+	var reached_exit := (
+		int(player_pos.y) <= int(exit_cell.y)
+		if layout_axis == "vertical"
+		else int(player_pos.x) == int(exit_cell.x)
+	)
+	if not won and reached_exit:
 		won = true
 		_play_sfx("win")
 		var lid := str(level_ids[level_index])

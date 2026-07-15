@@ -64,6 +64,11 @@ class GraphicsSpec(BaseModel):
     #: chosen against frame renders of 16/22/30. This is the game-wide
     #: baseline — scale stays consistent within a game.
     view_cells: int = Field(default=20, ge=8, le=60)
+    #: Camera framing for VERTICAL (climb) levels: ROWS visible down the
+    #: screen (the height analogue of ``view_cells``). A tall shaft frames by
+    #: height so the player sees where they're jumping to. Sectioned-levels
+    #: phase (chunk C).
+    view_rows: int = Field(default=16, ge=8, le=60)
     #: Deliberate per-level framing exceptions, keyed by the stage plan's
     #: view hint ("intimate" = tight claustrophobic moments, "vista" =
     #: zoomed-out reveals meant to instill awe). Values are cells-across,

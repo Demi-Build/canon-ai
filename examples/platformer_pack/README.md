@@ -218,10 +218,14 @@ contained pools/basins, the DSL has free-standing water:
 `water_wall(x1,x2,y_top)` drops a full column from `y_top` to the
 terrain — a waterfall/shaft the player swims up and leaps out of (over a
 bottomless gap it runs out the bottom: sinking too deep is a fall death,
-a deliberate spout hazard) — and `water_block(x1,y1,x2,y2)` floats a
-pocket of water in open air. Both are exempt from containment by design
-(generic spellings `volume_wall`/`volume_block` take any volume tile).
-Airy jump-gauntlet levels are encouraged to skip water entirely.
+a deliberate spout hazard) — `water_block(x1,y1,x2,y2)` floats a
+pocket of water in open air, and `water_cloud(x1,y1,x2,y2)` puffs that
+pocket into a rounded **swim-up cloud** the player rises through to reach
+heights a jump alone can't (or drifts across a gap). All three are exempt
+from containment by design; the generic spellings `volume_wall`/
+`volume_block`/`volume_cloud` take any volume tile, so a game without a
+`water` tile is offered those (with its own liquid) instead. Airy
+jump-gauntlet levels are encouraged to skip water entirely.
 
 ### Enemy variants — `variants.json` (`--variants`)
 
@@ -262,7 +266,47 @@ and renders at full size everywhere.
 
 Difficulty is keyed off level POSITION; grid width/height and the
 count knobs (platforms, hazards, gaps, pools) are difficulty-banded
-ranges. Widen the bands for sprawling finales, tighten for a puzzle game.
+ranges. As shipped, horizontal levels span **~48 columns (intro) to
+~132 (finale)**, 14–26 tall; widen the bands for sprawling finales,
+tighten for a puzzle game.
+
+### Sections — `sections.json`
+
+A level is not one blob — it's a **sequence of typed SECTIONS**, each an
+archetype with its own character, generated independently at its own
+local dims and **stitched by sub-grid compositing** (each stamped
+sub-grid pasted at its origin, non-empty cells winning the seam). A wide
+level is ~6–8 stitched sections; the shipped archetypes:
+
+| archetype | axis | character |
+|---|---|---|
+| `runway` | horizontal | flat run-up breather (always section 0) |
+| `gauntlet` | horizontal | platforms + gaps + hazards + breakable floors |
+| `cave` | horizontal | walls/carve, low ceilings, hides secret alcoves |
+| `islands` | horizontal | hop platforms over a pit/water, floating clouds |
+| `climb` | **vertical** | a tall ascent (spawn at the base, exit at the summit) |
+
+Each archetype's `feature_bias` (op-weight hints), `intensity`, `water`
+level, and `encounter` style steer the section's prompt — a gauntlet
+leans platform/gap, a cave leans wall/carve + `secret`, a climb leans
+platform/`cloud`. `plan_sections` composes the list deterministically
+(section counts scale with level size); the LLM only arranges KNOWN
+features inside each bounded section. A level rolls **horizontal** or a
+real **vertical climb** (`VERTICAL_FRACTION`, stage 2+ only); vertical
+levels are recast tall + narrow (a shaft up to ~26 wide × ~96 tall) and
+framed by height.
+
+The layout DSL the agent emits (all coordinates are grid cells, row 0 at
+the top): `floor`/`gap`/`pit`, `platform`/`ledge`, `wall`/`carve`,
+`stairs_up`/`stairs_down`/`pyramid`, `pool`/`volume`, the free-water
+`water_wall`/`water_block`/`water_cloud`, `hazard_strip`,
+**`breakable(x1,x2)`** (a crumbling floor that gives way a moment after
+you stand on it — keep spans short), and the markers `spawn`/`exit`/
+`checkpoint` plus **`reward(x,y)`** (a hidden collectible marker for a
+**secret alcove**, a niche carved behind a wall — layout-only, a
+placeholder for a future item system). Deterministic tools stamp the DSL
+to the collision grid, validate reachability with the run-up-momentum
+jump simulation, and repair computable breaks (bridge/snap) in code.
 
 ### Graphics — `--graphics <spec.json>`
 

@@ -124,6 +124,42 @@ class TestRemoveBackground:
         assert out.mode == "RGBA"
         assert all(p[3] == 255 for p in out.get_flattened_data())
 
+    def test_conform_lands_the_qa_rgb_mean_exactly(self) -> None:
+        """The recurring paid-run spike failure (three runs straight): the
+        HSV shifts land the H/S/V means but the QA code-check scores the
+        ARITHMETIC RGB mean — a nonlinear map, so hue-distant generations
+        still failed by 85-155 vs tolerance 48. The final RGB recenter must
+        land the exact metric vlm_qa uses, for both a hue-distant textured
+        tile and a posterized one."""
+        import random
+
+        from examples.platformer_pack.vlm_qa import _mean_rgb
+
+        rng = random.Random(7)
+        # A textured purple-ish tile aimed at a hot red (the real spike
+        # case: mean #644393 vs #c43a1a, distance 155).
+        img = Image.new("RGB", (32, 32))
+        img.putdata(
+            [
+                (
+                    100 + rng.randrange(60),
+                    40 + rng.randrange(60),
+                    120 + rng.randrange(80),
+                )
+                for _ in range(32 * 32)
+            ]
+        )
+        for levels in (None, 5):
+            out = conform_to_palette(img, "#c43a1a", levels=levels)
+            mean = _mean_rgb(out)
+            dist = sum(
+                (a - b) ** 2 for a, b in zip(mean, (0xC4, 0x3A, 0x1A))
+            ) ** 0.5
+            assert dist <= 3, (
+                f"levels={levels}: QA-metric distance {dist:.1f} — the "
+                "recenter must land the arithmetic RGB mean"
+            )
+
     def test_bottom_align_seats_feet_on_the_frame_bottom(self) -> None:
         # Generated sprites frame the creature with empty space below it, and
         # the consumers bottom-anchor the frame to the floor — so enemies

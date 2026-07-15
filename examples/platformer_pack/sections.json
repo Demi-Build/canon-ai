@@ -1,57 +1,93 @@
 {
   "runway": {
     "axis": "horizontal",
-    "min_len": 8,
-    "max_len": 16,
+    "min_len": 10,
+    "max_len": 20,
     "intensity": "low",
     "water": "dry",
     "encounter": "traversal",
-    "feature_bias": {"floor": 5, "platform": 1, "gap": 0, "hazard": 0, "stairs": 1},
+    "feature_bias": {
+      "floor": 5,
+      "platform": 1,
+      "gap": 0,
+      "hazard": 0,
+      "stairs": 1
+    },
     "framing": "vista",
-    "flavor": "a flat, mostly-open run-up stretch — clear flat ground so the player can build running speed for what comes next; keep it easy and readable, a breather between challenges"
+    "flavor": "a flat, mostly-open run-up stretch \u2014 clear flat ground so the player can build running speed for what comes next; keep it easy and readable, a breather between challenges"
   },
   "gauntlet": {
     "axis": "horizontal",
-    "min_len": 14,
-    "max_len": 28,
+    "min_len": 16,
+    "max_len": 36,
     "intensity": "high",
-    "water": "dry",
-    "encounter": "traversal",
-    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "hazard": 2, "stairs": 1},
+    "water": "optional",
+    "encounter": "combat",
+    "feature_bias": {
+      "floor": 1,
+      "platform": 4,
+      "gap": 3,
+      "hazard": 2,
+      "stairs": 1,
+      "breakable": 2
+    },
     "framing": "vista",
-    "flavor": "a platforming gauntlet — mostly air and platforms with little solid ground, a rhythm of deliberate jumps over gaps and hazards; a couple of gaps may be WIDE run-and-jump challenges (with runway before them)"
+    "flavor": "a platforming gauntlet \u2014 mostly air and platforms with little solid ground, a rhythm of deliberate jumps over gaps and hazards; a couple of gaps may be WIDE run-and-jump challenges (with runway before them)"
   },
   "cave": {
     "axis": "horizontal",
     "min_len": 14,
-    "max_len": 26,
+    "max_len": 32,
     "intensity": "medium",
     "water": "optional",
     "encounter": "mixed",
-    "feature_bias": {"floor": 3, "platform": 2, "gap": 1, "hazard": 2, "wall": 3, "stairs": 1},
+    "feature_bias": {
+      "floor": 3,
+      "platform": 2,
+      "gap": 1,
+      "hazard": 2,
+      "wall": 3,
+      "stairs": 1,
+      "cloud": 1,
+      "secret": 2
+    },
     "framing": "intimate",
-    "flavor": "a tight, enclosed cave — low ceilings and narrow passages, claustrophobic, threading between walls and hazards"
+    "flavor": "a tight, enclosed cave \u2014 low ceilings and narrow passages, claustrophobic, threading between walls and hazards; the kind of place that hides a secret niche or two off the main path"
   },
   "islands": {
     "axis": "horizontal",
     "min_len": 16,
-    "max_len": 28,
+    "max_len": 34,
     "intensity": "medium",
     "water": "optional",
     "encounter": "traversal",
-    "feature_bias": {"floor": 1, "platform": 4, "gap": 3, "water": 2, "hazard": 1},
+    "feature_bias": {
+      "floor": 1,
+      "platform": 4,
+      "gap": 3,
+      "water": 2,
+      "cloud": 2,
+      "hazard": 1
+    },
     "framing": "vista",
-    "flavor": "scattered islands over a pit or water — hop from platform to platform, the ground below is a fall or a swim"
+    "flavor": "scattered islands over a pit or water \u2014 hop from platform to platform, the ground below is a fall or a swim, with floating water clouds to swim up through or drift across"
   },
   "climb": {
     "axis": "vertical",
-    "min_len": 12,
-    "max_len": 22,
+    "min_len": 14,
+    "max_len": 30,
     "intensity": "high",
     "water": "optional",
     "encounter": "traversal",
-    "feature_bias": {"platform": 5, "ledge": 2, "hazard": 1, "water": 1, "stairs": 1},
+    "feature_bias": {
+      "platform": 5,
+      "ledge": 2,
+      "hazard": 1,
+      "water": 1,
+      "cloud": 2,
+      "stairs": 1
+    },
     "framing": "tall",
-    "flavor": "a vertical climb — ascend a rising stack of staggered platforms and ledges toward an exit at the TOP; occasional water pockets to swim up through"
+    "flavor": "a vertical climb \u2014 ascend a rising stack of staggered platforms and ledges toward an exit at the TOP; float up through water clouds where a jump alone won't carry you"
   }
 }
