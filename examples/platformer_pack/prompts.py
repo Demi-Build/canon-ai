@@ -19,6 +19,7 @@ from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.effects import describe_vocabulary as _effects_vocabulary
 from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.sections import SECTION_OVERLAP
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
@@ -590,6 +591,10 @@ class PlatformerPrompts:
         axis: str = "horizontal",
         previous: str | None = None,
         feedback: list[str] | None = None,
+        predecessor: str | None = None,
+        predecessor_occupied: str | None = None,
+        history: str | None = None,
+        successor_occupied: str | None = None,
     ) -> LLMRequest:
         """Prompt for ONE section of a stitched level. Same op vocabulary and
         physics as :meth:`layout_generation`, framed for a bounded sub-region:
@@ -600,7 +605,17 @@ class PlatformerPrompts:
         sections tile left→right (exit at the right edge); vertical (climb)
         sections stack bottom→top (the FIRST is the base with a ground floor +
         spawn, the exit is the summit). Local ``width``/``height`` are the
-        SECTION's own dims — every coordinate is section-local."""
+        SECTION's own dims — every coordinate is section-local.
+
+        Sequential handoff (user-locked 2026-07-14): ``predecessor`` is the
+        IMMEDIATE previous section's full DSL, REBASED into this section's
+        coordinates (never ask the model to do frame math);
+        ``predecessor_occupied`` describes everything already sitting in the
+        shared seam band; ``history`` is a one-line digest per earlier
+        section (cohesion — what the level has done so far);
+        ``successor_occupied`` (regenerations only) describes the shared band
+        with the already-built NEXT section, so a regenerated interior
+        section meshes with BOTH neighbours."""
         fb = self._layout_feedback(previous, feedback)
         volumes = tiles.named("volume")
         ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
@@ -625,12 +640,12 @@ class PlatformerPrompts:
                     f"This is the FIRST (BOTTOM) section: lay a ground "
                     f"floor(0,{right}) at the bottom and place exactly ONE "
                     "spawn(x) on it near the left (e.g. spawn(2)). Then build a "
-                    "stack of STAGGERED platforms/ledges rising UP from it."
+                    "stack of STAGGERED platforms rising UP from it."
                 )
             else:
                 marker_rule = (
                     "Do NOT place a spawn — the player climbs up from below. "
-                    "Build a stack of STAGGERED platforms/ledges the player "
+                    "Build a stack of STAGGERED platforms the player "
                     "jumps UP through. Do NOT lay a full-width floor (it would "
                     "wall off the climb). This section has NO ground floor, so "
                     f"build ONLY from platform/ledge/wall/carve/free-water "
@@ -644,21 +659,35 @@ class PlatformerPrompts:
                     "standable platform near the TOP (rows 1-3) — the exit "
                     "(summit) is placed there automatically."
                 )
+            # The horizontal branch always forbade exit(); the vertical one
+            # never did, and every paid climb section dutifully emitted one
+            # (harmless dead weight — place_exit overrides — but wasted
+            # tokens and contradicted the contract).
+            marker_rule += (
+                " Do NOT place an exit — the summit exit is placed "
+                "automatically. Do NOT place checkpoints."
+            )
             seam_line = ""
             if seam and not first:
                 seam_line = (
                     "Entering from BELOW — the section under you offers these "
-                    f"top footholds: {seam}. Put your LOWEST platforms within "
-                    f"{movement.jump_height} rows of them so the climb "
-                    "continues.\n"
+                    f"top footholds, IN YOUR OWN row numbers (your bottom "
+                    f"rows {height - 6}..{height - 1} overlap it): {seam}. "
+                    f"Put your LOWEST platforms within "
+                    f"{movement.jump_height} rows ABOVE those footholds so "
+                    "the climb continues.\n"
                 )
             tail_rule = (
-                f"Rules: {marker_rule} platforms/ledges are the backbone "
-                "(smaller y = HIGHER); each platform must sit within "
-                f"{movement.jump_height} rows of a lower foothold AND close "
-                "horizontally (rising costs range — high steps go nearly "
-                "overhead); hazards need floor/platform under them; keep the "
-                "spawn column clear. Do NOT place checkpoints."
+                f"Rules: {marker_rule} One-way platform() rungs are the "
+                "climb's BACKBONE — the player can jump UP THROUGH a "
+                "platform and land on it; a solid ledge() CANNOT be passed "
+                "from below, so use ledges sparingly as side tiers and "
+                "NEVER spanning the whole width (a full-width ledge seals "
+                "the climb like a floor). Smaller y = HIGHER; each foothold "
+                f"must sit within {movement.jump_height} rows of a lower "
+                "foothold AND close horizontally (rising costs range — high "
+                "steps go nearly overhead); hazards need floor/platform "
+                "under them; keep the spawn column clear."
             )
         else:
             stitch_line = (
@@ -690,9 +719,10 @@ class PlatformerPrompts:
             if seam and not first:
                 seam_line = (
                     "Entering from the LEFT — the previous section hands the "
-                    f"player off here: {seam}. Continue the ground so the "
-                    "player crosses the left seam WITHOUT dropping into an "
-                    "unintended gap.\n"
+                    f"player off here, IN YOUR OWN column numbers (your "
+                    f"columns 0..{SECTION_OVERLAP - 1} overlap it): {seam}. "
+                    "Continue the ground so the player crosses the left seam "
+                    "WITHOUT dropping into an unintended gap.\n"
                 )
             tail_rule = (
                 f"Rules: start from floor(0,{right}) then carve; {marker_rule} "
@@ -711,6 +741,48 @@ class PlatformerPrompts:
                 "volume, or gap may cover it or remove the floor beneath it."
             )
 
+        # Sequential handoff: the already-built neighbour(s), in THIS
+        # section's own coordinate numbers, plus a cohesion digest of the
+        # level so far. Detail lives on the immediate predecessor (the only
+        # section this one physically touches); far sections come as
+        # one-liners.
+        handoff = ""
+        if predecessor:
+            if axis == "vertical":
+                edge_word = "the section BELOW you"
+                out_of_range = (
+                    f"rows greater than {height - 1} lie below your bottom "
+                    "edge"
+                )
+                band_desc = f"rows {height - SECTION_OVERLAP}..{height - 1}"
+            else:
+                edge_word = "the section to your LEFT"
+                out_of_range = "negative columns lie left of your edge"
+                band_desc = f"columns 0..{SECTION_OVERLAP - 1}"
+            handoff = (
+                f"ALREADY BUILT — {edge_word}, restated in YOUR coordinate "
+                f"numbers ({out_of_range}; only cells inside your grid are "
+                f"shared):\n{predecessor}\n"
+                f"Your shared band ({band_desc}) already contains: "
+                f"{predecessor_occupied or 'nothing recorded'}. Do NOT "
+                "rebuild or contradict any of it — continue its paths.\n"
+            )
+        if history:
+            handoff += f"The level so far (for cohesion): {history}\n"
+        if successor_occupied:
+            if axis == "vertical":
+                nxt_edge = "ABOVE you"
+                nxt_band = f"rows 0..{SECTION_OVERLAP - 1}"
+            else:
+                nxt_edge = "to your RIGHT"
+                nxt_band = (
+                    f"columns {width - SECTION_OVERLAP}..{width - 1}"
+                )
+            handoff += (
+                f"The NEXT section ({nxt_edge}) is ALREADY BUILT too; your "
+                f"shared {nxt_band} already contain: {successor_occupied} — "
+                "mesh with them, do not collide.\n"
+            )
         return LLMRequest(
             system=_SYSTEM_LAYOUT,
             user_message=(
@@ -724,6 +796,7 @@ class PlatformerPrompts:
                 f"ground floor row is {height - 2}; players stand one row "
                 "above the surface they walk on.\n"
                 + seam_line
+                + handoff
                 + _physics_guidance(movement)
                 + "\n".join(vocab_lines)
                 + f"\n{fb}\n"

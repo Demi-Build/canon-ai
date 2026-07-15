@@ -29,7 +29,13 @@ from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
 from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
-from examples.platformer_pack.dsl import DslError, StampResult, parse_dsl, stamp
+from examples.platformer_pack.dsl import (
+    DslError,
+    StampResult,
+    parse_dsl,
+    rebase_dsl,
+    stamp,
+)
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import (
@@ -50,11 +56,13 @@ from examples.platformer_pack.sections import (
 )
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
+    _body_stand,
     auto_bridge_grid,
     check_placements,
     flyer_spot_exists,
     place_checkpoints_grid,
     place_exit,
+    reachable_cells,
     repair_containment_grid,
     snap_spawn_grid,
     standable_cells,
@@ -266,6 +274,18 @@ class _SectionState:
     attempts: list[dict[str, Any]]
 
 
+def _section_digest(idx: int, ps: PlannedSection, dsl_text: str) -> str:
+    """One line of 'what this section built' for the sequential-handoff
+    HISTORY block — op counts only (cheap cohesion context; the full DSL is
+    reserved for the immediate predecessor, the only section that physically
+    touches the receiver)."""
+    counts: dict[str, int] = {}
+    for op, _ in parse_dsl(dsl_text, skipped=[]):
+        counts[op] = counts.get(op, 0) + 1
+    ops = ", ".join(f"{n}x {op}" for op, n in sorted(counts.items()))
+    return f"s{idx} {ps.archetype}: {ops or 'empty'}"
+
+
 def _section_fallback_dsl(
     local_w: int, local_h: int, index: int, axis: str
 ) -> str:
@@ -310,13 +330,19 @@ def _generate_one_section(
     phase_name: str,
     initial_feedback: list[str] | None = None,
     previous: str | None = None,
+    predecessor: str | None = None,
+    predecessor_occupied: str | None = None,
+    history: str | None = None,
+    successor_occupied: str | None = None,
 ) -> _SectionState:
     """Generate ONE section: Layout Agent → local DSL → stamped local sub-grid
     at the section's own (``local_w`` x ``local_h``) dims. ``retry_with_feedback``
     covers LOCAL validity (stamps without a ``DslError``; the first section must
     plant a spawn). Falls back to a flat floor / climbable ladder.
     ``initial_feedback``/``previous`` seed a whole-level-driven regeneration's
-    FIRST attempt (the stitcher routed a design problem here)."""
+    FIRST attempt (the stitcher routed a design problem here); the
+    ``predecessor*``/``history``/``successor_occupied`` args are the
+    sequential handoff (see :meth:`PlatformerPrompts.section_layout`)."""
     last_attempt: dict[str, str | None] = {"content": previous}
 
     def generate(
@@ -331,6 +357,10 @@ def _generate_one_section(
             index, total, local_w, local_h, movement, rules=rules, tiles=tiles,
             seam=seam, intensity=arch.intensity, water=arch.water, axis=axis,
             previous=last_attempt["content"], feedback=eff_fb,
+            predecessor=predecessor,
+            predecessor_occupied=predecessor_occupied,
+            history=history,
+            successor_occupied=successor_occupied,
         )
         if max_tokens is not None:
             request.max_tokens = max_tokens
@@ -342,8 +372,18 @@ def _generate_one_section(
 
     def validate(content: str) -> tuple[bool, list[str]]:
         try:
+            skipped: list[str] = []
+            ops = parse_dsl(content, skipped=skipped)
+            if not ops:
+                # Lenient parsing skips junk lines, but a reply that is ALL
+                # junk must still fail — an empty section is not a design.
+                return False, [
+                    "Your reply contained no valid DSL ops at all — emit "
+                    "the section as ops, one per line, nothing else."
+                ]
             res = stamp(
-                content, local_w, local_h, tiles=tiles, validate_markers=False
+                content, local_w, local_h, tiles=tiles,
+                validate_markers=False, lenient=True,
             )
         except DslError as exc:
             return False, list(exc.problems)
@@ -357,6 +397,12 @@ def _generate_one_section(
 
     fallback = _section_fallback_dsl(local_w, local_h, index, axis)
     attempts: list[dict[str, Any]] = []
+    # A climb section fills a 2D shaft, not a 1D strip — its DSL is far
+    # denser per grid area (the paid l4 sections ran 55+ lines against a
+    # 512-token budget, and a line-boundary truncation passes local
+    # validation SILENTLY with the top of the climb missing). Vertical
+    # sections start at a 1024 floor; escalation still covers the rest.
+    token_floor = 1024 if axis == "vertical" else 512
     text = retry_with_feedback(
         generate_fn=generate,
         validate_fn=validate,
@@ -365,7 +411,7 @@ def _generate_one_section(
         label=f"{phase_name}:{level_id}:s{index}",
         attempt_log=attempts,
         token_escalation=default_token_escalation,
-        initial_max_tokens=max(512, min(2048, local_w * local_h)),
+        initial_max_tokens=max(token_floor, min(2048, local_w * local_h)),
     )
     # Fell back only if NO attempt validated (retry_with_feedback then returns
     # the fallback) — never by comparing text to the fallback string, since a
@@ -374,7 +420,10 @@ def _generate_one_section(
     for a in attempts:
         a["section"] = index
         a["archetype"] = ps.archetype
-    res = stamp(text, local_w, local_h, tiles=tiles, validate_markers=False)
+    res = stamp(
+        text, local_w, local_h, tiles=tiles, validate_markers=False,
+        lenient=True,
+    )
     return _SectionState(
         ps=ps, dsl=text, res=res, fell_back=fell, attempts=attempts
     )
@@ -422,17 +471,60 @@ def _stitch_and_repair(
     whole.spawn, spawn_moves = snap_spawn_grid(
         whole.grid, whole.spawn, exit_, tiles
     )
+    # Checkpoints are STITCHER-owned (the blueprint decides count + which
+    # sections). Strip any that slipped out of a section's DSL BEFORE the
+    # bridge/validate loop — a stray unreachable checkpoint used to feed
+    # check_level a non-reachability problem that burned whole-level regen
+    # rounds for a marker the stitcher was about to discard anyway.
+    whole.triggers = [t for t in whole.triggers if t.type != "checkpoint"]
     grid, bridges, problems = auto_bridge_grid(
         whole.grid, whole.spawn, exit_, movement, rules=rules, tiles=tiles,
         triggers=whole.triggers, free_volume=whole.free_volume,
+        hazards=whole.hazards,
     )
+    # EXIT-RELOCATE (code-not-LLM): place_exit picks the rightmost/topmost
+    # standable cell BLIND to reachability — the plat_seaside4 l2 design had
+    # a sealed decorative chamber at its far right and the exit went inside
+    # it. When the only residue is exit-unreachability AND the exit's own
+    # section is partly reached, move the exit to the farthest REACHED
+    # foothold in that section (the design intent — "as far right / as high
+    # as the player can actually get") and re-run the bridge loop once.
+    if problems and all(
+        p.startswith("exit at") and "is not reachable" in p for p in problems
+    ):
+        last = states[-1].ps
+        reached = reachable_cells(grid, whole.spawn, movement, tiles)
+        body = _body_stand(grid, standable_cells(grid, tiles), tiles)
+        if axis == "vertical":
+            in_range = lambda c: last.y_off <= c[1] < last.y_off + last.length  # noqa: E731
+            metric = lambda c: (-c[1], c[0])  # noqa: E731 — highest wins
+        else:
+            in_range = lambda c: last.x_off <= c[0] < last.x_off + last.length  # noqa: E731
+            metric = lambda c: (c[0], -c[1])  # noqa: E731 — rightmost wins
+        cands = [
+            c for c in (reached & body)
+            if in_range(c) and c != whole.spawn
+        ]
+        if cands:
+            new_exit = max(cands, key=metric)
+            if new_exit != exit_:
+                whole.repairs.append(
+                    f"exit relocated {exit_} -> {new_exit} — the designed "
+                    "corner is sealed off; the exit goes where the player "
+                    "can actually get."
+                )
+                exit_ = new_exit
+                grid, more, problems = auto_bridge_grid(
+                    grid, whole.spawn, exit_, movement, rules=rules,
+                    tiles=tiles, triggers=whole.triggers,
+                    free_volume=whole.free_volume, hazards=whole.hazards,
+                )
+                bridges = bridges + more
     whole.grid = grid
     whole.exit = exit_
-    # Checkpoints are STITCHER-owned (the blueprint decides count + which
-    # sections). Strip any that slipped out of a section's DSL, then place the
-    # blueprint's on the FINAL (bridged) grid at reachable standable cells —
-    # count-capped + reachable by construction, both axes.
-    whole.triggers = [t for t in whole.triggers if t.type != "checkpoint"]
+    # Place the blueprint's checkpoints on the FINAL (bridged) grid at
+    # reachable standable cells — count-capped + reachable by construction,
+    # both axes.
     whole.triggers += place_checkpoints_grid(
         grid, whole.spawn, exit_,
         [st.ps for st in states], checkpoint_sections, axis, movement, tiles,
@@ -447,10 +539,13 @@ def _owner_of_problem(
     (by x-range for horizontal, y-range for vertical); a cell-less message
     (exit/containment at the far edge) goes to the LAST section.
 
-    A reachability break carries a machine-readable ``[break@x,y]`` tag for the
-    GAP cell (the midpoint of the break) — routed FIRST, so the section that
-    owns the gap regenerates, not the one holding the far-off target coord that
-    the prose prints before it (the horizontal-bias misroute the audit found)."""
+    A reachability break carries a machine-readable ``[break@x,y]`` tag for
+    the FRONTIER cell (the reached foothold where progress stalls) — routed
+    FIRST, so the section that owns the stall point regenerates, not the one
+    holding the far-off target coord that the prose prints before it. (The
+    tag used to be the frontier/nearest midpoint; on a tall vertical break
+    that average can land in a section containing neither endpoint — the
+    plat_seaside3 l7 misroute.)"""
     for p in problems:
         m = re.search(r"\[break@(\d+),(\d+)\]", p)
         if m:
@@ -526,7 +621,8 @@ def _generate_sectioned_level(
     total = len(plan)
     max_retries = getattr(ctx.config, "max_retries", 3)
 
-    def gen(idx: int, ps: PlannedSection, seam, feedback, previous):
+    def gen(idx: int, ps: PlannedSection, seam, feedback, previous,
+            handoff: dict | None = None):
         lw, lh = _section_local_dims(ps, width, height, axis)
         return _generate_one_section(
             ctx, level_id=level_id, brief=brief, ps=ps,
@@ -534,26 +630,72 @@ def _generate_sectioned_level(
             local_w=lw, local_h=lh, axis=axis, movement=movement,
             rules=rules, tiles=tiles, seam=seam, phase_name=phase_name,
             initial_feedback=feedback, previous=previous,
+            **(handoff or {}),
         )
 
+    def _handoff_for(idx: int, states: list[_SectionState]) -> dict:
+        """Sequential handoff (user-locked 2026-07-14): the immediate
+        predecessor's full DSL rebased into ``idx``'s coordinates + the
+        occupied seam band + one-line digests of every earlier section."""
+        if idx == 0 or idx > len(states):
+            return {}
+        ps = plan[idx]
+        prev = plan[idx - 1]
+        shift = (prev.x_off - ps.x_off, prev.y_off - ps.y_off)
+        out: dict = {
+            "predecessor": rebase_dsl(states[idx - 1].dsl, *shift),
+            "predecessor_occupied": overlap_occupancy(
+                states[idx - 1].res, axis=axis, tiles=tiles, shift=shift
+            ),
+        }
+        if idx >= 2:
+            out["history"] = "; ".join(
+                _section_digest(i, plan[i], states[i].dsl)
+                for i in range(idx - 1)
+            )
+        return out
+
     # 1) Generate every section once, threading each section's outgoing seam
-    #    summary (right edge / top) into the next section (text, never a grid).
+    #    summary (right edge / top) into the next section (text, never a
+    #    grid) — with the coordinates TRANSLATED into the receiving section's
+    #    local frame (the §1b seam frame bug left the raw giver-frame rows in,
+    #    inviting an unclimbable void at every vertical seam) — plus the
+    #    sequential handoff: the predecessor's full rebased DSL, the occupied
+    #    seam band, and digests of everything built so far.
     states: list[_SectionState] = []
     seam: str | None = None
     for idx, ps in enumerate(plan):
-        st = gen(idx, ps, seam, None, None)
+        st = gen(idx, ps, seam, None, None, _handoff_for(idx, states))
         states.append(st)
-        seam = seam_summary(st.res, axis=axis, tiles=tiles)
+        if idx + 1 < total:
+            nxt = plan[idx + 1]
+            seam = seam_summary(
+                st.res, axis=axis, tiles=tiles,
+                shift=(ps.x_off - nxt.x_off, ps.y_off - nxt.y_off),
+            )
 
     # 2) Stitch + whole-grid repair; on a DESIGN failure regenerate ONLY the
     #    owning section with located feedback and re-stitch (bounded). v1
     #    sections meet on a continuous seam, so downstream sections are not
     #    re-generated (a v1 simplification).
+    # Every stitch round's residue is RECORDED (stitch_rounds) — the
+    # plat_seaside3 post-mortem had to REPLAY the paid traces to recover why
+    # five levels fell back, because the whole-level problems were never
+    # written anywhere (the per-section attempts all said "passed").
     whole_fallback = False
+    stitch_rounds: list[dict[str, Any]] = []
     for attempt in range(max_retries + 1):
         result, bridges, snaps, problems = _stitch_and_repair(
             states, width, height, axis, movement, rules, tiles,
             level_plan.checkpoint_sections,
+        )
+        stitch_rounds.append(
+            {
+                "round": attempt,
+                "problems": list(problems),
+                "bridges": list(bridges),
+                "snaps": list(snaps),
+            }
         )
         if not problems:
             break
@@ -576,6 +718,51 @@ def _generate_sectioned_level(
                 states, width, height, axis, movement, rules, tiles,
                 level_plan.checkpoint_sections,
             )
+            stitch_rounds.append(
+                {
+                    "round": attempt,
+                    "terminal_local_fallback": owner,
+                    "problems": list(problems),
+                    "bridges": list(bridges),
+                    "snaps": list(snaps),
+                }
+            )
+            if problems:
+                # The single-owner rescue can lose to the NEIGHBOURS' overlap
+                # content (parts paste in order, so a neighbour's cells win
+                # over the flattened owner — the plat_seaside4 l2 terminal
+                # flattened s0 while the blocking tower was s1's). Before
+                # nuking the whole level, force the owner's seam neighbours
+                # to their fallbacks too and re-stitch once more.
+                neighbours = [
+                    i for i in (owner - 1, owner + 1) if 0 <= i < total
+                ]
+                for i in neighbours:
+                    lw_i, lh_i = _section_local_dims(
+                        plan[i], width, height, axis
+                    )
+                    fb_i = _section_fallback_dsl(lw_i, lh_i, i, axis)
+                    states[i] = _SectionState(
+                        ps=plan[i], dsl=fb_i,
+                        res=stamp(
+                            fb_i, lw_i, lh_i, tiles=tiles,
+                            validate_markers=False,
+                        ),
+                        fell_back=True, attempts=states[i].attempts,
+                    )
+                result, bridges, snaps, problems = _stitch_and_repair(
+                    states, width, height, axis, movement, rules, tiles,
+                    level_plan.checkpoint_sections,
+                )
+                stitch_rounds.append(
+                    {
+                        "round": attempt,
+                        "terminal_neighbor_fallback": neighbours,
+                        "problems": list(problems),
+                        "bridges": list(bridges),
+                        "snaps": list(snaps),
+                    }
+                )
             if problems:
                 whole_fallback = True
                 result = _whole_fallback(width, height, axis, tiles)
@@ -584,16 +771,41 @@ def _generate_sectioned_level(
         owner = _owner_of_problem(plan, problems, axis)
         ps = plan[owner]
         prev_seam = (
-            seam_summary(states[owner - 1].res, axis=axis, tiles=tiles)
+            seam_summary(
+                states[owner - 1].res, axis=axis, tiles=tiles,
+                shift=(
+                    plan[owner - 1].x_off - ps.x_off,
+                    plan[owner - 1].y_off - ps.y_off,
+                ),
+            )
             if owner > 0
             else None
         )
-        states[owner] = gen(
+        # A regenerated INTERIOR section must mesh with BOTH already-built
+        # neighbours — the plat_seaside4 l8 trace showed a section
+        # regenerated three times blind to the successor it had to meet.
+        handoff = _handoff_for(owner, states)
+        if owner + 1 < total:
+            nxt = plan[owner + 1]
+            handoff["successor_occupied"] = overlap_occupancy(
+                states[owner + 1].res, axis=axis, tiles=tiles,
+                shift=(nxt.x_off - ps.x_off, nxt.y_off - ps.y_off),
+                side="incoming",
+            )
+        regen = gen(
             owner, ps, prev_seam,
             _section_feedback(problems, ps, axis), states[owner].dsl,
+            handoff,
         )
+        # KEEP the replaced state's attempt log — each gen() starts a fresh
+        # list, and the old `states[owner] = gen(...)` silently discarded the
+        # prior rounds' attempts (the trace under-reported the paid runs).
+        for a in regen.attempts:
+            a["regen_round"] = attempt + 1
+        regen.attempts[:0] = states[owner].attempts
+        states[owner] = regen
 
-    section_fallbacks = sum(1 for st in states if st.fell_back)
+    section_fallbacks = [i for i, st in enumerate(states) if st.fell_back]
     attempts: list[dict[str, Any]] = [a for st in states for a in st.attempts]
     if whole_fallback:
         dsl_text = (
@@ -610,8 +822,13 @@ def _generate_sectioned_level(
         )
         if bridges:
             dsl_text += "\n# auto-bridge (whole-level)\n" + "\n".join(bridges)
-    fell_back = whole_fallback or section_fallbacks > 0
-    return result, dsl_text, fell_back, attempts, bridges, snaps
+    fell_back = whole_fallback or bool(section_fallbacks)
+    diag = {
+        "whole_fallback": whole_fallback,
+        "section_fallbacks": section_fallbacks,
+        "stitch_rounds": stitch_rounds,
+    }
+    return result, dsl_text, fell_back, attempts, bridges, snaps, diag
 
 
 def stamp_level_collision(
@@ -651,7 +868,7 @@ def stamp_level_collision(
         view_cells = prior.view_cells if prior is not None else None
     # A vertical level frames by HEIGHT (a tall shaft): show ~view_rows rows.
     view_rows = graphics.view_rows if axis == "vertical" else None
-    result, dsl_text, fell_back, attempts, bridges, snaps = (
+    result, dsl_text, fell_back, attempts, bridges, snaps, diag = (
         _generate_sectioned_level(
             ctx, level_id=level_id, brief=brief, knobs=knobs,
             width=width, height=height, axis=axis, movement=movement,
@@ -659,18 +876,27 @@ def stamp_level_collision(
         )
     )
     if fell_back:
+        scope = (
+            "the WHOLE level is"
+            if diag["whole_fallback"]
+            else f"section(s) {diag['section_fallbacks']} are"
+        )
         warn(
             ctx,
-            f"layout {level_id}: one or more sections never validated; the "
-            "level is (partly) the flat FALLBACK layout, not generated "
-            f"content. Attempt trace: review/{stage_id}/"
+            f"layout {level_id}: {scope} FALLBACK layout content, not "
+            f"generated design. Attempt trace: review/{stage_id}/"
             f"{level_id}_layout_attempts.json",
         )
     trace_rel = f"review/{stage_id}/{level_id}_layout_attempts.json"
-    if any(a["outcome"] != "passed" for a in attempts):
+    if fell_back or any(a["outcome"] != "passed" for a in attempts):
         # Post-mortem evidence beside the skinned renders. Content is
         # attempt-derived only (no timestamps) — the byte-identical
-        # fake-run verification bar covers this file too.
+        # fake-run verification bar covers this file too. Written whenever
+        # the level fell back EVEN IF every recorded section attempt passed:
+        # the plat_seaside3 l3/l6 fallbacks deleted their own evidence
+        # because this used to key on failed attempts alone, and the
+        # whole-level stitch problems (diag["stitch_rounds"]) are exactly
+        # what a post-mortem needs.
         ctx.adapter.write_json_singleton(
             trace_rel,
             {
@@ -679,8 +905,12 @@ def stamp_level_collision(
                 "grid_width": width,
                 "grid_height": height,
                 "difficulty": knobs.get("difficulty"),
+                "axis": axis,
                 "fallback": fell_back,
+                "whole_fallback": diag["whole_fallback"],
+                "section_fallbacks": diag["section_fallbacks"],
                 "attempts": attempts,
+                "stitch_rounds": diag["stitch_rounds"],
             },
         )
     else:
@@ -740,7 +970,10 @@ def stamp_level_collision(
     ctx.artifacts.setdefault("dsl_texts", {})[level_id] = dsl_text
 
     op_counts: dict[str, int] = {}
-    for op, _args in parse_dsl(dsl_text):
+    # Lenient: the combined record is LLM-derived and may carry lines the
+    # section stamps skipped (prose/truncation debris) — the op-count log
+    # must not be the one place that still raises on them.
+    for op, _args in parse_dsl(dsl_text, skipped=[]):
         op_counts[op] = op_counts.get(op, 0) + 1
     logger.info(
         "Layout %s (difficulty %s, %dx%d): %s; spawn %s -> exit %s, "
@@ -1144,6 +1377,7 @@ def seam_summary(
     axis: str = "horizontal",
     overlap: int = SECTION_OVERLAP,
     tiles: TileRegistry = DEFAULT_TILES,
+    shift: tuple[int, int] = (0, 0),
 ) -> str:
     """One-line hand-off summary of the edge a section passes to its NEIGHBOUR
     — the standable footing near the boundary as TEXT, never a raw grid (I3).
@@ -1152,7 +1386,13 @@ def seam_summary(
     - vertical: the TOP edge (topmost ``overlap`` rows) → the footholds the
       climber reaches entering the section above.
     A boundary with no footing says so, so the neighbour doesn't assume ground.
-    """
+
+    ``shift`` translates the printed coordinates into the RECEIVING section's
+    local frame (``giver_offset - receiver_offset`` per axis). The §1b SEAM
+    FRAME BUG: a climb section was told the section below "offers top
+    footholds y=1: x 3-5" in the LOWER section's frame — y=1..5 reads as the
+    receiver's own TOP, so a literal model built its lowest platforms a
+    whole section-height above the seam and left an unclimbable void."""
     grid = res.grid
     height, width = grid.shape
     stand = standable_cells(grid, tiles)
@@ -1169,7 +1409,67 @@ def seam_summary(
             f"the {edge} has NO footing — it is open air or a pit; do not "
             "assume the ground continues there"
         )
+    dx, dy = shift
+    band = [(x + dx, y + dy) for (x, y) in band]
     return f"standable footing near the {edge} — " + _cells_summary(band)
+
+
+def overlap_occupancy(
+    res: StampResult,
+    axis: str = "horizontal",
+    overlap: int = SECTION_OVERLAP,
+    tiles: TileRegistry = DEFAULT_TILES,
+    shift: tuple[int, int] = (0, 0),
+    side: str = "outgoing",
+) -> str:
+    """EVERYTHING a section leaves in the shared seam band, by category, in
+    the RECEIVING section's coordinates — the footing-only ``seam_summary``
+    left the next section blind to walls/ledges/hazards/water already sitting
+    in the overlap, and the plat_seaside4 l2 trap was built exactly there
+    (a tower erected against an unseen capped ledge). Empty band says so.
+
+    ``side`` picks WHICH band of the giving section is shared: ``outgoing``
+    (default) is the band it hands its NEXT neighbour (right columns / top
+    rows); ``incoming`` is the band it shares with its PREVIOUS neighbour
+    (left columns / bottom rows) — used when a REGENERATED section needs to
+    see its already-built successor."""
+    grid = res.grid
+    height, width = grid.shape
+    if axis == "vertical":
+        rows = (
+            range(min(height, overlap))
+            if side == "outgoing"
+            else range(max(0, height - overlap), height)
+        )
+        cells = [(x, y) for y in rows for x in range(width)]
+    else:
+        cols = (
+            range(max(0, width - overlap), width)
+            if side == "outgoing"
+            else range(min(width, overlap))
+        )
+        cells = [(x, y) for y in range(height) for x in cols]
+    dx, dy = shift
+    by_cat: dict[str, list[tuple[int, int]]] = {}
+    for x, y in cells:
+        v = int(grid[y, x])
+        if v == 0:
+            continue
+        tile = tiles.by_id.get(v)
+        cat = tile.category if tile else "?"
+        label = {
+            "solid": "SOLID (floor/ledge/wall)",
+            "one_way": "one-way platform",
+            "hazard": "hazard",
+            "volume": "liquid",
+        }.get(cat, cat)
+        by_cat.setdefault(label, []).append((x + dx, y + dy))
+    if not by_cat:
+        return "the shared band is open air"
+    return "; ".join(
+        f"{label}: {_cells_summary(sorted(cells))}"
+        for label, cells in sorted(by_cat.items())
+    )
 
 
 # ---------------------------------------------------------------------------
