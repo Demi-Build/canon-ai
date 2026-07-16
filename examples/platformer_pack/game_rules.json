@@ -6,6 +6,7 @@
   "break_delay_s": 0.6,
   "variant_caps": { "elite": 1, "champion": 1, "relentless": 1 },
   "checkpoint_enemy_reset": true,
+  "death_linger_s": 0.5,
   "spawn_grace": "until_move",
   "rarity_caps": { "rare": 1, "uncommon": 2 },
   "enemy_sight": {

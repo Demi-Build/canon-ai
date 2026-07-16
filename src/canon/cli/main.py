@@ -9,6 +9,7 @@ Optional dependency: install with `pip install canon-ai[cli]`.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import sys
@@ -515,6 +516,130 @@ def regen_cmd(
         path, pipeline, phases, max_concurrency, skip_edit_check=False,
         extra_payload=regen_payload,
     )
+
+
+@app.command("estimate")
+def estimate_cmd(
+    path: Path = typer.Argument(
+        ..., help="Path to bible JSON file (may not exist yet — a missing "
+        "file forecasts a full run from scratch).",
+    ),
+    targets: list[str] = typer.Argument(
+        None,
+        help="Optional regen targets (same grammar as `canon regen`) — "
+        "the estimate then prices only the would-run subgraph.",
+    ),
+    pipeline: str | None = typer.Option(
+        None, "--pipeline",
+        help="module:attr resolving to a PipelineContext factory "
+        "callable(bible) -> ctx.",
+    ),
+    phases: str | None = typer.Option(
+        None, "--phases",
+        help="module:attr resolving to a phase list, or a callable(ctx) "
+        "-> phase list.",
+    ),
+    estimator: str | None = typer.Option(
+        None, "--estimator",
+        help="module:attr -> callable(ctx, nodes, bible) -> dict pricing "
+        "the would-run nodes (e.g. examples.platformer_pack.estimate:"
+        "estimate_run). Omitted: node counts only, no dollars.",
+    ),
+) -> None:
+    """Forecast what a run would execute — and what it would cost —
+    without generating anything (PRD §9.2). Never writes: the bible on
+    disk is untouched (stale-marking for targets happens on a copy)."""
+    try:
+        from canon.pipeline.orchestrator import (
+            build_nodes,
+            detect_edits,
+            initial_skips,
+            mark_stale,
+            pinned_ids,
+        )
+    except ImportError as e:
+        _emit_error(f"Failed to import orchestrator: {e}")
+    if not pipeline:
+        _emit_error("--pipeline is required (module:attr -> ctx factory)")
+    if not phases:
+        _emit_error("--phases is required (module:attr -> phases factory)")
+
+    if path.exists():
+        try:
+            bible = Bible.load(path)
+        except Exception as e:
+            _emit_error(f"Failed to load bible: {e}", path=str(path))
+        # Estimate must never mutate run state — regen-target marking and
+        # DAG expansion happen on a deep copy, and nothing persists.
+        work = copy.deepcopy(bible)  # type: ignore[possibly-unbound]
+    else:
+        work = Bible.empty(seed="estimate")
+
+    plan = None
+    if targets:
+        try:
+            plan = mark_stale(work, list(targets))  # type: ignore[possibly-unbound]
+        except KeyError as e:
+            _emit_error(
+                str(e.args[0]) if e.args else str(e), targets=list(targets)
+            )
+
+    try:
+        ctx = _resolve_module_attr(pipeline)(work)  # type: ignore[arg-type,misc]
+        phases_factory = _resolve_module_attr(phases)  # type: ignore[arg-type]
+        phase_list = (
+            phases_factory(ctx) if callable(phases_factory) else phases_factory
+        )
+        nodes = build_nodes(phase_list, ctx)  # type: ignore[possibly-unbound]
+    except Exception as e:
+        _emit_error(
+            f"Failed to build the DAG for estimation: {e}",
+            traceback=traceback.format_exc(),
+        )
+
+    # Every actual run path (run/resume/regen and the runner's resume)
+    # runs edit detection before orchestrating — the forecast must see
+    # the same hand-edit stale cascade or it under-prices edited trees.
+    # detect_edits only mutates the in-memory copy; still no writes.
+    edit_report = None
+    if path.exists():
+        try:
+            edits = detect_edits(  # type: ignore[possibly-unbound]
+                work, getattr(ctx.config, "output_dir", ".")  # type: ignore[possibly-unbound]
+            )
+            edit_report = edits.to_dict()
+        except Exception as e:
+            _emit_error(
+                f"Edit detection failed: {e}",
+                traceback=traceback.format_exc(),
+            )
+
+    node_map = {n.node_id: n for n in nodes}  # type: ignore[possibly-unbound]
+    status = getattr(work.metadata, "node_status", {}) or {}
+    skips = initial_skips(node_map, status, pinned_ids(work))  # type: ignore[possibly-unbound]
+    to_run = [n for n in nodes if n.node_id not in skips]  # type: ignore[possibly-unbound]
+
+    payload: dict = {
+        "result": "estimate",
+        "bible": str(path),
+        "nodes": {
+            "total": len(node_map),
+            "to_run": len(to_run),
+            "skipped": len(skips),
+        },
+        "regen": plan.to_dict() if plan else None,
+        "edit_detection": edit_report,
+    }
+    if estimator:
+        try:
+            payload["estimate"] = _resolve_module_attr(estimator)(
+                ctx, to_run, work
+            )
+        except Exception as e:
+            _emit_error(
+                f"Estimator failed: {e}", traceback=traceback.format_exc()
+            )
+    _emit(payload)
 
 
 @app.command("resume")

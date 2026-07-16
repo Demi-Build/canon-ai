@@ -55,6 +55,7 @@ from examples.platformer_pack.level import (
     LEVEL_STEPS,
     decorate_level,
     place_level_entities,
+    place_level_items,
     stamp_level_collision,
     write_level_hazards,
     write_level_manifest,
@@ -63,6 +64,7 @@ from examples.platformer_pack.level import (
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
 from examples.platformer_pack.phases import (
     EnemyGeneratorPhase,
+    ItemGeneratorPhase,
     StagePhase,
     WorldPhase,
 )
@@ -114,6 +116,7 @@ class LevelStepsDagPhase:
         combat: CombatSpec = DEFAULT_COMBAT,
         max_enemies_per_level: int = 4,
         max_decor: int = 6,
+        max_items_per_level: int = 24,
     ) -> None:
         self.width = width
         self.height = height
@@ -125,6 +128,7 @@ class LevelStepsDagPhase:
         self.combat = combat
         self.max_enemies = max_enemies_per_level
         self.max_decor = max_decor
+        self.max_items = max_items_per_level
 
     def expand(self, ctx: Any) -> list[Node]:
         stages = _stages(ctx)
@@ -229,6 +233,30 @@ class LevelStepsDagPhase:
                         ],
                     )
                 )
+        for sid, _ts, level_ids in per_stage:
+            for lid in level_ids:
+                nodes.append(
+                    Node(
+                        node_id=aid(sid, lid, "items"),
+                        run=level_body(
+                            lid, place_level_items,
+                            max_items=self.max_items, rules=self.rules,
+                            tiles=self.tiles, movement=self.movement,
+                            phase_name="plat:item_placement",
+                        ),
+                        # Items place AFTER enemies (power-ups stage around
+                        # them), read reward anchors from triggers, and
+                        # validate against the collision grid; rarity caps
+                        # read the pool definitions (whole-pool edges).
+                        requires=[
+                            aid(sid, lid, "collision"),
+                            aid(sid, lid, "hazards"),
+                            aid(sid, lid, "triggers"),
+                            aid(sid, lid, "entities"),
+                            "phase:plat:items",
+                        ],
+                    )
+                )
         for sid, tileset_aid, level_ids in per_stage:
             for lid in level_ids:
                 nodes.append(
@@ -308,10 +336,12 @@ class RenderDagPhase:
 
 
 class VlmQaDagPhase:
-    """VLM QA judgment over the review renders — an ``always`` node, the
-    v1 cadence: it re-runs on every orchestration and its body is a no-op
-    unless a judge was built from an explicit ``--vlm-backend`` flag (no
-    staleness/caching story yet — deliberately). Sits between the renders
+    """VLM QA judgment over the review renders — an ``always`` node: it
+    re-runs on every orchestration and its body is a no-op unless a judge
+    was built from an explicit ``--vlm-backend`` flag. Re-judging is
+    STALENESS-AWARE (QA v2): unchanged levels carry their previous
+    verdicts from the on-disk report without a VLM call, so a flagged
+    resume only pays for what actually changed. Sits between the renders
     it judges and the manifest that ships its warnings."""
 
     name = "plat:vlm_qa"
@@ -321,10 +351,15 @@ class VlmQaDagPhase:
         judge: Any = None,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: Any = None,
     ) -> None:
+        from examples.platformer_pack.graphics import DEFAULT_GRAPHICS
         from examples.platformer_pack.vlm_qa import VlmQaPhase
 
-        self._phase = VlmQaPhase(judge=judge, tiles=tiles, variants=variants)
+        self._phase = VlmQaPhase(
+            judge=judge, tiles=tiles, variants=variants,
+            graphics=graphics or DEFAULT_GRAPHICS,
+        )
 
     def expand(self, ctx: Any) -> list[Node]:
         stages = _stages(ctx)
@@ -417,11 +452,12 @@ class GodotExportDagPhase:
 
 def macro_phases(num_levels: int = 3, num_enemies: int = 4,
                  num_stages: int = 1, *,
+                 num_items: int = 5,
                  tiles: TileRegistry = DEFAULT_TILES,
                  graphics: GraphicsSpec = DEFAULT_GRAPHICS) -> list:
-    """The bootstrap prefix: world/stages/style/enemies/tilesets as legacy
-    nodes (style first — enemy hues avoid every palette's hazard/volume
-    hues)."""
+    """The bootstrap prefix: world/stages/style/enemies/items/tilesets as
+    legacy nodes (style first — enemy hues avoid every palette's
+    hazard/volume hues)."""
     from examples.platformer_pack.style import StyleGuidePhase
 
     return [
@@ -429,6 +465,7 @@ def macro_phases(num_levels: int = 3, num_enemies: int = 4,
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         StyleGuidePhase(tiles=tiles),
         EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
+        ItemGeneratorPhase(count=num_items),
         PlaceholderTilesetPhase(tiles=tiles, graphics=graphics),
     ]
 
@@ -436,6 +473,7 @@ def macro_phases(num_levels: int = 3, num_enemies: int = 4,
 def compose_dag_pipeline(
     num_levels: int = 3,
     num_enemies: int = 4,
+    num_items: int = 5,
     num_stages: int = 1,
     width: int = 48,
     height: int = 16,
@@ -464,7 +502,7 @@ def compose_dag_pipeline(
     items = [
         *macro_phases(
             num_levels, num_enemies, num_stages,
-            tiles=tiles, graphics=graphics,
+            num_items=num_items, tiles=tiles, graphics=graphics,
         ),
         LevelStepsDagPhase(
             width=width, height=height, movement=movement, rules=rules,
@@ -481,7 +519,10 @@ def compose_dag_pipeline(
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderDagPhase(variants=variants, graphics=graphics),
-        VlmQaDagPhase(judge=vlm_judge, tiles=tiles, variants=variants),
+        VlmQaDagPhase(
+            judge=vlm_judge, tiles=tiles, variants=variants,
+            graphics=graphics,
+        ),
         ManifestDagPhase(
             movement=movement, rules=rules, tiles=tiles, variants=variants,
             graphics=graphics, combat=combat,
@@ -509,7 +550,8 @@ def run_orchestrated(
         bootstrap_kwargs = {
             k: compose_kwargs[k]
             for k in (
-                "num_levels", "num_enemies", "num_stages", "tiles", "graphics",
+                "num_levels", "num_enemies", "num_items", "num_stages",
+                "tiles", "graphics",
             )
             if k in compose_kwargs
         }
@@ -539,17 +581,37 @@ def cli_ctx_factory(bible: Any):
     from canon.config import CanonConfig
     from canon.llm.client import LLMClient
     from canon.pipeline.runner import PipelineContext
+    from canon.pipeline.stats import GenerationStats
+    from canon.pipeline.steplog import StepLog
+    from examples.platformer_pack.models import load_models
     from examples.platformer_pack.prompts import PlatformerPrompts
     from examples.run_platformer_slice import make_fake_responder
 
     seed = os.environ.get("CANON_PLAT_SEED", "emberfall_001")
     out = os.environ.get("CANON_PLAT_OUT", ".")
+    stats = GenerationStats(
+        llm_backend="fake",
+        image_backend=os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
+        music_backend=os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""),
+        sfx_backend=os.environ.get("CANON_PLAT_SFX_BACKEND", ""),
+    )
+    # CANON_PLAT_MODELS mirrors --models (inert here: FakeLLM never honors
+    # per-request models) — wired so the CLI path can't drift from the
+    # runner's when a real-backend factory lands.
+    models_path = os.environ.get("CANON_PLAT_MODELS")
+    model_table = load_models(models_path) if models_path else load_models()
     return PipelineContext(
         bible=bible,
         config=CanonConfig(seed=seed, output_dir=Path(out)),
         rng=random.Random(seed),
-        llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+        stats=stats,
+        llm=LLMClient(
+            FakeLLMBackend(make_fake_responder()),
+            stats=stats,
+            model_resolver=model_table.resolve,
+        ),
         prompts=PlatformerPrompts(),
+        steplog=StepLog(Path(out)),
     )
 
 
@@ -624,9 +686,12 @@ def regen_field(ctx: Any, target: str) -> dict:
         stage = next(iter(ctx.bible.stages.values()), None)
         theme = stage.theme if stage else ""
         old = str(enemy.stats.get("flavor", ""))
+        # Label under the plat:enemies prefix: the regen re-authors enemy
+        # content, so it must resolve to the SAME tier the enemy task is
+        # assigned (and match the plat:enemies provenance stamp below).
         data = llm_json(
             ctx,
-            f"plat:regen:{target}",
+            f"plat:enemies:regen:{ident}",
             lambda fb: ctx.prompts.enemy_flavor(
                 enemy.name, enemy.archetype, theme, old, feedback=fb
             ),
@@ -637,7 +702,7 @@ def regen_field(ctx: Any, target: str) -> dict:
         content_hash = ctx.adapter.write_json_singleton(
             f"enemy/{ident}.json", enemy.model_dump(mode="json")
         )
-        stamp_provenance(ctx, enemy, content_hash)
+        stamp_provenance(ctx, enemy, content_hash, label="plat:enemies")
         logger.info(
             "Field regen %s: %r -> %r", target, old, enemy.stats["flavor"]
         )

@@ -1939,3 +1939,159 @@ def check_placements(
             {"enemy_id": eid, "x": x, "y": y, "variant": variant}
         )
     return accepted, problems, repairs
+
+
+# ---------------------------------------------------------------------------
+# Item placement validation (Arc 2) — code-not-LLM: computable geometry is
+# snapped/dropped as repairs; only unknown ids/malformed records go back to
+# the model as feedback.
+# ---------------------------------------------------------------------------
+
+#: How far the snap search wanders when an item cell is occupied or
+#: uncollectible (columns/rows, nearest-first).
+_ITEM_SNAP_RADIUS = 2
+
+
+def _item_collectible(
+    cell: tuple[int, int],
+    reached: set[tuple[int, int]],
+    reached_body: set[tuple[int, int]],
+    jump_height: int,
+) -> bool:
+    """Fail-closed base-moveset collectibility: the cell IS a reached
+    stand/swim position (walked or swum through), or it hangs within the
+    vertical jump envelope directly above a reached BODY-standable
+    foothold (the anchor passes through it on a jump). Never trusts
+    reward anchors — they were layout-authored without reachability."""
+    x, y = cell
+    if cell in reached:
+        return True
+    return any(
+        (x, y + h) in reached_body for h in range(1, jump_height + 1)
+    )
+
+
+def _box_bumpable(
+    cell: tuple[int, int],
+    reached_body: set[tuple[int, int]],
+    jump_height: int,
+) -> bool:
+    """A box must be openable from BELOW with the base moveset: a reached
+    body-standable foothold in the same column, 2..jump_height+1 rows
+    beneath it (standing directly under a box is a 1-tall pocket the
+    body-stand filter already excludes)."""
+    x, y = cell
+    return any(
+        (x, y + h) in reached_body for h in range(2, jump_height + 2)
+    )
+
+
+def check_item_placements(
+    grid,
+    placements: list[dict],
+    spawn: tuple[int, int],
+    item_defs: dict[str, dict],
+    movement: PlayerMovementSpec,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> tuple[list[dict], list[str], list[str]]:
+    """Validate an item-placement attempt. Returns (accepted, problems,
+    repairs): ``problems`` are retry feedback (unknown ids, malformed
+    records); everything computable — occupied cells, uncollectible
+    spots, rarity overflow — is REPAIRED (snapped to the nearest valid
+    cell or dropped, logged) per the G7 doctrine. The caller stamps BOX
+    tiles onto a grid copy afterward and re-checks beatability."""
+    height, width = grid.shape
+    empty_id = tiles.by_name["empty"].id if "empty" in tiles.by_name else 0
+    stand = standable_cells(grid, tiles)
+    reached = reachable_cells(grid, spawn, movement, tiles)
+    reached_body = reached & _body_stand(grid, stand, tiles)
+    jump_h = int(movement.jump_height)
+
+    def _open(x: int, y: int) -> bool:
+        return (
+            0 <= x < width and 0 <= y < height
+            and int(grid[y, x]) == empty_id
+        )
+
+    def _valid(cell: tuple[int, int], source: str) -> bool:
+        if not _open(*cell):
+            return False
+        if source == "box":
+            return _box_bumpable(cell, reached_body, jump_h)
+        return _item_collectible(cell, reached, reached_body, jump_h)
+
+    def _snap(cell: tuple[int, int], source: str) -> tuple[int, int] | None:
+        candidates = sorted(
+            (
+                (abs(dx) + abs(dy), (cell[0] + dx, cell[1] + dy))
+                for dx in range(-_ITEM_SNAP_RADIUS, _ITEM_SNAP_RADIUS + 1)
+                for dy in range(-_ITEM_SNAP_RADIUS, _ITEM_SNAP_RADIUS + 1)
+                if dx or dy
+            ),
+        )
+        for _, cand in candidates:
+            if _valid(cand, source):
+                return cand
+        return None
+
+    accepted: list[dict] = []
+    problems: list[str] = []
+    repairs: list[str] = []
+    rarity_counts: dict[str, int] = {}
+    taken: set[tuple[int, int]] = set()
+
+    for p in placements:
+        item_id = str(p.get("item_id", ""))
+        definition = item_defs.get(item_id)
+        if definition is None:
+            problems.append(
+                f"unknown item {item_id!r} — place only ids from the pool: "
+                f"{sorted(item_defs)}"
+            )
+            continue
+        try:
+            x, y = int(p["x"]), int(p["y"])
+        except (KeyError, TypeError, ValueError):
+            problems.append(
+                f"{item_id}: x and y must be integer grid coordinates."
+            )
+            continue
+        source = str(p.get("source", "trail") or "trail")
+        if source not in ("trail", "reward", "box"):
+            source = "trail"
+
+        rarity = str(definition.get("rarity", "common"))
+        cap = rules.rarity_caps.get(rarity)
+        if cap is not None and rarity_counts.get(rarity, 0) >= cap:
+            repairs.append(
+                f"{item_id} at ({x},{y}): over the {rarity!r} cap ({cap} "
+                "per level) — dropped."
+            )
+            continue
+
+        cell = (x, y)
+        if cell in taken or not _valid(cell, source):
+            snapped = None if cell in taken else _snap(cell, source)
+            if snapped is None or snapped in taken:
+                what = (
+                    "not openable from below"
+                    if source == "box"
+                    else "not collectible with the base moveset"
+                )
+                repairs.append(
+                    f"{item_id} at ({x},{y}): occupied or {what}; no valid "
+                    "cell nearby — dropped."
+                )
+                continue
+            repairs.append(
+                f"{item_id} at ({x},{y}): snapped to {snapped} "
+                f"({'openable' if source == 'box' else 'collectible'})."
+            )
+            cell = snapped
+        taken.add(cell)
+        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+        accepted.append(
+            {"item_id": item_id, "x": cell[0], "y": cell[1], "source": source}
+        )
+    return accepted, problems, repairs

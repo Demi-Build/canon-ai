@@ -42,6 +42,7 @@ from examples.run_platformer_slice import (  # noqa: E402
     _REFERENCE_DIMS,
     make_fake_responder,
 )
+from tests.treediff import assert_trees_byte_identical, tree_files  # noqa: E402
 
 W, H = 48, 16
 #: Schema-rolled dims per level (level_layout.json lookups).
@@ -532,7 +533,7 @@ class TestValidators:
         palette = {  # the real run's near-identical browns
             "background": "#1a1208", "ground": "#4b3b2b",
             "platform": "#6b4a2a", "wall": "#473b32", "breakable": "#a08050",
-            "danger": "#c43a0a", "water": "#4a3d1a",
+            "box": "#8a6a3a", "danger": "#c43a0a", "water": "#4a3d1a",
         }
         out, adjusted = separate_structural_roles(palette, DEFAULT_TILES)
         assert adjusted, "near-identical structural roles must be spread"
@@ -1370,7 +1371,7 @@ class TestEndToEnd:
         _run_slice(run_a)
         _run_slice(run_b)
 
-        files_a = sorted(p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file())
+        files_a = tree_files(run_a)
         expected = {
             Path("world.json"),
             Path("manifest.json"),
@@ -1383,10 +1384,7 @@ class TestEndToEnd:
         }
         assert expected.issubset(set(files_a))
 
-        for rel in files_a:
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), (
-                f"{rel} differs between identical-seed runs"
-            )
+        assert_trees_byte_identical(run_a, run_b)
 
     def test_hash_recompute_contract(self, tmp_path: Path) -> None:
         """§6.3: stored content hashes must match a recompute from disk."""
@@ -1713,7 +1711,8 @@ class TestEndToEnd:
         # Manifest ships the full game vocabulary for play surfaces.
         manifest = json.loads((run / "manifest.json").read_text())
         assert [t["name"] for t in manifest["tiles"]] == [
-            "empty", "floor", "platform", "wall", "breakable", "spike", "water",
+            "empty", "floor", "platform", "wall", "breakable", "box",
+            "spike", "water",
         ]
         assert [v["name"] for v in manifest["variants"]] == [
             "elite", "champion", "relentless",
@@ -1903,9 +1902,7 @@ class TestEndToEnd:
         run_a, run_b = tmp_path / "a", tmp_path / "b"
         _run_slice(run_a, engine="godot")
         _run_slice(run_b, engine="godot")
-        files = sorted(p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file())
-        for rel in files:
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
+        assert_trees_byte_identical(run_a, run_b)
 
     def test_positive_generation_logging(self, tmp_path: Path, caplog) -> None:
         """Successful generations are logged at INFO (MazeWorld parity) —
@@ -2899,7 +2896,7 @@ class TestStyleGuide:
         good = {
             "background": "#2b2331", "ground": "#6e5a4e",
             "platform": "#b8804a", "wall": "#5b4d5e", "breakable": "#a08050",
-            "danger": "#e0453a", "water": "#3a6ea5",
+            "box": "#b87d2d", "danger": "#e0453a", "water": "#3a6ea5",
         }
         assert check_palette(good, DEFAULT_TILES) == []
 
@@ -2976,7 +2973,7 @@ class TestStyleGuide:
         palette = {
             "background": "#2b1f2e", "ground": "#7a5c3a",
             "platform": "#c8843a", "wall": "#c0a882", "breakable": "#a08050",
-            "danger": "#e84210", "water": "#1a4a6b",  # distance ~32: fails
+            "box": "#b87d2d", "danger": "#e84210", "water": "#1a4a6b",  # distance ~32: fails
         }
         repaired, adjusted = enforce_contrast(palette, DEFAULT_TILES)
         assert set(adjusted) == {"water"}
@@ -3003,7 +3000,7 @@ class TestStyleGuide:
                 return json.dumps({"palette": {
                     "background": "#2b1f2e", "ground": "#7a5c3a",
                     "platform": "#c8843a", "wall": "#c0a882",
-                    "breakable": "#a08050",
+                    "breakable": "#a08050", "box": "#b87d2d",
                     "danger": "#e84210", "water": "#1a4a6b",
                 }})
             return good(request)
@@ -3033,7 +3030,7 @@ class TestStyleGuide:
         assert len(prompts) == 1
         message = prompts[0]
         assert (
-            "### ROLES: background,ground,platform,wall,breakable,danger,water"
+            "### ROLES: background,ground,platform,wall,breakable,box,danger,water"
             in message
         )
         assert "luminance distance >= 40" in message
@@ -3107,10 +3104,7 @@ class TestLavaWorld:
         run_a, run_b = tmp_path / "a", tmp_path / "b"
         self._run(run_a)
         self._run(run_b)
-        for rel in sorted(
-            p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file()
-        ):
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
+        assert_trees_byte_identical(run_a, run_b)
 
 
 class TestCarve:

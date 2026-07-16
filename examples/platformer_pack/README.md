@@ -262,6 +262,36 @@ reshape your bestiary; sizes are real — a 2.0 body needs two supported
 columns and two rows of clearance at placement, collides at full size,
 and renders at full size everywhere.
 
+### Items — `schemas/item.json` (`--num-items`)
+
+The WORLD ITEM POOL (like the enemy pool): each definition rolls a
+mechanical **kind** from the closed set `coin` / `heal` / `shield`
+(absorbs one hit, then breaks) / `double_jump` / `run_boost` (both timed
+— `duration_s` rolls from a band you tune), plus rarity and per-kind
+params; the LLM authors only name + flavor, themed to the world. Slots
+0/1 are **guaranteed** coin + heal so every world has its currency and
+its heal; the rest roll free (`--num-items`, default 5). Definitions
+land as reviewable `item/<id>.json` artifacts (`item:<id>` regen
+targets) a developer can hand-evolve like any canon output.
+
+An LLM **item-placement pass** runs after enemy placement with the
+finished level in view: coins are FREQUENT and guide the route (trails,
+arcs over gaps, side-area markers), power-ups stage around enemy
+clusters, premium items land at the layout's secret `reward()` alcoves,
+and **item boxes** float in open air. The validator is fail-closed —
+every item must be collectible with the BASE moveset (snap/drop
+repairs), and a box that would wall off the path is dropped by a
+reachability re-check. Box cells ride in `items.json` as an overlay
+(collision files never carry them); both play surfaces open a box by
+**head-bump from below or stomp** — it flips to a spent block and its
+item pops out and auto-collects. Pickups: coins count on the HUD, heals
+restore a heart, and power-ups fill ONE held slot (a new pickup
+replaces it, death clears it): the shield absorbs one hit then breaks,
+double-jump grants one mid-air jump, run-boost raises top speed — the
+timed ones tick down on the HUD. Collected items stay collected across
+checkpoint respawns. The reachability validator never assumes a
+power-up: every level stays beatable barehanded.
+
 ### Level shapes — `schemas/level_layout.json`
 
 Difficulty is keyed off level POSITION; grid width/height and the
@@ -307,6 +337,19 @@ you stand on it — keep spans short), and the markers `spawn`/`exit`/
 placeholder for a future item system). Deterministic tools stamp the DSL
 to the collision grid, validate reachability with the run-up-momentum
 jump simulation, and repair computable breaks (bridge/snap) in code.
+
+### Models — `models.json` (`--models`)
+
+Which Claude serves which agent (PRD §9.1 realized as data): `model_tiers`
+maps tier names to model ids (the single place a model bump lands) and
+`agent_tiers` assigns a tier per phase-label prefix — validator-backstopped
+agents (`plat:enemies`, `plat:placement`, `plat:decorator`) ride `cheap`,
+structural ones (`plat:world/stage/style/layout`) ride `mid`, `top` is
+opt-in per node. Applies only to real text backends (`fake` ignores models
+entirely, so $0 runs are untouched); an explicit `--model` without
+`--models` overrides the default table. Each artifact's provenance stamps
+the model that actually authored it, so changing one agent's tier
+invalidates exactly that agent's artifacts on a `regen`.
 
 ### Graphics — `--graphics <spec.json>`
 
@@ -389,9 +432,13 @@ becomes real with its draw + trigger point in both play surfaces.
 ## VLM QA — a vision judge over the review renders
 
 Every level already ships a **block render** (analytic truth) and a
-**skinned render** (what the player sees). With an explicit flag, a
-vision model judges each pair (plus the palette and roster legend) at
-the very end of the pipeline:
+**skinned render** (what the player sees). QA also crops two
+**play-scale views** from the skinned render — the camera's actual
+`view_cells x view_rows` window around the spawn and the exit
+(`review/<stage>/<lid>_play_{spawn,exit}.png`) — so readability is
+judged at the zoom the player plays at, not just zoomed out. With an
+explicit flag, a vision model judges each level's five images (plus the
+palette and roster facts) at the very end of the pipeline:
 
 ```bash
 --vlm-backend none|fake|anthropic    # default none = no QA
@@ -420,8 +467,14 @@ VLM judges only what code can't: does it *read* right.
 
 `--vlm-backend anthropic` is PAID (`ANTHROPIC_API_KEY`, fail-fast);
 `fake` exercises the entire loop deterministically at $0, including one
-canned failing verdict so the warning path stays covered. v1 judges on
-every flagged run (no staleness tracking yet).
+canned failing verdict so the warning path stays covered.
+
+**Re-judging is staleness-aware.** Each report entry records sha256
+hashes of exactly what the judge saw (`judged_inputs`); a flagged
+re-run re-judges only levels whose renders (or the judge model)
+actually changed — unchanged verdicts carry from the on-disk report
+byte-identically, at zero VLM cost. The carry is logged, never written
+into the report, so reports stay deterministic.
 
 ---
 
@@ -451,12 +504,17 @@ persisted — pass the same ones, *especially* `--image-backend fal` if
 your art is real; resuming real art without it regenerates placeholder
 tiles over your paid tilesheet).
 
-**Failure forensics.** If every layout attempt for a level fails
-validation, the level ships a guaranteed-valid flat fallback, the
-manifest carries a warning, and
-`review/<stage>/<id>_layout_attempts.json` records every attempt with
-its content and every rejection reason — a re-roll that succeeds deletes
-the trace.
+**Failure forensics.** Most geometry mistakes never fail a level at all —
+the stamp auto-repairs them (out-of-bounds coordinates clamp, hazards over
+gaps become pits, spilling water becomes a free feature, …) and the
+whole-level repair escalates (bridges, mounts, doorways, climb lanes,
+exit relocation), each fix recorded in the run log. When a section still
+exhausts its attempts, it (then, if needed, its seam neighbours) falls
+back to a guaranteed-valid stretch; a whole-level fallback is the last
+resort. Whenever anything failed or fell back,
+`review/<stage>/<id>_layout_attempts.json` records every section attempt
+with its rejection reasons AND every whole-level stitch round's residual
+problems (`stitch_rounds`) — a fully-clean re-roll deletes the trace.
 
 ---
 
@@ -488,6 +546,39 @@ produces the same bytes as the sequential path (minus `bible.json`).
 This is load-bearing: tests diff whole trees, and any nondeterminism is
 a bug.
 
+Three observability files are the documented exemptions (they carry
+wall-clock timestamps or scheduler-shaped call ordering; nothing in the
+pipeline reads them back): `bible.json` (`generated_at` + node state),
+`.canon/log.jsonl`, and `generation_stats.json`.
+
+## Observability
+
+Every run appends a structured step log to `.canon/log.jsonl` — one
+JSON event per line (`run_start`, `node_start`/`node_done`/
+`node_failed`, `node_skipped` with its reason on resumes, `run_end`
+with the rollup) — and snapshots `generation_stats.json` at manifest
+time: LLM calls, tokens, and cost per phase label (`plat:layout:l5:s2`
+granularity), plus image/audio counters. The stats feed `canon
+estimate`'s calibration; the log is Cradle's (and your) first stop for
+"what did this run actually do".
+
+**Forecast before you pay.** `canon estimate` walks the same DAG a run
+would execute — including the exact resume/skip logic — and prices the
+would-run nodes through `models.json` + `cost_model.json` (every number
+is data you can edit). It never writes: regen targets are marked on a
+copy. With no bible yet it forecasts a full run from scratch
+(`fresh_plan` in cost_model.json); on a tree carrying real
+`generation_stats.json` actuals it calibrates tokens from them instead
+of the defaults:
+
+```bash
+CANON_PLAT_OUT=~/my_real_game uv run python -m canon.cli.main \
+  estimate ~/my_real_game/bible.json l5 enemy:tide_skitter \
+  --pipeline examples.platformer_pack.dag:cli_ctx_factory \
+  --phases examples.platformer_pack.dag:cli_phases_factory \
+  --estimator examples.platformer_pack.estimate:estimate_run
+```
+
 ## Runner flags reference
 
 | Flag | Default | Purpose |
@@ -500,7 +591,7 @@ a bug.
 | `--num-enemies` | 7 | WORLD enemy pool size (ecology) |
 | `--engine json\|godot` | `json` | godot = playable project export |
 | `--orchestrate` | off | DAG scheduling, resume, per-step regen |
-| `--rules / --tiles / --variants / --combat / --graphics` | pack templates | your game's data files |
+| `--rules / --tiles / --variants / --combat / --graphics / --models` | pack templates | your game's data files |
 | `--image-backend none\|fake\|fal\|local` | `none` | tile/sprite/backdrop art |
 | `--image-model <id>` | backend default | diffusion model override |
 | `--music-backend none\|fake\|lyria` | `none` | stage theme |

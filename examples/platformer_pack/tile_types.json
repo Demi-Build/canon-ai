@@ -12,6 +12,13 @@
       "color_role": "breakable",
       "params": { "breakable": true }
     },
+    {
+      "id": 5,
+      "name": "box",
+      "category": "solid",
+      "color_role": "box",
+      "params": { "container": true }
+    },
     { "id": 10, "name": "spike", "category": "hazard", "color_role": "danger" },
     {
       "id": 20,

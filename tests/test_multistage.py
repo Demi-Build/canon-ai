@@ -21,6 +21,7 @@ from examples.platformer_pack.phases import roll_habitats
 from examples.platformer_pack.rules import DEFAULT_RULES
 from examples.platformer_pack.validate import check_placements
 from examples.run_platformer_slice import make_fake_responder
+from tests.treediff import assert_trees_byte_identical
 
 SEED = "emberfall_001"
 STAGES = ("ashen_depths", "bloom_terraces", "frostspire_peaks")
@@ -718,13 +719,7 @@ class TestManifestV2:
     def test_byte_determinism(self, tmp_path: Path, world) -> None:
         _, out = world
         _run_world(tmp_path / "b")
-        files = sorted(
-            p.relative_to(out) for p in out.rglob("*") if p.is_file()
-        )
-        for rel in files:
-            assert (out / rel).read_bytes() == (tmp_path / "b" / rel).read_bytes(), (
-                f"{rel} differs between identical-seed runs"
-            )
+        assert_trees_byte_identical(out, tmp_path / "b")
 
     def test_terrain_uses_the_stage_tileset(self, world) -> None:
         """A stage-2 level's terrain must resolve through its own stage's

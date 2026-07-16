@@ -187,15 +187,17 @@ def _fake_section(
             f"wall({mid + 3},1,{g - 6})",
         ] + cloud
         if has_reward and g - 6 >= 1:
-            # A SECRET ALCOVE (Chunk E): a reward tucked into a hidden niche
-            # near the ceiling between the stalactites — a solid ledge roof
-            # over a walled-back pocket, open on the right so a curious player
-            # can jump in. Off the floor path (never blocks traversal).
+            # A SECRET ALCOVE (Chunk E, made COLLECTIBLE for the items arc):
+            # a ground-level niche between the stalactites — a solid ledge
+            # roof over a walled-back pocket, open on the right, with the
+            # reward one cell above the walking row (inside the items
+            # validator's base-moveset jump envelope; the old ceiling niche
+            # was decoratively unreachable and real items dropped there).
             ax = mid - 1
             lines += [
-                f"ledge({ax},{ax + 1},2)",
-                f"wall({ax},3,4)",
-                f"reward({ax + 1},3)",
+                f"ledge({ax},{ax + 1},{g - 3})",
+                f"wall({ax},{g - 2},{g - 2})",
+                f"reward({ax + 1},{g - 2})",
             ]
     elif archetype == "islands" and width >= 18:
         # A small walk-jumpable gap + a stepping platform, cloud on the left.
@@ -439,6 +441,7 @@ _FAKE_PALETTE = {
     "platform": "#b8804a",
     "wall": "#5b4d5e",
     "breakable": "#cdb36a",  # pale cracked ochre — distinct from ground/platform
+    "box": "#b87d2d",  # bronze item container — reads as openable, not terrain
     "danger": "#e0453a",
     "water": "#3a6ea5",
     "lava": "#e8722c",
@@ -524,6 +527,94 @@ def make_fake_responder():
             return json.dumps(
                 {"name": name, "flavor": f"A {name.lower()} of the ashen depths."}
             )
+        if task == "item":
+            index_match = re.search(r"### INDEX: (\d+)", msg)
+            i = int(index_match.group(1)) if index_match else 0
+            kind_match = re.search(r'"kind": "(\w+)"', msg)
+            kind = kind_match.group(1) if kind_match else "coin"
+            base = {
+                "coin": "Ember Token",
+                "heal": "Kindling Heart",
+                "shield": "Cindershell Ward",
+                "double_jump": "Zephyr Bloom",
+                "run_boost": "Gale Draught",
+            }.get(kind, "Ashen Trinket")
+            # Unique names: only a REPEATED kind gets an index suffix (the
+            # prompt lists taken names; the generator rejects duplicates).
+            used_match = re.search(r"Names already taken[^:]*: (.+)", msg)
+            used = (
+                {u.strip() for u in used_match.group(1).split(",")}
+                if used_match
+                else set()
+            )
+            name = base if base not in used else f"{base} {i}"
+            return json.dumps(
+                {"name": name, "flavor": f"A {name.lower()} of the hollows."}
+            )
+        if task == "item_placement":
+            pool_match = re.search(
+                r"Item pool \(id, kind, rarity, params\): (\[.*?\])\n", msg
+            )
+            pool = json.loads(pool_match.group(1)) if pool_match else []
+            spots = _fake_spots(msg)
+            land = list(spots["land"])
+            anchors_match = re.search(
+                r"put a rare or power-up item AT each\): (\[.*?\])\n", msg
+            )
+            anchors = json.loads(anchors_match.group(1)) if anchors_match else []
+            placements = []
+            coins = [p for p in pool if p["kind"] == "coin"]
+            heals = [p for p in pool if p["kind"] == "heal"]
+            powers = [
+                p for p in pool
+                if p["kind"] in ("shield", "double_jump", "run_boost")
+            ]
+            # Coin trail: ground-level coins on the spread land anchors
+            # (h=0 collectible rule — walked through).
+            for cell in land[:4]:
+                if coins:
+                    placements.append(
+                        {
+                            "item_id": coins[0]["id"],
+                            "x": cell[0], "y": cell[1],
+                            "source": "trail",
+                        }
+                    )
+            # One BOX floating 2 cells above a land anchor (bump-openable),
+            # holding a power-up when the pool rolled one, else a heal.
+            # Registry-gated like every op vocabulary (chunk-E lesson): the
+            # prompt only teaches boxes when the game HAS a box tile.
+            boxed = (powers or heals or coins) if "ITEM BOX" in msg else []
+            boxed_id = ""
+            if land and boxed:
+                bx, by = land[0]
+                boxed_id = boxed[0]["id"]
+                placements.append(
+                    {
+                        "item_id": boxed_id,
+                        "x": bx, "y": by - 2,
+                        "source": "box",
+                    }
+                )
+            # Premium item at the first reward alcove anchor — never the
+            # boxed id (rarity caps are per level; a duplicate rare drops).
+            premium = [
+                p
+                for p in (
+                    [p for p in pool if p["rarity"] == "rare"]
+                    + powers + heals
+                )
+                if p["id"] != boxed_id
+            ]
+            if anchors and premium:
+                placements.append(
+                    {
+                        "item_id": premium[0]["id"],
+                        "x": int(anchors[0][0]), "y": int(anchors[0][1]),
+                        "source": "reward",
+                    }
+                )
+            return json.dumps({"placements": placements})
         if task == "enemy_flavor":
             name_match = re.search(r"### NAME: (.+)", msg)
             name = name_match.group(1) if name_match else "it"
@@ -719,6 +810,12 @@ def main() -> None:
         "biome).",
     )
     parser.add_argument(
+        "--num-items", type=int, default=5,
+        help="Size of the WORLD item pool (coins/heals/power-ups: kind + "
+        "rarity + param bands rolled from schemas/item.json, LLM names "
+        "and flavors; slots 0/1 are guaranteed coin + heal).",
+    )
+    parser.add_argument(
         "--engine", choices=["json", "godot"], default="json",
         help="godot: use GodotOutputAdapter and emit a playable Godot "
         "project into the output dir (open it in Godot 4.3+).",
@@ -798,6 +895,13 @@ def main() -> None:
         "examples/graphics_specs/{snes_pixel,rendered_hd}.json.",
     )
     parser.add_argument(
+        "--models", default=None,
+        help="Path to a models.json — per-agent model assignment "
+        "(PRD §9.1 tiers). Defaults to the pack template; only real "
+        "text backends honor it (fake ignores models entirely). An "
+        "explicit --model without --models wins over the default table.",
+    )
+    parser.add_argument(
         "--orchestrate", action="store_true",
         help="Run through the Phase 2 DAG orchestrator instead of the "
         "sequential pipeline: persists bible.json into the output tree "
@@ -816,13 +920,42 @@ def main() -> None:
 
         adapter = GodotOutputAdapter(output_dir)
 
+    # Observability: one GenerationStats shared by the LLM client (which
+    # records per-phase-label tokens/cost into it) and the manifest phase
+    # (which snapshots it to generation_stats.json), plus the .canon/
+    # log.jsonl step log. Both sit outside the byte-determinism contract.
+    from canon.pipeline.stats import GenerationStats
+    from canon.pipeline.steplog import StepLog
+    from examples.platformer_pack.models import load_models
+
+    stats = GenerationStats(
+        llm_backend=args.backend,
+        image_backend=args.image_backend,
+        music_backend=args.music_backend,
+        sfx_backend=args.sfx_backend,
+    )
+    # Per-agent model table: an explicit --models file always applies; the
+    # pack's default table applies unless the user pinned a global --model
+    # (their explicit choice beats the template's tiers).
+    if args.models:
+        model_table = load_models(args.models)
+    elif args.model:
+        model_table = None
+    else:
+        model_table = load_models()
     ctx = PipelineContext(
         bible=Bible.empty(seed=args.seed),
         config=config,
         rng=random.Random(args.seed),
-        llm=LLMClient(build_backend(args.backend, args.model)),
+        stats=stats,
+        llm=LLMClient(
+            build_backend(args.backend, args.model),
+            stats=stats,
+            model_resolver=model_table.resolve if model_table else None,
+        ),
         prompts=PlatformerPrompts(),
         adapter=adapter,
+        steplog=StepLog(output_dir),
     )
     from examples.platformer_pack.combat import load_combat
     from examples.platformer_pack.rules import load_rules
@@ -862,7 +995,7 @@ def main() -> None:
         report = run_orchestrated(
             ctx, persist_path=bible_path,
             num_levels=args.num_levels, num_enemies=args.num_enemies,
-            num_stages=args.num_stages,
+            num_items=args.num_items, num_stages=args.num_stages,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,
@@ -881,7 +1014,7 @@ def main() -> None:
     else:
         phases = compose_pipeline(
             num_levels=args.num_levels, num_enemies=args.num_enemies,
-            num_stages=args.num_stages,
+            num_items=args.num_items, num_stages=args.num_stages,
             engine=args.engine, rules=rules, tiles=tiles, variants=variants,
             image_producer=image_producer, graphics=graphics,
             music_producer=music_producer, sfx_producer=sfx_producer,

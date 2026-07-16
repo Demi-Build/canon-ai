@@ -604,12 +604,13 @@ class TestEndToEnd:
         warnings = json.loads((out / "manifest.json").read_text())["warnings"]
         assert sum(1 for w in warnings if "no verdict" in w) == 3
 
-    def test_judge_sees_three_images_per_level(self, tmp_path: Path) -> None:
+    def test_judge_sees_five_images_per_level(self, tmp_path: Path) -> None:
         judge = _fake_judge()
         _run_slice(tmp_path / "run", vlm_judge=judge)
         assert len(judge.calls) == 3  # one judgment per level, no retries
         for call in judge.calls:
-            assert len(call["image_sizes"]) == 3  # block + skinned + legend
+            # block + skinned + legend + the two play-scale crops (QA v2)
+            assert len(call["image_sizes"]) == 5
             assert "### TASK: vlm_qa" in call["prompt"]
             assert "### TARGETS: " in call["prompt"]
 

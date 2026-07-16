@@ -41,6 +41,7 @@ from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSp
 from examples.platformer_pack.phases import (
     SCHEMAS_DIR,
     _stamp_metadata,
+    resolved_model,
     stamp_provenance,
     warn,
 )
@@ -58,6 +59,7 @@ from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
     _body_stand,
     auto_bridge_grid,
+    check_item_placements,
     check_placements,
     flyer_spot_exists,
     place_checkpoints_grid,
@@ -77,7 +79,7 @@ logger = logging.getLogger(__name__)
 #: step (level.json) descends from every one of them in the §6.1 edge set.
 LEVEL_STEPS = (
     "collision", "hazards", "triggers", "terrain", "background",
-    "entities", "foreground",
+    "entities", "items", "foreground",
 )
 
 
@@ -1198,6 +1200,217 @@ def place_level_entities(
     )
 
 
+def place_level_items(
+    ctx: Any,
+    level: Level,
+    max_items: int = 24,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+    movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    phase_name: str = "plat:item_placement",
+) -> None:
+    """The whole-map ITEM pass (Arc 2), AFTER enemy placement: the agent
+    sees the finished stitched level + the enemy roster and places the
+    world item pool — coins FREQUENT along the route and marking side
+    areas (doctrine), power-ups staged around enemies, premium items at
+    the layout's reward() alcove anchors, and BOX containers in open air.
+
+    Boxes never rewrite collision.npz (a parent step): accepted box cells
+    ride in items.json and every consumer OVERLAYS the solid box tile
+    onto the grid at load. The beatability re-check here does the same
+    overlay in memory, dropping any box that walls off the exit or a
+    checkpoint (code repair, never an LLM loop)."""
+    import numpy as np
+
+    level_id = level.level_id
+    pool = list(ctx.bible.items.values())
+    if not pool:
+        level.items = []
+        level.step_parents["items"] = [
+            make_artifact_id("level", level.stage_id, level_id, step)
+            for step in ("collision", "hazards", "triggers", "entities")
+        ]
+        return
+    with np.load(ctx.adapter.resolve_path(level.collision)) as data:
+        grid = data["collision"]
+    offer = [
+        {
+            "id": item.item_id,
+            "kind": item.kind,
+            "rarity": item.rarity,
+            "params": item.params,
+        }
+        for item in pool
+    ]
+    item_defs = {
+        item.item_id: {"kind": item.kind, "rarity": item.rarity}
+        for item in pool
+    }
+    reward_anchors = [
+        (t.x, t.y) for t in level.triggers if t.type == "reward"
+    ]
+    enemy_spots = [
+        {"id": p.ref.split(":", 1)[1], "at": list(p.pos)}
+        for p in level.entities
+    ]
+    standable_summary = _cells_summary(sorted(standable_cells(grid, tiles)))
+    brief = _level_brief(ctx, level_id)
+
+    last_attempt = {"content": ""}
+    holders: dict[str, list] = {"accepted": [], "repairs": []}
+
+    def generate(
+        feedback: list[str] | None = None, max_tokens: int | None = None
+    ) -> str:
+        request = ctx.prompts.item_placement(
+            level_id, brief, offer,
+            standable_summary=standable_summary,
+            spawn=level.spawn, exit_=level.exit,
+            grid_width=level.grid_width, grid_height=level.grid_height,
+            enemies=enemy_spots, reward_anchors=reward_anchors,
+            rules=rules, max_items=max_items,
+            has_box="box" in tiles.by_name,
+            previous=last_attempt["content"], feedback=feedback,
+        )
+        if max_tokens is not None:
+            request.max_tokens = max_tokens
+        content = ctx.llm.generate(request, phase=f"{phase_name}:{level_id}")
+        last_attempt["content"] = content
+        return content
+
+    def validate(content: str) -> tuple[bool, list[str]]:
+        obj = extract_json_object(content)
+        if obj is None or not isinstance(obj.get("placements"), list):
+            return False, ['Return {"placements": [...]} as bare JSON.']
+        accepted, problems, repairs = check_item_placements(
+            grid, obj["placements"], level.spawn, item_defs, movement,
+            rules=rules, tiles=tiles,
+        )
+        holders["accepted"], holders["repairs"] = accepted, repairs
+        return not problems, problems
+
+    retry_with_feedback(
+        generate_fn=generate,
+        validate_fn=validate,
+        fallback="",
+        max_retries=getattr(ctx.config, "max_retries", 3),
+        label=f"{phase_name}:{level_id}",
+    )
+    accepted = holders["accepted"][:max_items]
+    for note in holders["repairs"]:
+        logger.info("Item placement %s repair: %s", level_id, note)
+
+    # BOX beatability re-check (code-not-LLM): overlay each accepted box
+    # tile onto a grid COPY, keep it only while the exit and every
+    # checkpoint stay sim-reachable (a box is SOLID — it can seal a
+    # corridor or block a jump arc mid-flight).
+    box_id = tiles.by_name["box"].id if "box" in tiles.by_name else None
+    boxes = [p for p in accepted if p["source"] == "box"]
+    if boxes and box_id is not None and level.spawn and level.exit:
+        overlay = grid.copy()
+        checkpoints = [
+            (t.x, t.y) for t in level.triggers if t.type == "checkpoint"
+        ]
+        for box in list(boxes):
+            overlay[box["y"], box["x"]] = box_id
+            reached = reachable_cells(overlay, level.spawn, movement, tiles)
+            if level.exit not in reached or any(
+                c not in reached for c in checkpoints
+            ):
+                overlay[box["y"], box["x"]] = grid[box["y"], box["x"]]
+                accepted.remove(box)
+                warn(
+                    ctx,
+                    f"items {level_id}: box at ({box['x']},{box['y']}) "
+                    "would wall off the path — dropped (code repair).",
+                )
+    elif boxes and box_id is None:
+        accepted = [p for p in accepted if p["source"] != "box"]
+        warn(
+            ctx,
+            f"items {level_id}: this game's registry has no 'box' tile — "
+            f"{len(boxes)} box placement(s) dropped.",
+        )
+
+    if not accepted:
+        warn(
+            ctx,
+            f"items {level_id}: no valid item placements survived — the "
+            "level ships without items.",
+        )
+
+    level.items = [
+        Placement(
+            ref=make_artifact_id("item", p["item_id"]),
+            pos=(p["x"], p["y"]),
+            overrides={"source": p["source"]},
+        )
+        for p in accepted
+    ]
+    level_dir = f"level/{level.stage_id}/{level_id}"
+    level.items_hash = ctx.adapter.write_json_singleton(
+        f"{level_dir}/items.json",
+        [
+            {
+                "item_id": p["item_id"],
+                "x": p["x"],
+                "y": p["y"],
+                "source": p["source"],
+            }
+            for p in accepted
+        ],
+    )
+    # Rarity caps read each definition's rarity — an item re-roll must
+    # cascade here (whole-pool edges, the enemy-roster precedent).
+    level.step_parents["items"] = [
+        make_artifact_id("level", level.stage_id, level_id, "collision"),
+        make_artifact_id("level", level.stage_id, level_id, "hazards"),
+        make_artifact_id("level", level.stage_id, level_id, "triggers"),
+        make_artifact_id("level", level.stage_id, level_id, "entities"),
+        *sorted(make_artifact_id("item", i.item_id) for i in pool),
+    ]
+    logger.info(
+        "Items %s: %d placed — %s",
+        level_id, len(accepted),
+        ", ".join(
+            f"{p['item_id']}@({p['x']},{p['y']})"
+            + (f"[{p['source']}]" if p["source"] != "trail" else "")
+            for p in accepted
+        )
+        or "none",
+    )
+
+
+class ItemsPlacementPhase:
+    """Sequential twin of the DAG items step: place the world item pool
+    into every level, after enemies."""
+
+    name = "plat:item_placement"
+
+    def __init__(
+        self,
+        max_items_per_level: int = 24,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    ) -> None:
+        self.max_items = max_items_per_level
+        self.rules = rules
+        self.tiles = tiles
+        self.movement = movement
+
+    def run(self, ctx: Any) -> None:
+        for stage in world_stages(ctx):
+            for level_id in stage.level_ids:
+                place_level_items(
+                    ctx, ctx.bible.levels[level_id],
+                    max_items=self.max_items, rules=self.rules,
+                    tiles=self.tiles, movement=self.movement,
+                    phase_name=self.name,
+                )
+        _stamp_metadata(ctx, self.name)
+
+
 DECOR_TYPES = ("stalactite", "crystal", "vine", "moss")
 
 
@@ -1292,7 +1505,18 @@ def write_level_manifest(ctx: Any, level: Level) -> None:
     content_hash = ctx.adapter.write_json_singleton(
         f"{level_dir}/level.json", level.model_dump(mode="json")
     )
-    stamp_provenance(ctx, level, content_hash)
+    # One Level stamp covers three generation tasks — fold all three
+    # (table-resolved) models, at the SAME per-level labels the calls
+    # resolved under (deep per-level tier keys stamp truthfully). On
+    # unwired/fake backends every part is the global model.
+    stamp_provenance(
+        ctx, level, content_hash,
+        label=f"plat:layout:{level.level_id}",
+        model_extra="+".join(
+            resolved_model(ctx, f"{task}:{level.level_id}")
+            for task in ("plat:placement", "plat:decorator")
+        ),
+    )
 
 
 def _level_brief(ctx: Any, level_id: str) -> str:

@@ -82,6 +82,10 @@ class GameRules(BaseModel):
     break_delay_s: float = 0.6
     variant_caps: dict[str, int] = {"elite": 1, "champion": 1, "relentless": 1}
     checkpoint_enemy_reset: bool = True
+    #: Seconds a killed enemy lingers playing its DEATH animation before
+    #: vanishing (both play surfaces; frozen in place, no collision). Old
+    #: manifests without the key keep the vanish-on-kill-frame behavior.
+    death_linger_s: float = 0.5
     spawn_grace: Literal["until_move", "off"] = "until_move"
     rarity_caps: dict[str, int] = {"rare": 1, "uncommon": 2}
     #: Enemy eyesight for aggro detection, by LOCOMOTION archetype — a data

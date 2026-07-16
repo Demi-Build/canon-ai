@@ -35,6 +35,8 @@ including one failing verdict so the warning path is covered.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import logging
 import re
@@ -43,6 +45,7 @@ from typing import Any
 from canon.llm.parsing import extract_json_object
 from canon.pipeline.retry import retry_with_feedback
 from examples.platformer_pack.combat import effective_size
+from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.phases import _stamp_metadata, warn
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
@@ -142,7 +145,12 @@ def _mean_rgb(region: Any) -> tuple[int, int, int]:
             # VISIBLE pixels, so the discarded backdrop under alpha 0 does
             # not drag the region mean off the palette hex. Fully-opaque
             # regions fall through to the fast path (byte-identical).
-            px = list(region.get_flattened_data())
+            # Version tolerance: get_flattened_data (its replacement)
+            # doesn't exist at the declared Pillow>=10.0 floor, while
+            # getdata is deprecated for removal in Pillow 14. Same
+            # (r,g,b,a)-tuple shape from both.
+            getter = getattr(region, "get_flattened_data", region.getdata)
+            px = list(getter())
             opaque = [(r, g, b) for r, g, b, a in px if a > 0]
             n = len(opaque)
             return tuple(sum(c[i] for c in opaque) // n for i in range(3))
@@ -271,6 +279,12 @@ def run_code_checks(
         enemy = ctx.bible.enemy_definitions[enemy_id]
         if enemy.sprite_path:
             checks.extend(_sprite_checks(ctx, f"enemy:{enemy_id}", enemy.sprite_path))
+    for item_id in sorted(getattr(ctx.bible, "items", {})):
+        item = ctx.bible.items[item_id]
+        if item.sprite_path:
+            checks.extend(
+                _sprite_checks(ctx, f"item:{item_id}", item.sprite_path)
+            )
     player = getattr(ctx.bible, "player", None)
     if player is not None and player.sprite_path:
         checks.extend(_sprite_checks(ctx, "player", player.sprite_path))
@@ -293,7 +307,17 @@ def _valid_targets(ctx: Any, stage_id: str, level: Any) -> list[str]:
     placed = sorted(
         {p.ref for p in level.entities if p.ref.startswith("enemy:")}
     )
-    targets = [level.level_id, *placed, "player", f"tileset:{stage_id}"]
+    placed_items = sorted(
+        {
+            p.ref
+            for p in getattr(level, "items", []) or []
+            if p.ref.startswith("item:")
+        }
+    )
+    targets = [
+        level.level_id, *placed, *placed_items, "player",
+        f"tileset:{stage_id}",
+    ]
     if stage_id in getattr(ctx.bible, "backdrops", {}):
         targets.append(f"backdrop:{stage_id}")
     if stage_id in getattr(ctx.bible, "props", {}):
@@ -308,6 +332,7 @@ def qa_prompt(
     palette: dict[str, str],
     targets: list[str],
     variants: VariantSet = DEFAULT_VARIANTS,
+    items: dict[str, Any] | None = None,
 ) -> str:
     """The per-level judgment instructions. Text carries the analytic
     facts (placements, markers, counts) so the judge compares the skinned
@@ -332,6 +357,16 @@ def qa_prompt(
     checkpoints = sorted(
         t.x for t in level.triggers if t.type == "checkpoint"
     )
+    item_facts = []
+    for p in getattr(level, "items", []) or []:
+        item_id = p.ref.split(":", 1)[1]
+        item = (items or {}).get(item_id)
+        source = str(p.overrides.get("source", "trail"))
+        item_facts.append(
+            f"{(item.name if item else item_id)} "
+            f"({getattr(item, 'kind', '?')}) at {list(p.pos)}"
+            + (" in a box" if source == "box" else "")
+        )
     palette_desc = ", ".join(f"{k}: {v}" for k, v in sorted(palette.items()))
 
     return (
@@ -350,12 +385,18 @@ def qa_prompt(
         f"(doorway/flag) and each checkpoint as a small flag — those are "
         f"correct, not extra content.\n"
         f"3. ROSTER LEGEND — enemy names, placeholder colors, sizes, and "
-        f"stats.\n\n"
+        f"stats.\n"
+        f"4. PLAY-SCALE SPAWN VIEW — the skinned render cropped to the "
+        f"camera's actual framing around the spawn: what the player "
+        f"really sees at play zoom.\n"
+        f"5. PLAY-SCALE EXIT VIEW — the same framing around the exit.\n\n"
         f"Level facts (the truth the skinned render must match):\n"
         f"- grid {level.grid_width}x{level.grid_height} cells; spawn "
         f"{list(level.spawn) if level.spawn else '?'}; exit "
         f"{list(level.exit) if level.exit else '?'}\n"
         f"- placements: {'; '.join(placements) or 'none'}\n"
+        f"- items (colored circles; a bronze tile = an item BOX the "
+        f"player opens): {'; '.join(item_facts) or 'none'}\n"
         f"- hazard cells: {len(level.hazards)}; checkpoint columns: "
         f"{checkpoints or 'none'}; decor records: {len(level.foreground)}\n"
         f"- palette (color_role: hex): {palette_desc}\n\n"
@@ -365,7 +406,9 @@ def qa_prompt(
         f"terrain shapes identical, nothing missing, nothing extra.\n"
         f'2. "readability" — are the player spawn, enemies, and hazards '
         f"clearly distinguishable from the tiles and the backdrop at a "
-        f"glance?\n"
+        f"glance? Weigh the PLAY-SCALE views heavily: a level readable "
+        f"zoomed-out can still fail at the zoom the player actually "
+        f"plays at.\n"
         f'3. "style_coherence" — does the art hold together: tiles adhere '
         f"to the palette, sprites match the tileset's art style?\n\n"
         f"Note on water: this game may use water as large deliberate "
@@ -951,6 +994,55 @@ def make_fake_vlm_responder():
     return respond
 
 
+def write_play_scale_crops(
+    ctx: Any, stage_id: str, level: Any, graphics: GraphicsSpec
+) -> dict[str, str]:
+    """Deterministic ``view_cells`` x ``view_rows`` crops of the SKINNED
+    render, centred on the spawn and the exit (clamped to the grid) —
+    the closest headless stand-in for what the player sees at camera
+    zoom (Godot cannot screenshot headless on macOS/MoltenVK). Pure
+    function of the skinned PNG + level dims + the graphics spec, so
+    re-runs rewrite identical bytes. Returns {name: rel} of what was
+    written; empty when the skinned render doesn't exist (the caller's
+    missing-image path stays loud)."""
+    from PIL import Image
+
+    skinned = ctx.adapter.resolve_path(
+        f"review/{stage_id}/{level.level_id}_skinned.png"
+    )
+    if not skinned.exists():
+        return {}
+    grid_w = max(int(level.grid_width), 1)
+    grid_h = max(int(level.grid_height), 1)
+    # Per-level view overrides (intimate/vista presets) are what the
+    # consumers actually frame with — the crop must match THAT zoom.
+    view_cells = int(getattr(level, "view_cells", None) or graphics.view_cells)
+    view_rows = int(getattr(level, "view_rows", None) or graphics.view_rows)
+    anchors = {
+        "play_spawn": tuple(level.spawn) if level.spawn else (2, grid_h - 2),
+        "play_exit": tuple(level.exit) if level.exit else (grid_w - 2, 2),
+    }
+    rels: dict[str, str] = {}
+    with Image.open(skinned) as img:
+        img.load()
+        width, height = img.size
+        px = max(width // grid_w, 1)
+        win_w = min(view_cells, grid_w) * px
+        win_h = min(view_rows, grid_h) * px
+        for name, (ax, ay) in anchors.items():
+            cx = (float(ax) + 0.5) * px
+            cy = (float(ay) + 0.5) * px
+            left = int(min(max(cx - win_w / 2, 0), max(width - win_w, 0)))
+            top = int(min(max(cy - win_h / 2, 0), max(height - win_h, 0)))
+            crop = img.crop((left, top, left + win_w, top + win_h))
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG")
+            rel = f"review/{stage_id}/{level.level_id}_{name}.png"
+            ctx.adapter.write_binary(rel, buffer.getvalue())
+            rels[name] = rel
+    return rels
+
+
 def build_vlm_judge(kind: str | None, model: str | None = None):
     """CLI/env wiring: a vlm-backend name → judge, or ``None`` for no QA.
     Paid backends only from an explicit flag; missing keys die at launch,
@@ -982,14 +1074,19 @@ def build_vlm_judge(kind: str | None, model: str | None = None):
 
 
 class VlmQaPhase:
-    """Judge every level's block-vs-skinned pair; write the QA report;
-    surface failures as durable manifest warnings. NO auto-regen, ever.
+    """Judge every level's render set; write the QA report; surface
+    failures as durable manifest warnings. NO auto-regen, ever.
 
-    v1 cadence: runs only when a judge was built from an explicit flag —
-    an `always` node in the DAG, a plain no-op stamp otherwise. There is
-    deliberately no staleness/caching story yet; each flagged run
-    re-judges (and rewrites the report), each unflagged run leaves the
-    last report — and its warnings — standing.
+    Cadence (v2): runs only when a judge was built from an explicit flag —
+    an `always` node in the DAG, a plain no-op stamp otherwise — but
+    re-judging is STALENESS-AWARE: each level entry records sha256 hashes
+    of exactly what the judge saw (``judged_inputs``), and a re-run whose
+    inputs and judge model are unchanged CARRIES the previous entry
+    byte-identically without a VLM call (the skip is logged, never
+    written into the report — reports stay deterministic). Code checks
+    still recompute every run ($0). An unflagged run leaves the last
+    report — and its warnings — standing. Animation QA keeps the v1
+    always-re-judge cadence (small, per-enemy).
     """
 
     name = "plat:vlm_qa"
@@ -999,10 +1096,31 @@ class VlmQaPhase:
         judge: Any = None,
         tiles: TileRegistry = DEFAULT_TILES,
         variants: VariantSet = DEFAULT_VARIANTS,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     ) -> None:
         self.judge = judge
         self.tiles = tiles
         self.variants = variants
+        self.graphics = graphics
+
+    def _model_id(self) -> str:
+        return str(getattr(self.judge, "model", type(self.judge).__name__))
+
+    def _previous_levels(self, ctx: Any, stage_id: str) -> dict:
+        """The prior on-disk report's level entries, usable for carrying
+        only when the judge model matches (a model change re-judges
+        everything)."""
+        path = ctx.adapter.resolve_path(qa_report_rel(stage_id))
+        if not path.exists():
+            return {}
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, ValueError):
+            return {}
+        if str(report.get("vlm_model")) != self._model_id():
+            return {}
+        levels = report.get("levels")
+        return levels if isinstance(levels, dict) else {}
 
     def run(self, ctx: Any) -> None:
         if self.judge is None:
@@ -1015,17 +1133,22 @@ class VlmQaPhase:
 
         for stage_id, stage in ctx.bible.stages.items():
             checks = run_code_checks(ctx, stage_id, tiles=self.tiles)
+            previous = self._previous_levels(ctx, stage_id)
             levels: dict[str, dict] = {}
+            carried = 0
             for level_id in stage.level_ids:
                 level = ctx.bible.levels.get(level_id)
                 if level is None:
                     continue
-                levels[level_id] = self._judge_level(ctx, stage, level)
+                entry = self._judge_level(
+                    ctx, stage, level, previous=previous.get(level_id)
+                )
+                if entry is previous.get(level_id):
+                    carried += 1
+                levels[level_id] = entry
             report = {
                 "stage_id": stage_id,
-                "vlm_model": str(
-                    getattr(self.judge, "model", type(self.judge).__name__)
-                ),
+                "vlm_model": self._model_id(),
                 "code_checks": checks,
                 "levels": levels,
             }
@@ -1039,10 +1162,11 @@ class VlmQaPhase:
                 if not entry.get("verdicts", {}).get(dim, {}).get("passed", True)
             )
             logger.info(
-                "VlmQaPhase judged %d level(s) for stage %s: %d failing "
-                "verdict(s), %d/%d code check(s) passed.",
-                len(levels), stage_id, failed,
-                sum(1 for c in checks if c["passed"]), len(checks),
+                "VlmQaPhase stage %s: %d level(s) — %d judged, %d carried "
+                "(inputs unchanged): %d failing verdict(s), %d/%d code "
+                "check(s) passed.",
+                stage_id, len(levels), len(levels) - carried, carried,
+                failed, sum(1 for c in checks if c["passed"]), len(checks),
             )
 
         # Animation QA (B5): review every animated enemy ONCE (enemies are
@@ -1065,17 +1189,28 @@ class VlmQaPhase:
             )
         _stamp_metadata(ctx, self.name)
 
-    def _judge_level(self, ctx: Any, stage: Any, level: Any) -> dict:
-        """One level's report entry: the render pair + legend to the
-        judge, retry-validated JSON back; an entry with ``error`` (loud
-        via derive_qa_warnings) when images are missing or the verdict
-        never validates."""
+    def _judge_level(
+        self, ctx: Any, stage: Any, level: Any, previous: dict | None = None
+    ) -> dict:
+        """One level's report entry: the render pair + legend + play-scale
+        crops to the judge, retry-validated JSON back; an entry with
+        ``error`` (loud via derive_qa_warnings) when images are missing or
+        the verdict never validates.
+
+        Staleness: when *previous* (the prior report's entry) hashes to
+        exactly the current inputs, it is returned AS-IS — same bytes in
+        the report, no VLM call. The crops regenerate first regardless
+        (idempotent bytes, $0), so the hash comparison always covers what
+        the judge would see."""
         stage_id = stage.stage_id
         image_rels = {
             "block": f"review/{stage_id}/{level.level_id}.png",
             "skinned": f"review/{stage_id}/{level.level_id}_skinned.png",
             "legend": "review/legend.png",
         }
+        image_rels.update(
+            write_play_scale_crops(ctx, stage_id, level, self.graphics)
+        )
         missing = [
             rel
             for rel in image_rels.values()
@@ -1083,8 +1218,9 @@ class VlmQaPhase:
         ]
         entry: dict[str, Any] = {
             "images": {
-                "block": image_rels["block"],
-                "skinned": image_rels["skinned"],
+                name: rel
+                for name, rel in image_rels.items()
+                if name != "legend"
             }
         }
         if missing:
@@ -1094,6 +1230,20 @@ class VlmQaPhase:
             ctx.adapter.resolve_path(rel).read_bytes()
             for rel in image_rels.values()
         ]
+        entry["judged_inputs"] = {
+            name: "sha256:" + hashlib.sha256(data).hexdigest()
+            for name, data in zip(image_rels, images)
+        }
+        if (
+            previous is not None
+            and "error" not in previous
+            and previous.get("judged_inputs") == entry["judged_inputs"]
+        ):
+            logger.info(
+                "vlm_qa %s: judged inputs unchanged — verdict carried, "
+                "no VLM call.", level.level_id,
+            )
+            return previous
 
         tileset = ctx.bible.tilesets.get(stage_id)
         targets = _valid_targets(ctx, stage_id, level)
@@ -1101,6 +1251,7 @@ class VlmQaPhase:
             level, stage, ctx.bible.enemy_definitions,
             tileset.palette if tileset else {}, targets,
             variants=self.variants,
+            items=getattr(ctx.bible, "items", {}),
         )
 
         def generate(feedback: list[str] | None = None) -> str:

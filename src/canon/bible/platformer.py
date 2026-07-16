@@ -49,6 +49,7 @@ class TileType(IntEnum):
     PLATFORM = 2
     WALL = 3
     BREAKABLE = 4  # solid foothold that crumbles after a fuse (sectioned-levels D)
+    BOX = 5  # solid item container, broken by head-bump/stomp (items arc)
     SPIKE = 10
     WATER = 20
 
@@ -216,9 +217,16 @@ class Level(ArtifactMeta):
     triggers_hash: str = ""
     foreground_hash: str = ""
     entities_hash: str = ""
+    items_hash: str = ""
 
     # Placements — references, never copies (§6.1)
     entities: list[Placement] = Field(default_factory=list)
+    #: Item placements (Arc 2): ``ref item:<id>``, with
+    #: ``overrides["source"]`` = "trail" | "reward" | "box". A "box"
+    #: placement's cell also carries a solid BOX TILE that every consumer
+    #: OVERLAYS onto the collision grid at load — the items layer never
+    #: rewrites collision.npz (a parent step).
+    items: list[Placement] = Field(default_factory=list)
 
     # Per-step parent edges (§6.1 within-level chain), recorded now so the
     # Phase 2 orchestrator has real edges to walk. Keyed by step name
@@ -264,6 +272,33 @@ class BossDefinition(EnemyDefinition):
 
     phases: list[dict] = Field(default_factory=list)
     arena: dict[str, Any] = Field(default_factory=dict)
+
+
+class ItemDefinition(ArtifactMeta):
+    """A globally-addressed item definition (``item:<id>``), reused across
+    levels via placements — coins, heals, and power-ups. The mechanical
+    KIND set is closed in code (consumers implement each kind's effect);
+    everything numeric rides in ``params`` (schema-rolled bands: timed
+    power-up durations, boost multipliers, heal amounts), and the LLM
+    authors only name/flavor. Developers review and evolve the generated
+    JSON like any canon artifact."""
+
+    item_id: str
+    name: str = ""
+    #: Closed mechanical set: "coin" | "heal" | "shield" | "double_jump"
+    #: | "run_boost". Consumers switch on it; new kinds arrive with their
+    #: both-surface effect code.
+    kind: str = "coin"
+    #: Placement-frequency tier ("common"|"uncommon"|"rare") — the item
+    #: pass biases counts by it (coins common and FREQUENT by doctrine).
+    rarity: str = "common"
+    #: Rolled mechanics per kind: duration_s (timed power-ups),
+    #: heal_amount, coin_value, boost_mult. Open dict — hand-tuned games
+    #: can add knobs their consumers read.
+    params: dict[str, Any] = Field(default_factory=dict)
+    stats: dict[str, Any] = Field(default_factory=dict)
+    sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
+    sprite_hash: str = ""
 
 
 class PlayerDefinition(ArtifactMeta):

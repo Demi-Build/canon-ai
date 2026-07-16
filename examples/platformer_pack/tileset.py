@@ -43,6 +43,7 @@ PLACEHOLDER_PALETTE: dict[str, tuple[int, int, int, int]] = {
     "platform": (150, 120, 70, 255),
     "wall": (70, 70, 80, 255),
     "breakable": (205, 160, 75, 255),  # cracked ochre — a floor that crumbles
+    "box": (190, 125, 45, 255),  # bronze item container (bump/stomp to open)
 
     "danger": (200, 40, 40, 255),
     "water": (40, 90, 200, 255),

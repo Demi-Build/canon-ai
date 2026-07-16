@@ -51,21 +51,44 @@ def warn(ctx: Any, message: str) -> None:
     ctx.artifacts.setdefault("slice_warnings", []).append(message)
 
 
+def resolved_model(ctx: Any, label: str) -> str:
+    """The model id that ACTUALLY serves calls under this phase label:
+    the per-agent table's answer when the backend honors per-request
+    models (AnthropicBackend), else the backend's constructed model
+    ("fake" on $0 runs — a table never changes what fake stamps)."""
+    llm = getattr(ctx, "llm", None)
+    backend = getattr(llm, "backend", None)
+    resolver = getattr(llm, "model_resolver", None)
+    if resolver is not None and getattr(
+        backend, "supports_request_model", False
+    ):
+        model = resolver(label)
+        if model:
+            return str(model)
+    return str(getattr(backend, "model", "fake"))
+
+
 def stamp_provenance(
     ctx: Any,
     entity: Any,
     content_hash: str,
     schema_version: str = "1",
     model_extra: str = "",
+    label: str | None = None,
 ) -> None:
     """Fold the adapter's content hash + generation inputs into the entity's
     provenance hash (PRD §6.3). Stamped on the Bible entity only — the
     artifact file holds data, the Bible holds provenance.
 
-    ``model_extra`` folds a second generator into the model input (an
-    asset phase's image backend alongside the LLM) so an image-model bump
-    invalidates like an LLM-model bump does."""
-    model = str(getattr(getattr(ctx.llm, "backend", None), "model", "fake"))
+    ``label`` names the phase-label whose (table-resolved) model authored
+    this entity, so a per-task model change stamps truthfully; unlabeled
+    stamps keep the backend's global model. ``model_extra`` folds further
+    generators into the model input (an asset phase's image backend, a
+    level's other task models) so any generator bump invalidates alike."""
+    if label is not None:
+        model = resolved_model(ctx, label)
+    else:
+        model = str(getattr(getattr(ctx.llm, "backend", None), "model", "fake"))
     if model_extra:
         model = f"{model}+{model_extra}"
     entity.provenance_hash = compute_provenance_hash(
@@ -268,7 +291,7 @@ class WorldPhase:
         content_hash = ctx.adapter.write_json_singleton(
             "world.json", world.model_dump(mode="json")
         )
-        stamp_provenance(ctx, world, content_hash)
+        stamp_provenance(ctx, world, content_hash, label="plat:world")
         ctx.bible.world = world
         ctx.artifacts["stage_ids"] = stage_ids
         ctx.artifacts["stage_briefs"] = briefs
@@ -354,7 +377,10 @@ class StagePhase:
             content_hash = ctx.adapter.write_json_singleton(
                 f"stage/{stage_id}/stage.json", stage.model_dump(mode="json")
             )
-            stamp_provenance(ctx, stage, content_hash)
+            stamp_provenance(
+                ctx, stage, content_hash,
+                label=f"plat:stage:{stage.stage_id}",
+            )
             ctx.bible.stages[stage_id] = stage
             ctx.artifacts["level_briefs"].update(dict(zip(level_ids, briefs)))
             ctx.artifacts["level_views"].update(dict(zip(level_ids, views)))
@@ -602,7 +628,9 @@ class EnemyGeneratorPhase:
             content_hash = ctx.adapter.write_json_singleton(
                 f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
             )
-            stamp_provenance(ctx, enemy, content_hash)
+            stamp_provenance(
+                ctx, enemy, content_hash, label=f"plat:enemies:{i}"
+            )
             ctx.bible.enemy_definitions[enemy_id] = enemy
             logger.info(
                 "Enemy %d/%d: %r (%s%s, size %.1f, %s, %s) — hp=%s dmg=%s "
@@ -642,7 +670,9 @@ class EnemyGeneratorPhase:
                         f"enemy/{enemy.enemy_id}.json",
                         enemy.model_dump(mode="json"),
                     )
-                    stamp_provenance(ctx, enemy, content_hash)
+                    stamp_provenance(
+                        ctx, enemy, content_hash, label="plat:enemies"
+                    )
                     residents.append(enemy)
                     warn(
                         ctx,
@@ -658,9 +688,123 @@ class EnemyGeneratorPhase:
                 f"stage/{stage.stage_id}/stage.json",
                 stage.model_dump(mode="json"),
             )
-            stamp_provenance(ctx, stage, content_hash)
+            stamp_provenance(
+                ctx, stage, content_hash,
+                label=f"plat:stage:{stage.stage_id}",
+            )
             logger.info(
                 "Stage %s (%s) roster: %s",
                 stage.stage_id, stage.biome or "?",
                 ", ".join(e.enemy_id for e in residents),
             )
+
+
+class ItemGeneratorPhase:
+    """The WORLD ITEM POOL (Arc 2): ``count`` ItemDefinitions rolled from
+    ``schemas/item.json`` — the mechanical KIND set (coin/heal/shield/
+    double_jump/run_boost) is closed in code, every number is a schema
+    band, and the LLM authors only name + flavor (enemy-pool pattern).
+
+    Slot GUARANTEES mirror the enemy ecology's: slot 0 is always a COIN
+    and slot 1 a HEAL — the two kinds every world needs, which the
+    weighted rolls alone can miss on a small pool. The guarantee pins the
+    ``kind`` roll's choice list; every dependent field still rolls
+    through the skeleton, so determinism per slot is untouched.
+    """
+
+    name = "plat:items"
+
+    #: Kinds pinned to the first pool slots (world-critical coverage).
+    GUARANTEED_KINDS = ("coin", "heal")
+
+    def __init__(
+        self, count: int = 5, schema_path: str | Path | None = None
+    ) -> None:
+        self.count = count
+        self.schema_path = Path(schema_path or SCHEMAS_DIR / "item.json")
+
+    #: Rolled params that ride on the definition when non-zero.
+    _PARAM_FIELDS = ("duration_s", "heal_amount", "coin_value", "boost_mult")
+
+    def run(self, ctx: Any) -> None:
+        from canon.bible.platformer import ItemDefinition
+
+        spec_raw = json.loads(self.schema_path.read_text())
+        world_title = ctx.bible.world.title if ctx.bible.world else ""
+        seed = str(getattr(ctx.config, "seed", ""))
+        seen_ids: set[str] = set()
+        used_names: list[str] = []
+
+        for i in range(self.count):
+            if i < len(self.GUARANTEED_KINDS):
+                pinned = dict(spec_raw)
+                pinned["fields"] = dict(spec_raw["fields"])
+                pinned["fields"]["kind"] = {
+                    "choices": [[self.GUARANTEED_KINDS[i], 1]]
+                }
+                spec = load_skeleton_spec(pinned)
+            else:
+                spec = load_skeleton_spec(spec_raw)
+            skeleton = roll_skeleton(spec, derive_rng(seed, self.name, i))
+            kind = str(skeleton["kind"])
+            params = {
+                key: skeleton[key]
+                for key in self._PARAM_FIELDS
+                if skeleton.get(key)
+            }
+
+            data = llm_json(
+                ctx,
+                f"{self.name}:{i}",
+                lambda fb, _skel=skeleton, _i=i:
+                    ctx.prompts.item_generation(
+                        _skel, world_title, _i,
+                        used_names=list(used_names), feedback=fb,
+                    ),
+                required_keys=("name",),
+                fallback={"name": f"Item {i}", "flavor": ""},
+                validate_obj=lambda obj: (
+                    [
+                        f"Name {obj.get('name')!r} is already taken; invent "
+                        "a clearly different one."
+                    ]
+                    if str(obj.get("name", "")).strip().lower()
+                    in {n.lower() for n in used_names}
+                    else []
+                ),
+            )
+            used_names.append(str(data["name"]))
+            item_id = slugify(str(data["name"]))
+            base, counter = item_id, 2
+            while item_id in seen_ids:
+                item_id = f"{base}_{counter}"
+                counter += 1
+            seen_ids.add(item_id)
+
+            item = ItemDefinition(
+                artifact_id=make_artifact_id("item", item_id),
+                item_id=item_id,
+                name=str(data["name"]),
+                kind=kind,
+                rarity=str(skeleton.get("rarity", "common")),
+                params=params,
+                stats={
+                    "flavor": str(data.get("flavor", "")),
+                    # Offset past the enemy pool's golden-angle walk so
+                    # item swatches never collide with roster colors.
+                    "placeholder_color": placeholder_color(i + 40),
+                },
+                parents=[make_artifact_id("world")],
+            )
+            content_hash = ctx.adapter.write_json_singleton(
+                f"item/{item_id}.json", item.model_dump(mode="json")
+            )
+            stamp_provenance(ctx, item, content_hash, label=f"plat:items:{i}")
+            ctx.bible.items[item_id] = item
+            logger.info(
+                "Item %d/%d: %r (%s, %s%s): %s",
+                i + 1, self.count, item.name, kind, item.rarity,
+                f", {params}" if params else "",
+                item.stats["flavor"],
+            )
+        _stamp_metadata(ctx, self.name)

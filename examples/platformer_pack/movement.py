@@ -32,6 +32,14 @@ class PlayerMovementSpec(BaseModel):
     air_friction: float = 0.0  # in-air horizontal damping (0 = pure momentum)
     run_up_cells: float = 5.0  # runway to reach run_speed from rest (feel/doc)
 
+    # Coyote time: a jump-forgiveness window (seconds) after running off a
+    # ledge during which the jump input still fires. Play-feel ONLY — the
+    # consumers become MORE forgiving than the reachability sim models,
+    # never less, so validation is untouched. Both surfaces arm the latch
+    # off the same deterministic foot probe (never the on_ground flag,
+    # whose sub-cell flicker diverges between them). 0 disables.
+    coyote_s: float = 0.08
+
     # In-volume modifiers (water/lava/mud) moved to the tile registry in
     # 3b — they are PER-VOLUME data (tile params on tileset slots), read
     # from there by every play surface. This spec stays the single source

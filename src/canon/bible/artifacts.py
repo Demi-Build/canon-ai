@@ -76,6 +76,7 @@ LEVEL_STEPS: tuple[str, ...] = (
     "hazards",
     "entities",
     "triggers",
+    "items",
     "foreground",
 )
 

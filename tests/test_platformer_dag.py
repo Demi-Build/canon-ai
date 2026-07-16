@@ -30,6 +30,7 @@ from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
 from examples.platformer_pack.dag import run_orchestrated  # noqa: E402
 from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from tests.treediff import tree_files  # noqa: E402
 
 CANON = [sys.executable, "-m", "canon.cli.main"]
 SEED = "emberfall_001"
@@ -62,12 +63,11 @@ def _resume(output_dir: Path, responder=None):
     return ctx, edits, report
 
 
-def _tree(root: Path, exclude: tuple[str, ...] = ("bible.json",)) -> list[Path]:
-    return sorted(
-        p.relative_to(root)
-        for p in root.rglob("*")
-        if p.is_file() and p.name not in exclude
-    )
+def _tree(root: Path) -> list[Path]:
+    # Shared exemptions (bible.json + the observability artifacts) live
+    # in tests.treediff — the single place the determinism contract's
+    # exclusion list is defined.
+    return tree_files(root)
 
 
 class TestOrchestratedGeneration:
@@ -161,7 +161,7 @@ class TestPerStepRegen:
             f"{prefix}/{step}"
             for step in (
                 "hazards", "triggers", "terrain", "background",
-                "entities", "foreground", "level",
+                "entities", "items", "foreground", "level",
             )
         }
         # The edited artifact itself is authoritative: skipped, not re-run.
@@ -250,7 +250,8 @@ class TestRegenVerb:
         assert {nid for nid in plan.marked if nid.startswith("level:")} == {
             f"level:ashen_depths/l2/{step}"
             for step in ("collision", "hazards", "triggers", "terrain",
-                         "background", "entities", "foreground", "level")
+                         "background", "entities", "items", "foreground",
+                         "level")
         }
 
     def test_mark_stale_unknown_target_names_levels(
@@ -356,8 +357,11 @@ class TestRegenVerb:
 
         _ctx, _edits, report = _resume(run)
         level_nodes = {n for n in report.done if n.startswith("level:")}
+        # entities → items (power-ups stage around enemies, so a placement
+        # re-roll re-places items) → the level manifest.
         assert level_nodes == {
             "level:ashen_depths/l2/entities",
+            "level:ashen_depths/l2/items",
             "level:ashen_depths/l2/level",
         }
 

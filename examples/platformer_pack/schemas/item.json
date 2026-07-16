@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "entity_type": "item",
+  "fields": {
+    "kind": {
+      "choices": [["coin", 4], ["heal", 3], ["shield", 2], ["double_jump", 2], ["run_boost", 2]]
+    },
+    "rarity": {
+      "lookup": [["coin", "common"], ["heal", "uncommon"], ["shield", "rare"], ["double_jump", "rare"], ["run_boost", "uncommon"]],
+      "depends_on": "kind"
+    },
+    "duration_s": {
+      "lookup": [["coin", 0], ["heal", 0], ["shield", 0], ["double_jump", [20, 40]], ["run_boost", [20, 40]]],
+      "depends_on": "kind",
+      "lookup_ranges": true
+    },
+    "heal_amount": {
+      "lookup": [["coin", 0], ["heal", 1], ["shield", 0], ["double_jump", 0], ["run_boost", 0]],
+      "depends_on": "kind"
+    },
+    "coin_value": {
+      "lookup": [["coin", 1], ["heal", 0], ["shield", 0], ["double_jump", 0], ["run_boost", 0]],
+      "depends_on": "kind"
+    },
+    "boost_mult": {
+      "lookup": [["coin", 0], ["heal", 0], ["shield", 0], ["double_jump", 0], ["run_boost", 1.5]],
+      "depends_on": "kind"
+    }
+  }
+}

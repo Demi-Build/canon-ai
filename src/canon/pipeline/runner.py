@@ -51,6 +51,9 @@ class PipelineContext:
     checkers: list[Any] = field(default_factory=list)
     validators: list[Any] = field(default_factory=list)
     artifacts: dict[str, Any] = field(default_factory=dict)
+    # Optional StepLog (canon.pipeline.steplog) — when attached, both
+    # schedulers append node lifecycle events to .canon/log.jsonl.
+    steplog: Any = None
     id_allocator: IDAllocator = field(
         default_factory=lambda: IDAllocator(
             bases={
@@ -90,14 +93,38 @@ def run_pipeline(
 
     Returns the Bible instance attached to *ctx*.
     """
+    steplog = getattr(ctx, "steplog", None)
+    if steplog is not None:
+        steplog.emit(
+            "run_start",
+            scheduler="sequential",
+            seed=str(getattr(ctx.config, "seed", "")),
+            phases=len(phases),
+        )
     for phase in phases:
         logger.info("=== Phase: %s ===", phase.name)
-        phase.run(ctx)
+        if steplog is not None:
+            steplog.emit("node_start", node=f"phase:{phase.name}")
+        try:
+            phase.run(ctx)
+        except Exception as error:
+            if steplog is not None:
+                steplog.emit(
+                    "node_failed",
+                    node=f"phase:{phase.name}",
+                    error=str(error),
+                )
+                steplog.emit("run_end", scheduler="sequential", ok=False)
+            raise
+        if steplog is not None:
+            steplog.emit("node_done", node=f"phase:{phase.name}")
 
         if persist_after_each is not None and hasattr(ctx.bible, "persist"):
             ctx.bible.persist(str(persist_after_each))
             logger.info("Bible persisted after phase '%s'.", phase.name)
 
+    if steplog is not None:
+        steplog.emit("run_end", scheduler="sequential", ok=True)
     return ctx.bible
 
 

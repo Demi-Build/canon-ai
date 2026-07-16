@@ -30,6 +30,12 @@ class LLMClient:
         phase: Default phase label used for stats recording. Override
             per-call via the ``phase`` keyword argument on ``generate`` /
             ``generate_batch``.
+        model_resolver: Optional callable ``(phase_label) -> model_id |
+            None`` — the per-agent model table (PRD §9.1). Consulted per
+            call, but only when the backend declares
+            ``supports_request_model`` (so a fake backend's runs — and
+            their provenance stamps — are untouched). An explicit
+            ``request.model`` always wins over the resolver.
 
     Example::
 
@@ -48,10 +54,12 @@ class LLMClient:
         backend: LLMBackend,
         stats: GenerationStats | None = None,
         phase: str = "default",
+        model_resolver=None,
     ) -> None:
         self.backend = backend
         self.stats = stats
         self.phase = phase  # default phase label for stats wiring; can be overridden per-call
+        self.model_resolver = model_resolver
 
     def generate(self, request: LLMRequest, *, phase: str | None = None) -> str:
         """Generate a single response.
@@ -73,6 +81,12 @@ class LLMClient:
             Backends that don't surface them (e.g. ``FakeLLMBackend``) report
             zeros via ``getattr`` defaults.
         """
+        if (
+            self.model_resolver is not None
+            and getattr(self.backend, "supports_request_model", False)
+            and getattr(request, "model", None) is None
+        ):
+            request.model = self.model_resolver(phase or self.phase)
         response = self.backend.generate(request)
         if self.stats is not None:
             self.stats.record_call(

@@ -205,6 +205,39 @@ def _ensure_metadata(ctx: Any) -> BibleMetadata:
     return ctx.bible.metadata
 
 
+def initial_skips(
+    node_map: dict[str, Node], status: dict, pinned: set[str]
+) -> dict[str, str]:
+    """The resume skip-set: node id → reason. Shared by orchestrate() and
+    `canon estimate`, so a forecast prices exactly the nodes a run would
+    execute.
+
+    - ``pinned``: deliberately protected content — never scheduled, even
+      ahead of ``always`` (always node ids aren't pinnable, but
+      level-step nodes are node_id == artifact_id).
+    - ``user_edited``: the user's edit is authoritative — NEVER
+      regenerated (§6.3); its output satisfies dependents as-is.
+    - ``done``: recorded DONE, not stale (directly or via ``owns``), and
+      not an ``always`` node.
+    """
+    rerun = {nid for nid, s in status.items() if s is ArtifactStatus.STALE}
+    skips: dict[str, str] = {}
+    for nid, node in node_map.items():
+        node_status = status.get(nid)
+        if nid in pinned:
+            skips[nid] = "pinned"
+        elif node_status == ArtifactStatus.USER_EDITED:
+            skips[nid] = "user_edited"
+        elif (
+            node_status == ArtifactStatus.DONE
+            and nid not in rerun
+            and not node.always
+            and not any(aid in rerun for aid in node.owns)
+        ):
+            skips[nid] = "done"
+    return skips
+
+
 def orchestrate(
     items: list[Any],
     ctx: Any,
@@ -229,40 +262,44 @@ def orchestrate(
     report = OrchestratorReport()
     status = metadata.node_status
     pinned = pinned_ids(ctx.bible)
-    rerun = {
-        nid for nid, s in status.items() if s is ArtifactStatus.STALE
-    }
+    steplog = getattr(ctx, "steplog", None)
+
+    def _log(event: str, **fields: Any) -> None:
+        if steplog is not None:
+            steplog.emit(event, **fields)
+
+    _log(
+        "run_start",
+        scheduler="orchestrated",
+        seed=str(getattr(ctx.config, "seed", "")),
+        nodes=len(nodes),
+    )
+
     completed: set[str] = set()
-    for nid, node in node_map.items():
-        node_status = status.get(nid)
-        if nid in pinned:
-            # Pinned content is deliberately protected — never scheduled,
-            # even ahead of `always` (always node ids aren't pinnable, but
-            # level-step nodes are node_id == artifact_id).
-            completed.add(nid)
-            report.skipped.append(nid)
-        elif node_status == ArtifactStatus.USER_EDITED:
-            # The user's edit is authoritative — NEVER regenerate it
-            # (§6.3); its output satisfies dependents as-is.
-            completed.add(nid)
-            report.skipped.append(nid)
-        elif (
-            node_status == ArtifactStatus.DONE
-            and nid not in rerun
-            and not node.always
-            and not any(aid in rerun for aid in node.owns)
-        ):
-            completed.add(nid)
-            report.skipped.append(nid)
+    for nid, reason in initial_skips(node_map, status, pinned).items():
+        completed.add(nid)
+        report.skipped.append(nid)
+        _log("node_skipped", node=nid, reason=reason)
+
 
     def _persist() -> None:
         if persist_path is not None and hasattr(ctx.bible, "persist"):
             ctx.bible.persist(str(persist_path))
 
+    _COMMIT_EVENTS = {
+        ArtifactStatus.RUNNING: "node_start",
+        ArtifactStatus.DONE: "node_done",
+        ArtifactStatus.ESCALATED: "node_failed",
+        ArtifactStatus.AWAITING_REVIEW: "node_gated",
+    }
+
     def _commit(nid: str, new_status: ArtifactStatus) -> None:
         # Scheduler thread only — the single writer of status + Bible.
         status[nid] = new_status
         _persist()
+        event = _COMMIT_EVENTS.get(new_status)
+        if event is not None:
+            _log(event, node=nid, status=new_status.value)
 
     dead: set[str] = set()  # escalated nodes and their descendants
     pending = [n.node_id for n in nodes if n.node_id not in completed]
@@ -284,6 +321,14 @@ def orchestrate(
                     logger.warning(
                         "Gate %r awaiting review — run stopped cleanly; "
                         "approve and `canon resume`.", nid,
+                    )
+                    _log(
+                        "run_end",
+                        scheduler="orchestrated",
+                        ok=False,
+                        paused_at=nid,
+                        done=len(report.done),
+                        skipped=len(report.skipped),
                     )
                     return report
                 pending.remove(nid)
@@ -326,6 +371,15 @@ def orchestrate(
                 changed = True
     report.blocked = sorted(set(pending))
     _persist()
+    _log(
+        "run_end",
+        scheduler="orchestrated",
+        ok=report.ok,
+        done=len(report.done),
+        skipped=len(report.skipped),
+        escalated=sorted(report.escalated),
+        blocked=report.blocked,
+    )
     return report
 
 
@@ -396,6 +450,7 @@ def _iter_hashed_files(bible: Any):
             ("hazards", level.hazards_hash),
             ("triggers", level.triggers_hash),
             ("entities", level.entities_hash),
+            ("items", getattr(level, "items_hash", "")),
             ("foreground", level.foreground_hash),
         )
         for step, stored in sparse:
@@ -404,6 +459,12 @@ def _iter_hashed_files(bible: Any):
                     f"{prefix}/{step}", f"{base}/{step}.json", stored,
                     level, f"{step}_hash",
                 )
+    for item in getattr(bible, "items", {}).values():
+        if item.sprite_path and item.sprite_hash:
+            yield (
+                item.artifact_id or f"item:{item.item_id}",
+                item.sprite_path, item.sprite_hash, item, "sprite_hash",
+            )
     for tileset in getattr(bible, "tilesets", {}).values():
         if tileset.tilesheet_path and tileset.tilesheet_hash:
             yield (
@@ -469,6 +530,7 @@ def _dependency_edges(bible: Any) -> dict[str, set[str]]:
         *getattr(bible, "stages", {}).values(),
         *getattr(bible, "enemy_definitions", {}).values(),
         *getattr(bible, "boss_definitions", {}).values(),
+        *getattr(bible, "items", {}).values(),
         *getattr(bible, "tilesets", {}).values(),
         *getattr(bible, "backdrops", {}).values(),
         *getattr(bible, "audio", {}).values(),

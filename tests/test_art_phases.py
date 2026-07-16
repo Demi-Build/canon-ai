@@ -225,8 +225,11 @@ class TestSpriteArt:
             for w in ctx.artifacts.get("slice_warnings", [])
             if w.startswith("sprite art:")
         ]
-        # + player + the 2 gameplay props (checkpoint flag, exit goal)
-        assert len(warnings) == len(ctx.bible.enemy_definitions) + 3
+        # + the item pool + player + the 2 gameplay props (checkpoint
+        # flag, exit goal)
+        assert len(warnings) == (
+            len(ctx.bible.enemy_definitions) + len(ctx.bible.items) + 3
+        )
         for enemy in ctx.bible.enemy_definitions.values():
             assert enemy.sprite_path == ""
         # No prop generated → no artifact, and the manifest block is
@@ -313,7 +316,10 @@ class TestColorlessSpriteTint:
             for w in ctx.artifacts.get("slice_warnings", [])
             if "came back colorless; tinted" in w
         ]
-        assert len(tinted) == len(ctx.bible.enemy_definitions)
+        # Enemies AND the item pool ride the same tint fallback.
+        assert len(tinted) == (
+            len(ctx.bible.enemy_definitions) + len(ctx.bible.items)
+        )
         # The saved sprite actually carries the assigned hue now.
         enemy_id, enemy = next(iter(ctx.bible.enemy_definitions.items()))
         sprite = Image.open(tmp_path / "out" / enemy.sprite_path).convert("RGBA")

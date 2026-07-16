@@ -91,6 +91,26 @@ var spawn := Vector2.ZERO
 var exit_cell := Vector2.ZERO
 var respawn_point := Vector2.ZERO
 var enemy_defs := {}
+# Items layer (Arc 2): world pool definitions + this level's placements.
+# `coins` survives respawn (collected stays collected) and resets on a
+# fresh level load. box_tile = the container tile id every consumer
+# OVERLAYS onto the grid at load (collision files never carry boxes).
+var item_defs := {}
+var level_items: Array = []
+var coins := 0
+var box_tile := -1
+# Held POWER-UP: one slot (empty Dictionary = none), a new pickup
+# replaces it, death clears it. Timed kinds count DOWN in held_t (fuse
+# arithmetic shape — parity); the shield has no timer. air_jump_ok
+# re-arms on the deterministic foot probe. Mirrors platformer_play.py.
+var held := {}
+var held_t := 0.0
+var air_jump_ok := false
+# Broken item boxes stay SOLID but flip SPENT (persist across respawn,
+# like crumbled floors — reset only on a level load); pops are the brief
+# cosmetic rise of a box's item as it auto-collects. Mirrors pygame.
+var spent_boxes := {}
+var pops: Array = []
 var enemies: Array = []
 var checkpoints: Array = []
 
@@ -123,6 +143,10 @@ var player_pos := Vector2.ZERO
 var player_vy := 0.0
 var player_vx := 0.0  # horizontal velocity (run-up momentum / slide)
 var on_ground := false
+# Coyote latch: seconds of jump-forgiveness LEFT after leaving a ledge.
+# Armed each tick from the deterministic foot probe, consumed by any jump.
+# Mirrors platformer_play.py byte-for-byte.
+var coyote_t := 0.0
 # Player animation (art track): idle/walk/JUMP, loaded at spawn. Empty → the
 # static base sprite plays (loud fallback).
 var player_anim: Dictionary = {}
@@ -192,6 +216,7 @@ func _ready() -> void:
 	add_child(camera)
 	camera.make_current()
 	_load_enemy_defs()
+	_load_item_defs()
 	map_nodes = manifest.get("world_map", {}).get("nodes", [])
 	# Progress is per-WORLD user state (never part of the generated tree):
 	# keyed on the manifest's content-derived world_id so a freshly generated
@@ -510,6 +535,8 @@ func _load_tileset() -> void:
 				blocking[tile_type] = true
 				if bool(slot.get("params", {}).get("breakable", false)):
 					breakable_types[tile_type] = true
+				if bool(slot.get("params", {}).get("container", false)):
+					box_tile = tile_type  # item BOX (items-layer overlay)
 			"one_way":
 				one_way[tile_type] = true
 			"hazard":
@@ -522,6 +549,11 @@ func _load_tileset() -> void:
 func _load_enemy_defs() -> void:
 	for enemy_id in manifest["enemies"]:
 		enemy_defs[enemy_id] = _load_json("res://enemy/%s.json" % enemy_id)
+
+
+func _load_item_defs() -> void:
+	for item_id in manifest.get("items", []):
+		item_defs[item_id] = _load_json("res://item/%s.json" % item_id)
 
 
 func _load_level(index: int) -> void:
@@ -567,6 +599,33 @@ func _load_level(index: int) -> void:
 	camera.limit_bottom = int(grid_h * CELL)
 	camera.position = Vector2(view_w / 2.0, grid_h * CELL / 2.0)
 
+	# Items layer BEFORE tile building: box placements overlay their solid
+	# tile onto the grid, so _build_tiles gives them real tile nodes and
+	# collision Just Works (platformer_play.py overlays identically).
+	# Fresh level load = fresh item state; respawn never touches it.
+	level_items.clear()
+	coins = 0
+	spent_boxes.clear()
+	pops.clear()
+	if FileAccess.file_exists(base + "/items.json"):
+		for rec in (_load_json(base + "/items.json") as Array):
+			var d: Dictionary = item_defs.get(str(rec["item_id"]), {})
+			var stats: Dictionary = d.get("stats", {})
+			var it := {
+				"x": int(rec["x"]),
+				"y": int(rec["y"]),
+				"source": str(rec.get("source", "trail")),
+				"kind": str(d.get("kind", "coin")),
+				"params": d.get("params", {}),
+				"color": str(stats.get("placeholder_color", "#ffd700")),
+				"sprite_path": str(d.get("sprite_path", "")),
+				"collected": false,
+				"node": null,
+			}
+			level_items.append(it)
+			if it["source"] == "box" and box_tile >= 0:
+				grid[it["y"]][it["x"]] = box_tile
+
 	if world_root != null:
 		world_root.queue_free()
 	world_root = Node2D.new()
@@ -575,6 +634,7 @@ func _load_level(index: int) -> void:
 	_build_backdrop()
 	_build_tiles()
 	_build_markers(level.get("triggers", []))
+	_build_items()
 	_spawn_enemies(_load_json(base + "/entities.json"))
 	_spawn_player()
 	_build_decor(level.get("foreground", []))
@@ -765,6 +825,87 @@ func _prop_sprite(sprite_rel: String, foot: Vector2, side: float) -> Sprite2D:
 	return sprite
 
 
+func _collect_item(it: Dictionary) -> void:
+	# Apply one item's effect (touch pickup AND box pops share it).
+	it["collected"] = true
+	if it["node"] != null:
+		it["node"].visible = false
+	if str(it["kind"]) == "coin":
+		coins += int((it["params"] as Dictionary).get("coin_value", 1))
+	elif str(it["kind"]) == "heal":
+		hearts = mini(
+			max_hearts,
+			hearts + int((it["params"] as Dictionary).get("heal_amount", 1)),
+		)
+	else:
+		# Power-up: ONE held slot, a new pickup replaces the old; timed
+		# kinds carry duration_s, the shield has none.
+		held = {
+			"kind": str(it["kind"]),
+			"params": it["params"],
+			"color": str(it["color"]),
+		}
+		held_t = float((it["params"] as Dictionary).get("duration_s", 0))
+	_refresh_hearts()
+	_play_sfx("checkpoint")  # closed SFX set — reuse (v1)
+
+
+func _break_box(bx: int, by: int) -> void:
+	# Bump/stomp opens an item box: the tile stays SOLID but flips SPENT
+	# (a dark inset overlay), and its item pops out and auto-collects.
+	spent_boxes[Vector2i(bx, by)] = true
+	var shade := ColorRect.new()
+	shade.color = Color8(48, 36, 24)
+	shade.position = Vector2(bx * CELL + 4, by * CELL + 4)
+	shade.size = Vector2(CELL - 8, CELL - 8)
+	world_root.add_child(shade)
+	for it in level_items:
+		if (
+			str(it["source"]) == "box" and not bool(it["collected"])
+			and int(it["x"]) == bx and int(it["y"]) == by
+		):
+			var pop := ColorRect.new()
+			pop.color = Color(str(it["color"]))
+			pop.size = Vector2(CELL * 0.4, CELL * 0.4)
+			pop.position = Vector2(
+				bx * CELL + CELL * 0.3, by * CELL + CELL * 0.3
+			)
+			world_root.add_child(pop)
+			pops.append({"node": pop, "t": 0.35})
+			_collect_item(it)
+
+
+func _build_items() -> void:
+	# Uncollected trail/reward items: the art-track sprite when one
+	# exists, a small colored square otherwise (loud fallback; boxed
+	# items hide inside their box tile until it breaks).
+	for it in level_items:
+		if str(it["source"]) == "box":
+			continue
+		var node: CanvasItem = null
+		if str(it["sprite_path"]) != "":
+			node = _prop_sprite(
+				str(it["sprite_path"]),
+				Vector2(
+					(float(it["x"]) + 0.5) * CELL,
+					(float(it["y"]) + 1.0) * CELL,
+				),
+				CELL * 0.7,
+			)
+			if node != null:
+				world_root.add_child(node)
+		if node == null:
+			var r := ColorRect.new()
+			r.color = Color(str(it["color"]))
+			r.size = Vector2(CELL * 0.4, CELL * 0.4)
+			r.position = Vector2(
+				it["x"] * CELL + CELL * 0.3, it["y"] * CELL + CELL * 0.3
+			)
+			world_root.add_child(r)
+			node = r
+		it["node"] = node
+
+
 func _build_checkpoint_flag(sprite_rel: String, foot: Vector2) -> CanvasItem:
 	# foot = bottom-center of the trigger cell (flag plants on the
 	# ground). Returns the CLAIMED visual, hidden until activation.
@@ -879,6 +1020,7 @@ func _spawn_enemies(placements: Array) -> void:
 			)),
 			"alive": true,
 			"hurt_t": 0.0,
+			"dying_t": 0.0,  # death-linger countdown (frozen, no collision)
 			# Aggro lock: set true when an aggressive enemy first spots the
 			# player, cleared when it loses eyesight range or hits its
 			# tether. Ephemeral runtime state, reset on checkpoint respawn.
@@ -1107,6 +1249,10 @@ func _respawn() -> void:
 	hearts = max_hearts
 	iframes = 0.0
 	spawn_shield = 0.0
+	coyote_t = 0.0
+	held = {}
+	held_t = 0.0
+	air_jump_ok = false  # power-up dies with you
 	moved = false  # spawn grace re-engages until the first input
 	if bool(rules.get("checkpoint_enemy_reset", true)):
 		# Killed enemies come back on a checkpoint respawn — dying never
@@ -1123,6 +1269,7 @@ func _respawn() -> void:
 			enemy["hp"] = enemy["max_hp"]
 			enemy["alive"] = true
 			enemy["hurt_t"] = 0.0
+			enemy["dying_t"] = 0.0
 			enemy["node"].visible = true
 			if enemy["frame"] != null:
 				enemy["frame"].visible = true
@@ -1142,8 +1289,16 @@ func _note_move() -> void:
 
 func _hurt(cost: int) -> void:
 	# One heart pool for contact and hazard hits — spawn grace, the
-	# spawn shield, and i-frames gate them (volume drain is below).
+	# spawn shield, and i-frames gate them (volume drain is below). A
+	# held SHIELD absorbs one hit of ANY size and breaks (still granting
+	# the i-frames window — no instant re-hit). Mirrors platformer_play.
 	if iframes > 0.0 or spawn_shield > 0.0 or (_spawn_grace() and not moved):
+		return
+	if not held.is_empty() and str(held.get("kind", "")) == "shield":
+		held = {}
+		iframes = iframes_s
+		_refresh_hearts()
+		_play_sfx("checkpoint")  # the ward shatters, no heart lost
 		return
 	hearts -= maxi(1, cost)
 	iframes = iframes_s
@@ -1155,12 +1310,18 @@ func _hurt(cost: int) -> void:
 func _drain(amount: float) -> void:
 	# Continuous volume damage: accumulate fractions, convert each whole
 	# point into one heart — ignores hurt i-frames (lava keeps hurting)
-	# but respects spawn grace AND the spawn shield.
+	# but respects spawn grace AND the spawn shield. A held SHIELD soaks
+	# one whole heart of drain, then breaks.
 	if spawn_shield > 0.0 or (_spawn_grace() and not moved):
 		return
 	damage_soaked += amount
 	while damage_soaked >= 1.0:
 		damage_soaked -= 1.0
+		if not held.is_empty() and str(held.get("kind", "")) == "shield":
+			held = {}
+			_refresh_hearts()
+			_play_sfx("checkpoint")  # the ward boils away, heart kept
+			continue
 		hearts -= 1
 		_refresh_hearts()
 		if hearts <= 0:
@@ -1173,7 +1334,9 @@ func _spawn_grace() -> bool:
 
 
 func _refresh_hearts() -> void:
-	# Screen-space hearts HUD — filled for current, hollow for lost.
+	# Screen-space HUD — hearts (filled current / hollow lost) + the coin
+	# counter beside them (rebuilt together; children of hearts_root so
+	# both map/level visibility toggles cover them).
 	if hearts_root == null:
 		return
 	for child in hearts_root.get_children():
@@ -1190,6 +1353,31 @@ func _refresh_hearts() -> void:
 			hollow.modulate = Color8(110, 48, 56)
 			hollow.position = Vector2(i * 24, 0)
 			hearts_root.add_child(hollow)
+	var coin_x := max_hearts * 24 + 12
+	var coin := ColorRect.new()
+	coin.color = Color8(255, 208, 64)
+	coin.position = Vector2(coin_x, 0)
+	coin.size = Vector2(18, 18)
+	hearts_root.add_child(coin)
+	var label := Label.new()
+	label.text = "x %d" % coins
+	label.position = Vector2(coin_x + 24, -2)
+	label.add_theme_color_override("font_color", Color8(255, 224, 128))
+	hearts_root.add_child(label)
+	if not held.is_empty():
+		var slot := ColorRect.new()
+		slot.color = Color(str(held.get("color", "#ffd700")))
+		slot.position = Vector2(coin_x + 80, 0)
+		slot.size = Vector2(18, 18)
+		hearts_root.add_child(slot)
+		var held_label := Label.new()
+		held_label.text = (
+			"ward" if str(held.get("kind", "")) == "shield"
+			else "%.0fs" % held_t
+		)
+		held_label.position = Vector2(coin_x + 104, -2)
+		held_label.add_theme_color_override("font_color", Color8(220, 220, 230))
+		hearts_root.add_child(held_label)
 
 
 func _tile(x: float, y: float) -> int:
@@ -1416,45 +1604,51 @@ func _process(delta: float) -> void:
 	var vol_factor := 1.0
 	if volume != null:
 		vol_factor = float(volume.get("speed_factor", 0.55))
-	# Accelerate vx toward the held direction's target (walk, or run_speed with
-	# RUN held); idle bleeds it off (the slide). Ground control > air control,
-	# so speed is built on the GROUND and carried through the jump — vx is
-	# never reset on jump. ground_accel 0 (old manifests) = legacy instant feel.
-	if float(movement.get("ground_accel", 0.0)) > 0.0:
-		# "grounded for movement" is a DETERMINISTIC grid probe (support under
-		# the feet, not rising) — NOT the on_ground flag, whose sub-cell
-		# landing flicker differs by a float epsilon from the pygame surface
-		# and would desync run-up acceleration.
-		var foot: int = int(player_pos.y + 1.01)
-		var tl := _tile(player_pos.x + BODY_L, foot)
-		var tr := _tile(player_pos.x + BODY_R, foot)
-		var gmove: bool = player_vy >= -0.01 and (
-			blocking.has(tl) or one_way.has(tl) or blocking.has(tr) or one_way.has(tr)
-		)
-		if dx != 0.0:
-			var target: float = (run_speed if run_held else float(movement.get("walk_speed", run_speed))) * vol_factor
-			var desired := dx * target
-			var step: float = (float(movement.get("ground_accel", 0.0)) if gmove else float(movement.get("air_accel", 0.0))) * delta
-			player_vx = minf(player_vx + step, desired) if player_vx < desired else maxf(player_vx - step, desired)
+	# Coyote latch (BEFORE the horizontal step, off last tick's state —
+	# platformer_play.py latches at the same point in its tick order):
+	# re-arm while the deterministic foot probe finds support (same idiom
+	# as gmove / the fuse, never the on_ground flag), else count down.
+	var coyote_s := float(movement.get("coyote_s", 0.0))
+	var foot_c := int(player_pos.y + 1.01)
+	var ctl := _tile(player_pos.x + BODY_L, foot_c)
+	var ctr := _tile(player_pos.x + BODY_R, foot_c)
+	var grounded_probe: bool = player_vy >= -0.01 and (
+		blocking.has(ctl) or one_way.has(ctl)
+		or blocking.has(ctr) or one_way.has(ctr)
+	)
+	if coyote_s > 0.0:
+		if grounded_probe:
+			coyote_t = coyote_s
 		else:
-			var fric: float = (float(movement.get("ground_friction", 0.0)) if gmove else float(movement.get("air_friction", 0.0))) * delta
-			player_vx = maxf(0.0, player_vx - fric) if player_vx > 0.0 else minf(0.0, player_vx + fric)
-	else:
-		player_vx = dx * run_speed * vol_factor  # legacy instant-speed feel
-	var new_x: float = player_pos.x + player_vx * delta
-	if _blocked_at(new_x, player_pos.y):
-		player_vx = 0.0  # ran into a wall — kill horizontal momentum
-	else:
-		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
+			coyote_t = maxf(0.0, coyote_t - delta)
+	if grounded_probe:
+		air_jump_ok = true  # double-jump re-arms on the same probe
+	# Timed power-ups count DOWN (fuse arithmetic shape); the shield has
+	# no timer (duration_s 0 = held until consumed).
+	if not held.is_empty() and held_t > 0.0:
+		held_t = maxf(0.0, held_t - delta)
+		if held_t <= 0.0:
+			held = {}
+			_refresh_hearts()
 
+	# Jump BEFORE the horizontal step — platformer_play.py's contract ("vy
+	# set before the horizontal step"): on a jump tick the momentum probe
+	# below must already see the rising vy (air control), or the two
+	# surfaces apply different accelerations for one frame per jump.
 	var gravity := float(movement["gravity"])
 	var jump_pressed := (
 		Input.is_key_pressed(KEY_SPACE)
 		or Input.is_key_pressed(KEY_UP)
 		or Input.is_key_pressed(KEY_W)
 	)
-	if _hold_mode != "" and _hold_jump_every > 0 and on_ground and _play_frame % _hold_jump_every == 0:
-		jump_pressed = true  # scripted verification jump
+	# Scripted verification jump: ZERO-BASED tick like pygame's frame_i
+	# (_play_frame was ++'d above), so both surfaces fire on the same frames.
+	var can_air_jump: bool = (
+		not held.is_empty() and str(held.get("kind", "")) == "double_jump"
+		and air_jump_ok
+	)
+	if _hold_mode != "" and _hold_jump_every > 0 and (on_ground or coyote_t > 0.0 or can_air_jump) and (_play_frame - 1) % _hold_jump_every == 0:
+		jump_pressed = true
 	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
 	if jump_pressed:
 		_note_move()  # a jump ends the grace, starts the shield
@@ -1479,11 +1673,53 @@ func _process(delta: float) -> void:
 			player_pos.y += 0.06  # drop through a one-way platform
 			player_vy = 0.5
 			on_ground = false
-		elif on_ground:
+			coyote_t = 0.0  # dropping is leaving, not a ledge slip
+		elif on_ground or coyote_t > 0.0:
 			# jump_height + headroom margin: discrete integration undershoots
 			# the analytic apex, which made exact-height platforms unlandable.
 			player_vy = -sqrt(2.0 * gravity * (float(movement["jump_height"]) + 0.4))
+			coyote_t = 0.0  # consumed — one forgiveness per slip
 			_play_sfx("jump")
+		elif can_air_jump:
+			# One mid-air jump while the power-up is held; re-arms on the
+			# grounded probe. The reachability sim never assumes it.
+			player_vy = -sqrt(2.0 * gravity * (float(movement["jump_height"]) + 0.4))
+			air_jump_ok = false
+			_play_sfx("jump")
+
+	# Accelerate vx toward the held direction's target (walk, or run_speed with
+	# RUN held); idle bleeds it off (the slide). Ground control > air control,
+	# so speed is built on the GROUND and carried through the jump — vx is
+	# never reset on jump. ground_accel 0 (old manifests) = legacy instant feel.
+	if float(movement.get("ground_accel", 0.0)) > 0.0:
+		# "grounded for movement" is a DETERMINISTIC grid probe (support under
+		# the feet, not rising) — NOT the on_ground flag, whose sub-cell
+		# landing flicker differs by a float epsilon from the pygame surface
+		# and would desync run-up acceleration.
+		var foot: int = int(player_pos.y + 1.01)
+		var tl := _tile(player_pos.x + BODY_L, foot)
+		var tr := _tile(player_pos.x + BODY_R, foot)
+		var gmove: bool = player_vy >= -0.01 and (
+			blocking.has(tl) or one_way.has(tl) or blocking.has(tr) or one_way.has(tr)
+		)
+		if dx != 0.0:
+			var target: float = (run_speed if run_held else float(movement.get("walk_speed", run_speed))) * vol_factor
+			if not held.is_empty() and str(held.get("kind", "")) == "run_boost":
+				target *= float((held.get("params", {}) as Dictionary).get("boost_mult", 1.5))
+			var desired := dx * target
+			var step: float = (float(movement.get("ground_accel", 0.0)) if gmove else float(movement.get("air_accel", 0.0))) * delta
+			player_vx = minf(player_vx + step, desired) if player_vx < desired else maxf(player_vx - step, desired)
+		else:
+			var fric: float = (float(movement.get("ground_friction", 0.0)) if gmove else float(movement.get("air_friction", 0.0))) * delta
+			player_vx = maxf(0.0, player_vx - fric) if player_vx > 0.0 else minf(0.0, player_vx + fric)
+	else:
+		player_vx = dx * run_speed * vol_factor  # legacy instant-speed feel
+	var new_x: float = player_pos.x + player_vx * delta
+	if _blocked_at(new_x, player_pos.y):
+		player_vx = 0.0  # ran into a wall — kill horizontal momentum
+	else:
+		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
+
 	if volume != null:
 		player_vy += float(volume.get("gravity", 8.0)) * delta
 		player_vy = minf(player_vy, 3.0)  # terminal sink speed
@@ -1496,6 +1732,32 @@ func _process(delta: float) -> void:
 		player_vy = 0.0
 		on_ground = true
 	elif player_vy < 0.0 and _blocked_at(player_pos.x, new_y):
+		# Head-bump: a HEAD-row corner hitting an item BOX breaks it.
+		# Deterministic which-box rule (mirrored in platformer_play.py):
+		# the column nearer player-center wins, ties break LEFT.
+		if box_tile >= 0:
+			var head := int(new_y)
+			var hits: Array[int] = []
+			for c in [int(player_pos.x + BODY_L), int(player_pos.x + BODY_R)]:
+				if (
+					c >= 0 and c < grid_w and head >= 0 and head < grid_h
+					and int(grid[head][c]) == box_tile
+					and not spent_boxes.has(Vector2i(c, head))
+					and not hits.has(c)
+				):
+					hits.append(c)
+			if not hits.is_empty():
+				var best: int = hits[0]
+				for c in hits:
+					if (
+						absi(c - int(player_pos.x)) < absi(best - int(player_pos.x))
+						or (
+							absi(c - int(player_pos.x)) == absi(best - int(player_pos.x))
+							and c < best
+						)
+					):
+						best = c
+				_break_box(best, head)
 		player_vy = 0.0
 		on_ground = false
 	else:
@@ -1530,6 +1792,36 @@ func _process(delta: float) -> void:
 				else:
 					tile_fuses[bkey] = rem
 
+	# Item boxes break under a STOMP too ("either works"): standing on an
+	# unspent box opens it — same deterministic foot probe and sorted
+	# deduped columns as the fuse (byte-parity with platformer_play.py).
+	if box_tile >= 0:
+		var sfoot := int(player_pos.y + 1.01)
+		if player_vy >= -0.01:
+			var scols := {}
+			scols[int(player_pos.x + BODY_L)] = true
+			scols[int(player_pos.x + BODY_R)] = true
+			var sorted_scols := scols.keys()
+			sorted_scols.sort()
+			for sx in sorted_scols:
+				if sx < 0 or sx >= grid_w or sfoot < 0 or sfoot >= grid_h:
+					continue
+				if (
+					int(grid[sfoot][sx]) == box_tile
+					and not spent_boxes.has(Vector2i(sx, sfoot))
+				):
+					_break_box(sx, sfoot)
+
+	# Popped items rise briefly as they auto-collect (cosmetic,
+	# fixed-dt deterministic; mirrors the pygame pop animation).
+	for pop in pops.duplicate():
+		pop["t"] = float(pop["t"]) - delta
+		if float(pop["t"]) <= 0.0:
+			(pop["node"] as Node).queue_free()
+			pops.erase(pop)
+		else:
+			(pop["node"] as ColorRect).position.y -= 2.5 * CELL * delta
+
 	# Damaging volumes (swimmable lava): drain hearts continuously —
 	# every accumulated point costs one heart; the fraction resets on
 	# safe ground. (The old DAMAGE_BUDGET stand-in is gone: one heart
@@ -1548,6 +1840,18 @@ func _process(delta: float) -> void:
 			break
 
 	# --- checkpoints: crossing one moves the respawn point (3b) ---
+	# --- items: anchor-cell pickup (the checkpoint convention, mirrored
+	# byte-for-byte with platformer_play.py). Collected STAYS collected
+	# across respawn; boxed items wait for the break mechanic; power-up
+	# kinds wait for the held-slot mechanic. ---
+	for it in level_items:
+		if (
+			not bool(it["collected"]) and str(it["source"]) != "box"
+			and int(player_pos.x) == int(it["x"])
+			and int(player_pos.y) == int(it["y"])
+		):
+			_collect_item(it)
+
 	for checkpoint in checkpoints:
 		if checkpoint["active"]:
 			continue
@@ -1561,6 +1865,28 @@ func _process(delta: float) -> void:
 	# --- enemies: execute their database behavior params ---
 	for enemy in enemies:
 		if not enemy["alive"]:
+			# Death linger: frozen in place (no patrol/chase/collision),
+			# playing the death strip until the window runs out. Mirrors
+			# the dead early-out in platformer_play.py's Enemy.update.
+			var dying := float(enemy.get("dying_t", 0.0))
+			if dying > 0.0:
+				dying = maxf(0.0, dying - delta)
+				enemy["dying_t"] = dying
+				enemy["anim_t"] = float(enemy["anim_t"]) + delta
+				var anim_d: Dictionary = enemy["anim"]
+				if enemy["node"] is Sprite2D and not anim_d.is_empty():
+					var st_d: Dictionary = anim_d["states"]
+					var state_d := _anim_pick(["death", "hurt", "idle"], st_d)
+					var texs_d: Array = st_d[state_d]
+					var dur_d: float = anim_d["durs"][state_d]
+					enemy["node"].texture = texs_d[
+						int(float(enemy["anim_t"]) / dur_d) % texs_d.size()
+					]
+				enemy["node"].visible = true
+				if dying <= 0.0:
+					enemy["node"].visible = false
+					if enemy["frame"] != null:
+						enemy["frame"].visible = false
 			continue
 		var espeed := float(enemy["speed"])
 		var behavior: Dictionary = enemy["behavior"]
@@ -1770,9 +2096,17 @@ func _process(delta: float) -> void:
 			enemy["hp"] = float(enemy["hp"]) - stomp_damage
 			if float(enemy["hp"]) <= 0.0:
 				enemy["alive"] = false
-				enemy["node"].visible = false
-				if enemy["frame"] != null:
-					enemy["frame"].visible = false
+				# Death linger: freeze in place playing the death strip
+				# from its first frame; vanish when the window runs out
+				# (0 for old manifests = the vanish-on-kill-frame feel).
+				# platformer_play.py's Enemy.stomp mirrors both resets.
+				var linger := float(rules.get("death_linger_s", 0.0))
+				enemy["dying_t"] = linger
+				enemy["anim_t"] = 0.0
+				if linger <= 0.0:
+					enemy["node"].visible = false
+					if enemy["frame"] != null:
+						enemy["frame"].visible = false
 				_play_sfx("jump")  # bounce impulse; no stomp SFX in v1
 			else:
 				enemy["hurt_t"] = 0.25
@@ -1790,9 +2124,11 @@ func _process(delta: float) -> void:
 				str(e["spec"].get("enemy_id", "")), ep.x, ep.y,
 				(1 if bool(e.get("alerted", false)) else 0),
 			])
-		# PLAYER token first (P:px:py:vx), matching the pygame harness, so
-		# player-movement parity is diffable across surfaces.
-		var pl := "P:%.3f:%.3f:%.3f" % [player_pos.x, player_pos.y, player_vx]
+		# PLAYER token first (P:px:py:vx:coins), matching the pygame
+		# harness, so player-movement AND pickup parity are diffable.
+		var pl := "P:%.3f:%.3f:%.3f:%d" % [
+			player_pos.x, player_pos.y, player_vx, coins,
+		]
 		_traj_file.store_line("%d|%s|%s" % [_traj_frame, pl, ",".join(parts)])
 		_traj_file.flush()
 		_traj_frame += 1

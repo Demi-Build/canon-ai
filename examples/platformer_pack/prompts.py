@@ -46,6 +46,16 @@ _SYSTEM_ENEMY = _SYSTEM_BASE + (
     "rolled and fixed. Return ONLY the JSON keys the task names — never change "
     "or restate the rolled stats, and add no other fields."
 )
+_SYSTEM_ITEM = _SYSTEM_BASE + (
+    " This task NAMES and FLAVORS one collectible item whose mechanics are "
+    "already rolled and fixed. Return ONLY the JSON keys the task names — "
+    "never change or restate the rolled mechanics, and add no other fields."
+)
+_SYSTEM_ITEM_PLACEMENT = _SYSTEM_BASE + (
+    " This task PLACES collectible items on a finished level. Return ONLY "
+    "the JSON shape the task names — integer grid coordinates, ids only "
+    "from the offered pool, and no other fields."
+)
 _SYSTEM_STYLE = _SYSTEM_BASE + (
     " This task chooses a color palette. Return ONLY the JSON keys the task "
     "names — one hex per role, and no extra fields."
@@ -268,6 +278,145 @@ class PlatformerPrompts:
                 '{"name": str (unique, 1-3 words), "flavor": str (one sentence)}'
             ),
             max_tokens=256,
+        )
+
+    def item_generation(
+        self, skeleton: dict, world_title: str, index: int,
+        used_names: list[str] | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        fb = f"\nPrior attempt rejected: {'; '.join(feedback)}\n" if feedback else ""
+        used = (
+            f"Names already taken (do NOT reuse or lightly vary): "
+            f"{', '.join(used_names)}\n"
+            if used_names
+            else ""
+        )
+        kind = str(skeleton.get("kind", "coin"))
+        kind_notes = {
+            "coin": "a small collectible currency the player grabs "
+            "constantly — trails of these guide the route",
+            "heal": "restores a heart on pickup",
+            "shield": "a held charm that absorbs ONE hit, then breaks",
+            "double_jump": "grants a second mid-air jump while held "
+            "(timed)",
+            "run_boost": "raises the player's top running speed while "
+            "held (timed)",
+        }
+        return LLMRequest(
+            system=_SYSTEM_ITEM,
+            user_message=(
+                "### TASK: item\n"
+                f"### INDEX: {index}\n"
+                f"World: {world_title}\n"
+                f"Mechanics (already rolled, do NOT change them): "
+                f"{json.dumps(skeleton)}\n"
+                f"Effect: {kind_notes.get(kind, kind)}\n"
+                f"{used}{fb}\n"
+                "Name and flavor this item to fit the world's theme and "
+                "its mechanical effect — the name should hint at what it "
+                "does. Return a JSON object:\n"
+                '{"name": str (unique, 1-3 words), "flavor": str (one '
+                "sentence)}"
+            ),
+            max_tokens=256,
+        )
+
+    def item_placement(
+        self,
+        level_id: str,
+        brief: str,
+        pool: list[dict],
+        standable_summary: str,
+        spawn: tuple[int, int] | None,
+        exit_: tuple[int, int] | None,
+        grid_width: int,
+        grid_height: int,
+        enemies: list[dict],
+        reward_anchors: list[tuple[int, int]],
+        rules: GameRules | None = None,
+        max_items: int = 24,
+        has_box: bool = True,
+        previous: str | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        fb = ""
+        if feedback:
+            prev = (
+                f"\nYour previous placements attempt:\n{previous}\n"
+                if previous
+                else "\n"
+            )
+            fb = (
+                f"{prev}It was rejected because:\n- "
+                + "\n- ".join(feedback)
+                + "\nReturn corrected placements, changing as little as "
+                "possible.\n"
+            )
+        caps = ""
+        if rules is not None and getattr(rules, "rarity_caps", None):
+            caps = "; ".join(
+                f"at most {cap} '{tier}' per level"
+                for tier, cap in sorted(rules.rarity_caps.items())
+            ) + ". "
+        anchors = (
+            f"Secret reward alcoves (premium spots the layout carved — put "
+            f"a rare or power-up item AT each): "
+            f"{[list(a) for a in reward_anchors]}\n"
+            if reward_anchors
+            else ""
+        )
+        return LLMRequest(
+            system=_SYSTEM_ITEM_PLACEMENT,
+            user_message=(
+                "### TASK: item_placement\n"
+                f"### LEVEL: {level_id}\n"
+                f"Brief: {brief}\n"
+                f"Grid {grid_width}x{grid_height} cells (x right, y down "
+                "from the top).\n"
+                f"Item pool (id, kind, rarity, params): {json.dumps(pool)}\n"
+                f"Standable cells (x, y are grid coords, y from top): "
+                f"{standable_summary}\n"
+                f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
+                f"Exit: {list(exit_) if exit_ else 'unknown'}\n"
+                f"Enemies already placed (id, at): {json.dumps(enemies)}\n"
+                f"{anchors}"
+                "PLACEMENT DOCTRINE:\n"
+                "- COINS are FREQUENT and guide the player: lay short "
+                "trails of them along the traversal route (on or just "
+                "above standable cells), arc them over gaps the player "
+                "jumps, and use a few to mark side areas worth exploring. "
+                "Roughly one coin every 4-8 columns of level.\n"
+                "- POWER-UPS are staged AROUND ENEMIES: place a shield or "
+                "boost a few cells before an enemy cluster or gauntlet so "
+                "the player gears up for the encounter.\n"
+                "- HEALS go where the player will be hurting — after "
+                "hazard stretches or dense encounters.\n"
+                + (
+                    '- A "box" placement floats a BREAKABLE ITEM BOX in '
+                    "open air 2-3 cells above standable ground (the player "
+                    "bumps it from below); its item pops out when broken. "
+                    "Use a couple per level at natural spots.\n"
+                    if has_box
+                    else ""
+                )
+                + f"{caps}Up to {max_items} placements. Items sit in OPEN "
+                "AIR cells the player can actually reach with the base "
+                "moveset (validators drop the rest).\n"
+                f"{fb}\n"
+                "Return a JSON object:\n"
+                '{"placements": [{"item_id": str, "x": int, "y": int, '
+                + (
+                    '"source": "trail"|"reward"|"box"}]}\n'
+                    '"source" is "reward" only at a reward alcove anchor, '
+                    '"box" for boxed items, else "trail".'
+                    if has_box
+                    else '"source": "trail"|"reward"}]}\n'
+                    '"source" is "reward" only at a reward alcove anchor, '
+                    'else "trail".'
+                )
+            ),
+            max_tokens=1024,
         )
 
     def enemy_flavor(

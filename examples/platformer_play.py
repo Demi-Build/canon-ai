@@ -66,10 +66,21 @@ def _load(data_dir: Path, level_id: str):
         for p in (data_dir / "enemy").glob("*.json")
     }
     placements = json.loads((level_dir / "entities.json").read_text())
+    item_defs = {
+        p.stem: json.loads(p.read_text())
+        for p in (data_dir / "item").glob("*.json")
+    }
+    items_path = level_dir / "items.json"
+    item_placements = (
+        json.loads(items_path.read_text()) if items_path.exists() else []
+    )
     tileset = json.loads(
         (data_dir / "tileset" / stage_id / "manifest.json").read_text()
     )
-    return manifest, level, grid, enemies, placements, tileset
+    return (
+        manifest, level, grid, enemies, placements, tileset,
+        item_defs, item_placements,
+    )
 
 
 def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
@@ -121,7 +132,10 @@ def main() -> None:
             "--extra play python examples/platformer_play.py ..."
         ) from None
 
-    manifest, level, grid, enemies, placements, tileset = _load(data_dir, level_id)
+    (
+        manifest, level, grid, enemies, placements, tileset,
+        item_defs, item_placements,
+    ) = _load(data_dir, level_id)
     movement = manifest["movement"]
     tile_colors = _tile_colors(data_dir, tileset)
     height, width = grid.shape
@@ -182,6 +196,10 @@ def main() -> None:
     water_policy = rules.get("enemy_water_policy", "swimmers_only")
     drop_through = bool(rules.get("platform_drop_through", True))
     enemy_reset = bool(rules.get("checkpoint_enemy_reset", True))
+    # Death linger: a killed enemy stays frozen in place playing its DEATH
+    # strip for this long before vanishing. 0 (old manifests) = vanish on
+    # the kill frame. Mirrors main.gd.
+    DEATH_LINGER_S = float(rules.get("death_linger_s", 0.0))
     spawn_grace = str(rules.get("spawn_grace", "until_move")) == "until_move"
     # Breakable floors (sectioned-levels D): tile ids whose slot params mark
     # them breakable, + the fuse length. The fuse mechanic below MUST match
@@ -191,6 +209,41 @@ def main() -> None:
         if (s.get("params") or {}).get("breakable")
     }
     BREAK_DELAY_S = float(rules.get("break_delay_s", 0.6))
+    # Items layer (Arc 2): definitions + placements. BOX placements OVERLAY
+    # their solid container tile onto the grid at load — collision.npz
+    # never carries boxes (the items step must not rewrite its parent), so
+    # every consumer overlays identically. Boxed items stay inert inside
+    # their box until the break mechanic lands; power-up pickups arrive
+    # with the held-slot mechanic. main.gd mirrors all of it.
+    box_tile = next(
+        (
+            int(s["tile_type"]) for s in tileset["slots"]
+            if (s.get("params") or {}).get("container")
+        ),
+        None,
+    )
+    items = []
+    for rec in item_placements:
+        definition = item_defs.get(rec.get("item_id", ""), {})
+        items.append(
+            {
+                "x": int(rec["x"]),
+                "y": int(rec["y"]),
+                "source": str(rec.get("source", "trail")),
+                "kind": str(definition.get("kind", "coin")),
+                "params": dict(definition.get("params", {})),
+                "color": hex_rgb(
+                    (definition.get("stats", {}) or {}).get(
+                        "placeholder_color", "#ffd700"
+                    )
+                ),
+                "sprite_path": str(definition.get("sprite_path", "") or ""),
+                "sprite": None,  # loaded below once _sprite exists
+                "collected": False,
+            }
+        )
+        if items[-1]["source"] == "box" and box_tile is not None:
+            grid[items[-1]["y"], items[-1]["x"]] = box_tile
     #: Variant vocabulary from the manifest — consumers never hardcode
     #: what "elite" or "champion" means.
     variant_defs = {v["name"]: v for v in manifest.get("variants", [])}
@@ -238,6 +291,7 @@ def main() -> None:
             )
             self.alive = True
             self.hurt_t = 0.0  # white flash after a surviving stomp
+            self.dying_t = 0.0  # death-linger countdown (frozen, no collision)
             visual = self.variant.get("visual", "outline") if self.variant else ""
             self.outlined = "outline" in visual
             self.color = hex_rgb(self.spec["stats"].get("placeholder_color", "#ff00ff"))
@@ -258,12 +312,17 @@ def main() -> None:
             self.bob_t = self.swoop_t = 0.0
             self.swoop_dir, self.swoop_dep = 1.0, 0.0
             self.hp, self.alive, self.hurt_t = self.max_hp, True, 0.0
+            self.dying_t = 0.0
 
         def stomp(self) -> bool:
             """One stomp of damage; True if it killed."""
             self.hp -= STOMP_DAMAGE
             if self.hp <= 0:
                 self.alive = False
+                # Death linger: freeze in place and play the death strip
+                # from its first frame (main.gd mirrors both resets).
+                self.dying_t = DEATH_LINGER_S
+                self._anim_t = 0.0
                 return True
             self.hurt_t = 0.25
             return False
@@ -417,6 +476,11 @@ def main() -> None:
             # untouchable during grace, so an aggressive enemy may close in
             # (shield + spawn-safety radius keep it fair, and it makes a
             # no-input frame capture actually show the chase).
+            if not self.alive:
+                # Dead: frozen in place (no patrol/chase), counting down the
+                # death linger. main.gd's dead branch mirrors this.
+                self.dying_t = max(0.0, self.dying_t - dt)
+                return
             archetype = self.spec.get("archetype", "sentry")
             self.hurt_t = max(0.0, self.hurt_t - dt)
             patrol_range = float(self.behavior.get("patrol_range", 4))
@@ -643,6 +707,13 @@ def main() -> None:
     }
     # The player animates too (art track): idle/walk/JUMP, smoother (~9 frames).
     player_anim = _load_anim("sprite/player/base.png", (SCALE - 8, SCALE - 8))
+    # Item sprites (art track): drawn in place of the colored circle when
+    # the art phase produced one (loud circle fallback otherwise).
+    for item in items:
+        if item["sprite_path"]:
+            item["sprite"] = _sprite(
+                item["sprite_path"], (SCALE - 10, SCALE - 10)
+            )
 
     def _frame_from(anim: dict, candidates: list, anim_t: float):
         """Pick the current frame Surface for an animation dict given the
@@ -658,11 +729,16 @@ def main() -> None:
     def _enemy_frame(enemy) -> pygame.Surface | None:
         """The current animation frame for an enemy's state, or None → the
         caller draws the static base sprite (loud fallback)."""
-        candidates = (
-            (["hurt"] if enemy.hurt_t > 0 else [])
-            + (["walk"] if getattr(enemy, "_anim_moving", False) else [])
-            + ["idle", "walk", "hurt", "death"]
-        )
+        if not enemy.alive:
+            # Death linger: the death strip, falling back through hurt/idle
+            # when no death state exists. Order mirrors main.gd.
+            candidates = ["death", "hurt", "idle"]
+        else:
+            candidates = (
+                (["hurt"] if enemy.hurt_t > 0 else [])
+                + (["walk"] if getattr(enemy, "_anim_moving", False) else [])
+                + ["idle", "walk", "hurt", "death"]
+            )
         return _frame_from(
             enemy_anims.get(enemy.spec.get("enemy_id", "")),
             candidates,
@@ -733,7 +809,26 @@ def main() -> None:
     break_fuses: dict[tuple[int, int], float] = {}
     won = False
     hearts = MAX_HEARTS
+    coins = 0  # coin counter (score plumbing later); survives respawn
+    # Held POWER-UP: one slot, a new pickup replaces it, death clears it.
+    # Timed kinds (double_jump/run_boost) count DOWN in held_t (the
+    # breakable-fuse arithmetic shape — parity); the shield has no timer
+    # (held until it absorbs a hit). air_jump_ok re-arms on the same
+    # deterministic foot probe as the coyote latch. Mirrors main.gd.
+    held: dict | None = None
+    held_t = 0.0
+    air_jump_ok = False
+    # Broken item boxes stay SOLID but flip SPENT (persists across respawn
+    # like crumbled floors); pops are the brief cosmetic rise of a box's
+    # item as it auto-collects. Mirrors main.gd.
+    spent_boxes: set[tuple[int, int]] = set()
+    pops: list[dict] = []
     iframes = 0.0  # post-hit invulnerability countdown
+    # Coyote latch: seconds of jump-forgiveness LEFT after leaving a ledge.
+    # Armed each tick from the deterministic foot probe (see the momentum
+    # comment), consumed by any jump. Mirrors main.gd.
+    coyote_s = float(movement.get("coyote_s", 0.0))
+    coyote_t = 0.0
     damage_soaked = 0.0  # fractional volume drain toward the next heart
     moved = False  # first input after (re)spawn ends the spawn grace
     # Spawn SHIELD: full invincibility for a few seconds AFTER that
@@ -782,16 +877,54 @@ def main() -> None:
 
     def respawn() -> None:
         nonlocal px, py, vy, vx, damage_soaked, hearts, iframes, moved
-        nonlocal spawn_shield
+        nonlocal spawn_shield, coyote_t, held, held_t, air_jump_ok
         px, py = float(respawn_point["x"]), float(respawn_point["y"])
         vy, vx, damage_soaked = 0.0, 0.0, 0.0
         hearts, iframes, moved, spawn_shield = MAX_HEARTS, 0.0, False, 0.0
+        coyote_t = 0.0
+        held, held_t, air_jump_ok = None, 0.0, False  # power-up dies with you
         if enemy_reset:
             # Killed enemies come back on a checkpoint respawn — dying
             # never leaves a half-cleared level (GameRules kind).
             for other in live_enemies:
                 other.reset()
         play_sfx("death")
+
+    def collect_item(item: dict) -> None:
+        """Apply one item's effect (touch pickup AND box pops share it)."""
+        nonlocal coins, hearts, held, held_t
+        item["collected"] = True
+        if item["kind"] == "coin":
+            coins += int(item["params"].get("coin_value", 1))
+        elif item["kind"] == "heal":
+            hearts = min(
+                MAX_HEARTS,
+                hearts + int(item["params"].get("heal_amount", 1)),
+            )
+        else:
+            # Power-up: ONE held slot, a new pickup replaces the old;
+            # timed kinds carry duration_s, the shield has none.
+            held = {
+                "kind": item["kind"],
+                "params": item["params"],
+                "color": item["color"],
+            }
+            held_t = float(item["params"].get("duration_s", 0))
+        play_sfx("checkpoint")  # closed SFX set — reuse (v1)
+
+    def break_box(bx: int, by: int) -> None:
+        """Bump/stomp opens an item box: the tile stays SOLID but flips
+        SPENT, and its item pops out and auto-collects (brief rise)."""
+        spent_boxes.add((bx, by))
+        for item in items:
+            if (
+                item["source"] == "box" and not item["collected"]
+                and item["x"] == bx and item["y"] == by
+            ):
+                collect_item(item)
+                pops.append(
+                    {"x": bx, "y": by, "color": item["color"], "t": 0.35}
+                )
 
     def note_move() -> None:
         """First input after a (re)spawn: the pre-move grace ends and
@@ -806,9 +939,15 @@ def main() -> None:
     def hurt(cost: int) -> None:
         """One heart pool for contact and hazard hits — spawn grace,
         the spawn shield, and i-frames gate them (volume drain has its
-        own path below)."""
-        nonlocal hearts, iframes
+        own path below). A held SHIELD absorbs one hit of ANY size and
+        breaks (still granting the i-frames window — no instant re-hit)."""
+        nonlocal hearts, iframes, held
         if iframes > 0.0 or spawn_shield > 0.0 or (spawn_grace and not moved):
+            return
+        if held is not None and held["kind"] == "shield":
+            held = None
+            iframes = IFRAMES_S
+            play_sfx("checkpoint")  # the ward shatters, no heart lost
             return
         hearts -= max(1, int(cost))
         iframes = IFRAMES_S
@@ -819,13 +958,18 @@ def main() -> None:
         """Continuous volume damage: accumulate fractions, convert each
         whole point into one heart — ignores hurt i-frames (lava keeps
         hurting) but respects spawn grace AND the spawn shield (full
-        invincibility while it lasts)."""
-        nonlocal damage_soaked, hearts
+        invincibility while it lasts). A held SHIELD soaks one whole
+        heart of drain, then breaks."""
+        nonlocal damage_soaked, hearts, held
         if spawn_shield > 0.0 or (spawn_grace and not moved):
             return
         damage_soaked += amount
         while damage_soaked >= 1.0:
             damage_soaked -= 1.0
+            if held is not None and held["kind"] == "shield":
+                held = None
+                play_sfx("checkpoint")  # the ward boils away, heart kept
+                continue
             hearts -= 1
             if hearts <= 0:
                 respawn()
@@ -879,16 +1023,49 @@ def main() -> None:
         frame_i += 1
         dt = (1.0 / FPS) if headless else clock.tick(FPS) / 1000.0
         volume = volume_params_at(px, py)
+        # Coyote latch (BEFORE input and movement, off last tick's state):
+        # re-arm while the deterministic foot probe finds support (same
+        # idiom as gmove and the breakable fuse — never the on_ground
+        # flag, whose sub-cell flicker diverges between the surfaces),
+        # otherwise count the forgiveness window down. main.gd mirrors
+        # this at the same point in its tick order.
+        foot_c = int(py + 1.01)
+        grounded_probe = vy >= -0.01 and (
+            tile_at(px + BODY_L, foot_c) in SUPPORT
+            or tile_at(px + BODY_R, foot_c) in SUPPORT
+        )
+        if coyote_s > 0.0:
+            if grounded_probe:
+                coyote_t = coyote_s
+            else:
+                coyote_t = max(0.0, coyote_t - dt)
+        if grounded_probe:
+            air_jump_ok = True  # double-jump re-arms on the same probe
+        # Timed power-ups count DOWN (the fuse arithmetic shape); the
+        # shield has no timer (duration_s 0 = held until consumed).
+        if held is not None and held_t > 0.0:
+            held_t = max(0.0, held_t - dt)
+            if held_t <= 0.0:
+                held = None
         # Scripted-harness jump (PLAT_HOLD): the event loop below never sees a
         # KEYDOWN headless, so trigger the on-ground jump here, matching the
         # normal path (vy set before the horizontal step).
         if (
             headless and hold_mode and hold_jump_every
-            and on_ground and volume is None
+            and volume is None
             and frame_i % hold_jump_every == 0
         ):
-            note_move()
-            vy = -jump_v
+            if on_ground or coyote_t > 0.0:
+                note_move()
+                vy = -jump_v
+                coyote_t = 0.0
+            elif (
+                held is not None and held["kind"] == "double_jump"
+                and air_jump_ok
+            ):
+                note_move()
+                vy = -jump_v
+                air_jump_ok = False
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -919,8 +1096,20 @@ def main() -> None:
                     ):
                         py += 0.06  # drop through a one-way platform
                         vy, on_ground = 0.5, False
-                    elif on_ground:
+                        coyote_t = 0.0  # dropping is leaving, not a ledge slip
+                    elif on_ground or coyote_t > 0.0:
                         vy = -jump_v
+                        coyote_t = 0.0  # consumed — one forgiveness per slip
+                        play_sfx("jump")
+                    elif (
+                        held is not None and held["kind"] == "double_jump"
+                        and air_jump_ok
+                    ):
+                        # One mid-air jump while the power-up is held;
+                        # re-arms on the grounded probe. The reachability
+                        # sim never assumes it (base moveset only).
+                        vy = -jump_v
+                        air_jump_ok = False
                         play_sfx("jump")
 
         keys = pygame.key.get_pressed()
@@ -964,6 +1153,8 @@ def main() -> None:
             )
             if dx:
                 target = (run_speed if run_held else walk_speed) * vol_factor
+                if held is not None and held["kind"] == "run_boost":
+                    target *= float(held["params"].get("boost_mult", 1.5))
                 desired = dx * target
                 step = (ground_accel if gmove else air_accel) * dt
                 vx = min(vx + step, desired) if vx < desired else max(vx - step, desired)
@@ -989,6 +1180,23 @@ def main() -> None:
             py = float(int(new_y + 0.99) - 1)
             vy, on_ground = 0.0, True
         elif vy < 0 and blocked_at(px, new_y):
+            # Head-bump: a HEAD-row corner hitting an item BOX breaks it.
+            # Deterministic which-box rule (mirrored in main.gd): the
+            # column nearer player-center wins, ties break LEFT.
+            if box_tile is not None:
+                head = int(new_y)
+                hits = [
+                    c
+                    for c in sorted({int(px + BODY_L), int(px + BODY_R)})
+                    if 0 <= c < width and 0 <= head < height
+                    and int(grid[head, c]) == box_tile
+                    and (c, head) not in spent_boxes
+                ]
+                if hits:
+                    col = min(
+                        hits, key=lambda c: (abs(c - int(px)), c)
+                    )
+                    break_box(col, head)
             vy, on_ground = 0.0, False
         else:
             py, on_ground = new_y, False
@@ -1012,6 +1220,21 @@ def main() -> None:
                         break_fuses.pop((bx, bfoot), None)
                     else:
                         break_fuses[(bx, bfoot)] = rem
+
+        # Item boxes break under a STOMP too ("either works"): standing on
+        # an unspent box opens it — same deterministic foot probe and
+        # sorted-deduped columns as the fuse (byte-parity with main.gd).
+        if box_tile is not None:
+            sfoot = int(py + 1.01)
+            if vy >= -0.01:
+                for bx in sorted({int(px + BODY_L), int(px + BODY_R)}):
+                    if not (0 <= bx < width and 0 <= sfoot < height):
+                        continue
+                    if (
+                        int(grid[sfoot, bx]) == box_tile
+                        and (bx, sfoot) not in spent_boxes
+                    ):
+                        break_box(bx, sfoot)
 
         # Damaging volumes (swimmable lava): drain hearts continuously —
         # every accumulated point costs one heart; the fraction resets on
@@ -1062,16 +1285,6 @@ def main() -> None:
                 vy = -jump_v * STOMP_BOUNCE
             else:
                 hurt(enemy.damage_hearts)
-        if traj_file is not None:
-            parts = [
-                f"{e.spec.get('enemy_id', '')}:{e.x:.3f}:{e.y:.3f}:{1 if e.alerted else 0}"
-                for e in live_enemies
-            ]
-            # PLAYER token first (P:px:py:vx) so player-movement parity is
-            # diffable across surfaces alongside the enemy trajectories.
-            traj_file.write(
-                f"{cap_i}|P:{px:.3f}:{py:.3f}:{vx:.3f}|{','.join(parts)}\n"
-            )
         # Crossing a checkpoint moves the respawn point (3b triggers).
         for checkpoint in checkpoints:
             if (
@@ -1082,6 +1295,31 @@ def main() -> None:
                 checkpoint["active"] = True
                 respawn_point = {"x": checkpoint["x"], "y": checkpoint["y"]}
                 play_sfx("checkpoint")
+        # Item pickup — the checkpoint anchor-cell convention, mirrored in
+        # main.gd byte-for-byte. Collected STAYS collected across respawn
+        # (respawn() never touches it — the break_fuses precedent). Boxed
+        # items wait for the break mechanic; power-up kinds wait for the
+        # held-slot mechanic (visible but inert until then).
+        for item in items:
+            if (
+                not item["collected"]
+                and item["source"] != "box"
+                and int(px) == item["x"]
+                and int(py) == item["y"]
+            ):
+                collect_item(item)
+        if traj_file is not None:
+            parts = [
+                f"{e.spec.get('enemy_id', '')}:{e.x:.3f}:{e.y:.3f}:{1 if e.alerted else 0}"
+                for e in live_enemies
+            ]
+            # PLAYER token first (P:px:py:vx:coins) so player-movement AND
+            # pickup parity are diffable across surfaces. Written AFTER the
+            # pickup/checkpoint block — main.gd dumps at the same point in
+            # its tick, so a pickup lands on the SAME traj line on both.
+            traj_file.write(
+                f"{cap_i}|P:{px:.3f}:{py:.3f}:{vx:.3f}:{coins}|{','.join(parts)}\n"
+            )
         # Exit zone: horizontal → the exit's whole COLUMN (leave right);
         # vertical → the exit's ROW at the summit, any column (climb to the
         # top). Same reach model both surfaces (parity with main.gd).
@@ -1154,9 +1392,49 @@ def main() -> None:
                     (foot[0], foot[1] - SCALE * 1.06),
                 ],
             )
-        for enemy in live_enemies:
-            if not enemy.alive:
+        # Items: uncollected trail/reward items as colored circles (boxed
+        # items hide inside their box tile until it breaks).
+        for item in items:
+            if item["collected"] or item["source"] == "box":
                 continue
+            if item["sprite"] is not None:
+                screen.blit(
+                    item["sprite"],
+                    (item["x"] * SCALE + 5, item["y"] * SCALE + 5),
+                )
+            else:
+                pygame.draw.circle(
+                    screen, item["color"],
+                    (
+                        int(item["x"] * SCALE + SCALE / 2),
+                        int(item["y"] * SCALE + SCALE / 2),
+                    ),
+                    SCALE // 3,
+                )
+        # Spent boxes darken (still solid); a popped item rises briefly
+        # as it auto-collects (cosmetic, fixed-dt deterministic).
+        for (sbx, sby) in spent_boxes:
+            pygame.draw.rect(
+                screen, (48, 36, 24),
+                (sbx * SCALE + 4, sby * SCALE + 4, SCALE - 8, SCALE - 8),
+            )
+        for pop in list(pops):
+            pop["t"] -= dt
+            if pop["t"] <= 0.0:
+                pops.remove(pop)
+                continue
+            rise = (0.35 - pop["t"]) * 2.5
+            pygame.draw.circle(
+                screen, pop["color"],
+                (
+                    int(pop["x"] * SCALE + SCALE / 2),
+                    int((pop["y"] - rise) * SCALE + SCALE / 2),
+                ),
+                SCALE // 3,
+            )
+        for enemy in live_enemies:
+            if not enemy.alive and enemy.dying_t <= 0.0:
+                continue  # linger over → vanish (dead never collide either way)
             # Bottom-anchored, column-centered: a sized body grows UP
             # from its anchor cell (matches the touch AABB and the
             # placement footprint — never into the floor).
@@ -1246,6 +1524,24 @@ def main() -> None:
                 pygame.draw.rect(screen, (214, 61, 74), heart_rect)
             else:
                 pygame.draw.rect(screen, (110, 48, 56), heart_rect, 2)
+        # Coin counter beside the hearts (score plumbing comes later).
+        coin_x = 16 + MAX_HEARTS * 24 + 12
+        pygame.draw.circle(screen, (255, 208, 64), (coin_x + 9, 19), 9)
+        screen.blit(
+            font.render(f"x {coins}", True, (255, 224, 128)),
+            (coin_x + 24, 10),
+        )
+        # Held power-up: its color swatch + the seconds left (shield has
+        # no timer — held until it absorbs a hit).
+        if held is not None:
+            slot_x = coin_x + 80
+            pygame.draw.rect(screen, held["color"], (slot_x, 10, 18, 18))
+            label = (
+                "ward" if held["kind"] == "shield" else f"{held_t:.0f}s"
+            )
+            screen.blit(
+                font.render(label, True, (220, 220, 230)), (slot_x + 24, 10)
+            )
         if won:
             screen.blit(
                 font.render("LEVEL COMPLETE — R to reset", True, (64, 255, 112)),

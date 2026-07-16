@@ -266,13 +266,17 @@ class SpriteArtPhase:
         self.graphics = graphics
 
     def owns(self, ctx: Any) -> list[str]:
-        # An explicitly-regenerated enemy definition gets fresh art too;
-        # "player" makes `canon regen player` reschedule this phase, and
-        # "props:<sid>" does the same for the gameplay-prop sprites.
+        # An explicitly-regenerated enemy/item definition gets fresh art
+        # too; "player" makes `canon regen player` reschedule this phase,
+        # and "props:<sid>" does the same for the gameplay-prop sprites.
         return [
             *(
                 e.artifact_id or f"enemy:{eid}"
                 for eid, e in getattr(ctx.bible, "enemy_definitions", {}).items()
+            ),
+            *(
+                i.artifact_id or f"item:{iid}"
+                for iid, i in getattr(ctx.bible, "items", {}).items()
             ),
             "player",
             *(
@@ -340,8 +344,60 @@ class SpriteArtPhase:
             ctx.adapter.write_json_singleton(
                 f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
             )
+            # label keeps the TEXT model truthful (haiku authored the
+            # enemy; this re-stamp only adds the art generators) — an
+            # unlabeled stamp would revert it to the global model.
             stamp_provenance(
                 ctx, enemy, enemy.sprite_hash,
+                label="plat:enemies",
+                model_extra=(
+                    f"gfx:{self.graphics.digest()}+img:{self.producer.model}"
+                ),
+            )
+
+        _ITEM_LOOK = {
+            "coin": "a small round collectible coin, glinting",
+            "heal": "a heart-shaped restorative charm",
+            "shield": "a protective ward amulet",
+            "double_jump": "a feather-light charm suggesting flight",
+            "run_boost": "a swift wind-swirl draught",
+        }
+        for item_id, item in getattr(ctx.bible, "items", {}).items():
+            # Same per-definition pin guard as the roster: one liked item
+            # sprite survives a pool re-roll.
+            if (item.artifact_id or f"item:{item_id}") in pinned:
+                logger.info(
+                    "SpriteArtPhase: item:%s is pinned — sprite kept.",
+                    item_id,
+                )
+                continue
+            color_hex = str(item.stats.get("placeholder_color", "#ffd700"))
+            descriptor = (
+                f"{_ITEM_LOOK.get(item.kind, 'a small collectible trinket')}"
+                f" — {item.stats.get('flavor', '')}"
+            ).strip(" —")
+            sprite = self._generate(
+                ctx, item.name or item_id, descriptor, color_hex,
+                theme, world_title, (size, size),
+            )
+            if sprite is None:
+                continue
+            if dominant_hue(sprite) is None:
+                warn(
+                    ctx,
+                    f"sprite art: item {item_id!r} came back colorless; "
+                    f"tinted toward its assigned color {color_hex}.",
+                )
+                sprite = tint_to_color(sprite, color_hex)
+            rel = f"sprite/item/{item_id}/base.png"
+            item.sprite_path = rel
+            item.sprite_hash = self._write(ctx, rel, sprite)
+            ctx.adapter.write_json_singleton(
+                f"item/{item_id}.json", item.model_dump(mode="json")
+            )
+            stamp_provenance(
+                ctx, item, item.sprite_hash,
+                label="plat:items",
                 model_extra=(
                     f"gfx:{self.graphics.digest()}+img:{self.producer.model}"
                 ),

@@ -80,6 +80,7 @@ def render_level(
     tileset: Tileset,
     sheet,
     variants: VariantSet = DEFAULT_VARIANTS,
+    items: dict[str, Any] | None = None,
 ) -> bytes:
     from PIL import Image, ImageDraw
 
@@ -134,6 +135,46 @@ def render_level(
                 fill=REWARD_COLOR, outline="#ffffff",
             )
 
+    # Items layer (Arc 2). BOX placements carry a solid box tile every
+    # consumer overlays onto the grid — the analytic render must show it
+    # (it IS collision). Items draw as filled circles in their definition
+    # color (a distinct shape from enemy rects, gems, and decor diamonds);
+    # a boxed item's circle rides on its box cell.
+    box_slot = next(
+        (
+            slot.index
+            for slot in getattr(tileset, "slots", []) or []
+            if bool((slot.params or {}).get("container"))
+        ),
+        None,
+    )
+    for placement in getattr(level, "items", []) or []:
+        item_id = placement.ref.split(":", 1)[1]
+        item = (items or {}).get(item_id)
+        color = _hex_to_rgb(
+            (item.stats.get("placeholder_color") if item else None)
+            or "#ffd700"
+        )
+        x, y = placement.pos
+        if str(placement.overrides.get("source", "")) == "box":
+            box_color = (
+                tuple(slot_colors[box_slot][:3])
+                if box_slot is not None and box_slot in slot_colors
+                else (190, 125, 45)
+            )
+            draw.rectangle(
+                (x * SCALE, y * SCALE, (x + 1) * SCALE - 1, (y + 1) * SCALE - 1),
+                fill=box_color, outline="#ffffff",
+            )
+            radius = 4
+        else:
+            radius = 6
+        cx, cy = x * SCALE + SCALE // 2, y * SCALE + SCALE // 2
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=color, outline="#ffffff",
+        )
+
     for placement in level.entities:
         enemy_id = placement.ref.split(":", 1)[1]
         enemy = enemies.get(enemy_id)
@@ -179,11 +220,14 @@ def render_level(
     return buffer.getvalue()
 
 
-def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
+def render_legend(
+    enemies: dict[str, EnemyDefinition],
+    items: dict[str, Any] | None = None,
+) -> bytes:
     from PIL import Image, ImageDraw
 
     row_h, swatch, pad, width = 28, 18, 8, 720
-    rows = max(len(enemies), 1) + 1  # + footer note
+    rows = max(len(enemies), 1) + len(items or {}) + 1  # + footer note
     img = Image.new("RGB", (width, pad * 2 + row_h * rows), (24, 24, 32))
     draw = ImageDraw.Draw(img)
     y = pad
@@ -205,10 +249,27 @@ def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
             fill=(230, 230, 230),
         )
         y += row_h
+    for item in (items or {}).values():
+        color = _hex_to_rgb(item.stats.get("placeholder_color", "#ffd700"))
+        cx, cy = pad + swatch // 2, y + swatch // 2
+        draw.ellipse(
+            (cx - swatch // 2, cy - swatch // 2,
+             cx + swatch // 2, cy + swatch // 2),
+            fill=color, outline="#ffffff",
+        )
+        params = ", ".join(f"{k}={v}" for k, v in sorted(item.params.items()))
+        draw.text(
+            (pad * 2 + swatch, y + 3),
+            f"{item.name}  [item: {item.kind}]  {item.rarity}"
+            + (f"  {params}" if params else ""),
+            fill=(230, 230, 230),
+        )
+        y += row_h
     draw.text(
         (pad, y + 3),
         "white outline = variant placement (see manifest variants)   |   "
         "amber box = checkpoint   |   gold gem = secret reward   |   "
+        "circles = items (bronze tile = item box)   |   "
         "diamonds = foreground decor",
         fill=(170, 170, 180),
     )
@@ -230,6 +291,8 @@ def render_level_skinned(
     variants: VariantSet = DEFAULT_VARIANTS,
     graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     prop_sprites: dict[str, Any] | None = None,
+    items: dict[str, Any] | None = None,
+    item_sprites: dict[str, Any] | None = None,
 ) -> bytes:
     """The 'what it looks like' render: real tile regions, sprites, and
     parallax scenery composited flat (camera-less). This is the skinned
@@ -278,6 +341,48 @@ def render_level_skinned(
             tile = regions.get(slot)
             if tile is not None:
                 img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
+
+    # Items layer (Arc 2) — gameplay, so ALWAYS visible here (unlike the
+    # deliberately-omitted decor): box tiles paste their slot art (they
+    # ARE collision once consumers overlay them); items draw as colored
+    # circles until item sprites land (chunk 6).
+    box_slot_index = next(
+        (
+            slot.index
+            for slot in tileset.slots
+            if bool((slot.params or {}).get("container"))
+        ),
+        None,
+    )
+    for placement in getattr(level, "items", []) or []:
+        item_id = placement.ref.split(":", 1)[1]
+        item = (items or {}).get(item_id)
+        x, y = placement.pos
+        boxed = str(placement.overrides.get("source", "")) == "box"
+        if boxed:
+            tile = regions.get(box_slot_index)
+            if tile is not None:
+                img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
+        sprite = (item_sprites or {}).get(item_id)
+        if sprite is not None and not boxed:
+            side = int(px * 0.7)
+            scaled = sprite.resize((side, side))
+            img.paste(
+                scaled,
+                (x * px + (px - side) // 2, y * px + (px - side) // 2),
+                scaled,
+            )
+            continue
+        radius = px // 6 if boxed else px // 4
+        color = _hex_to_rgb(
+            (item.stats.get("placeholder_color") if item else None)
+            or "#ffd700"
+        )
+        cx, cy = x * px + px // 2, y * px + px // 2
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=color, outline="#ffffff",
+        )
 
     # Gameplay props before actors (behind them, like both play
     # surfaces): the exit goal on the exit cell and an UNCLAIMED
@@ -417,7 +522,7 @@ def render_level_review(
         background = data["background"]
     png = render_level(
         terrain, background, level, ctx.bible.enemy_definitions, tileset,
-        sheet, variants=variants,
+        sheet, variants=variants, items=getattr(ctx.bible, "items", {}),
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}.png", png
@@ -441,11 +546,18 @@ def render_level_review(
         for name, rel in (stage_props.prop_paths if stage_props else {}).items()
         if (sprite := _load_sprite(ctx, rel)) is not None
     }
+    item_sprites = {
+        iid: sprite
+        for iid, item in getattr(ctx.bible, "items", {}).items()
+        if (sprite := _load_sprite(ctx, item.sprite_path)) is not None
+    }
     skinned = render_level_skinned(
         terrain, background, level, ctx.bible.enemy_definitions, tileset,
         sheet, bands, enemy_sprites,
         _load_sprite(ctx, "sprite/player/base.png"), variants=variants,
         graphics=graphics, prop_sprites=prop_sprites,
+        items=getattr(ctx.bible, "items", {}),
+        item_sprites=item_sprites,
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}_skinned.png", skinned
@@ -454,7 +566,11 @@ def render_level_review(
 
 def write_review_legend(ctx: Any) -> None:
     ctx.adapter.write_binary(
-        "review/legend.png", render_legend(ctx.bible.enemy_definitions)
+        "review/legend.png",
+        render_legend(
+            ctx.bible.enemy_definitions,
+            items=getattr(ctx.bible, "items", {}),
+        ),
     )
 
 
