@@ -42,9 +42,14 @@ def load_cost_model(path: str | Path = DEFAULT_COST_MODEL_PATH) -> dict:
 def _sections_for_level(bible: Any, level_id: str, avg: float) -> float:
     """Width-driven section count (mirrors plan_level's _TARGET_ADVANCE=20
     partition, capped at 5) when the level entity exists; the data-file
-    average otherwise."""
+    average otherwise. A SECRET-ROOM id without an entity prices at the
+    room average (1-2 sections), not the full-level one."""
+    from examples.platformer_pack.level import parent_of_room_id
+
     level = getattr(bible, "levels", {}).get(level_id)
     if level is None:
+        if parent_of_room_id(level_id) is not None:
+            return 1.3  # rooms are 1-2 sections (plan_room)
         return avg
     extent = (
         int(getattr(level, "grid_height", 0))
@@ -198,6 +203,8 @@ def _price_assets(
             a.get("images_per_item", 1)
         )
         images += int(a.get("images_player", 4))
+    if "phase:plat:world_art" in node_ids:
+        images += int(a.get("images_world", 1))  # one splash per world
     music = (
         num_stages * int(a.get("music_per_stage", 1))
         if "phase:plat:audio" in node_ids
@@ -284,7 +291,12 @@ class _FreshNode:
 
 def _fresh_nodes(plan: dict) -> tuple[list, Any]:
     """The node families a full fresh run executes, at fresh_plan scale.
-    Returns synthetic nodes + a bible stand-in carrying the counts."""
+    Returns synthetic nodes + a bible stand-in carrying the counts.
+    SECRET ROOMS (multi-room arc) add expected mini-levels:
+    ``secret_rooms_avg`` rooms per level, each priced like a small level
+    (its layout at the 1-2 section room average)."""
+    num_levels = int(plan.get("num_levels", 9))
+    num_rooms = int(round(num_levels * float(plan.get("secret_rooms_avg", 0.0))))
 
     class _Bible:
         stages = {f"s{i}": None for i in range(int(plan.get("num_stages", 3)))}
@@ -292,7 +304,7 @@ def _fresh_nodes(plan: dict) -> tuple[list, Any]:
             f"e{i}": None for i in range(int(plan.get("num_enemies", 7)))
         }
         items = {f"i{i}": None for i in range(int(plan.get("num_items", 5)))}
-        levels = {f"l{i + 1}": None for i in range(int(plan.get("num_levels", 9)))}
+        levels = {f"l{i + 1}": None for i in range(num_levels)}
 
     nodes = [
         _FreshNode("phase:plat:world"),
@@ -304,10 +316,18 @@ def _fresh_nodes(plan: dict) -> tuple[list, Any]:
         _FreshNode("phase:plat:backdrop_art"),
         _FreshNode("phase:plat:sprite_art"),
         _FreshNode("phase:plat:sprite_animation"),
+        _FreshNode("phase:plat:world_art"),
         _FreshNode("phase:plat:audio"),
         _FreshNode("plat:vlm_qa"),
     ]
-    for lid in _Bible.levels:
+    level_ids = list(_Bible.levels)
+    # Expected rooms ride round-robin on the parents (l1r1, l2r1, ...) —
+    # the id shape is what _sections_for_level prices the room rate by.
+    level_ids += [
+        f"l{(i % num_levels) + 1}r{(i // num_levels) + 1}"
+        for i in range(num_rooms)
+    ]
+    for lid in level_ids:
         for step in ("collision", "entities", "foreground"):
             nodes.append(_FreshNode(f"level:<stage>/{lid}/{step}"))
     return nodes, _Bible()

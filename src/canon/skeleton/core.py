@@ -216,6 +216,7 @@ def roll_skeleton(
     spec: SkeletonSpec,
     rng: random.Random,
     context: dict[str, Any] | None = None,
+    locked: dict[str, Any] | None = None,
 ) -> dict:
     """Deterministic pre-roll for one entity.
 
@@ -250,7 +251,38 @@ def roll_skeleton(
     ctx = context or {}
     rolled: dict[str, Any] = {}
 
+    # Anchored generation: caller-locked values are taken as-is and skipped by
+    # the roll; because ``lookup`` fields read earlier values from ``rolled``,
+    # a dependent field resolves FROM the locked anchor (lock archetype=flyer
+    # → speed looks up flyer). Closed-set/range anchors are validated
+    # fail-closed so a typo can't smuggle an off-table value into the game.
+    if locked:
+        for name, value in locked.items():
+            field = spec.fields.get(name)
+            if field is None:
+                raise KeyError(
+                    f"locked field {name!r} is not in the spec "
+                    f"(fields: {list(spec.fields)!r})."
+                )
+            if field.choices is not None:
+                allowed = [v for v, _ in field.choices]
+                if value not in allowed:
+                    raise ValueError(
+                        f"locked {name}={value!r} is not one of the spec's "
+                        f"choices {allowed!r}."
+                    )
+            elif field.range is not None:
+                low, high = field.range
+                if not isinstance(value, int) or not (low <= value <= high):
+                    raise ValueError(
+                        f"locked {name}={value!r} is outside the spec range "
+                        f"[{low}, {high}]."
+                    )
+            rolled[name] = value
+
     for name, field in spec.fields.items():
+        if name in rolled:
+            continue  # locked anchor — already placed above
         if field.choices is not None:
             values = [v for v, _ in field.choices]
             weights = [w for _, w in field.choices]

@@ -19,15 +19,27 @@ from canon.bible.platformer import EnemyDefinition
 from canon.pipeline.runner import PipelineContext
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline
 from examples.platformer_pack.vlm_qa import (
+    _STATE_BRIEF,
+    _STATE_ORDER,
     ANIM_DEFAULT_FRAMES,
     ANIM_FRAMES_MAX,
     ANIM_FRAMES_MIN,
     ANIM_MOTION_MAX_CHARS,
     ANIMATION_QA_DIMENSIONS,
     ANIMATION_STATES,
+    BACKDROP_SEAM_TOLERANCE,
+    COMPOSITE_MIN_HUE_SEP,
+    COMPOSITE_MIN_LUMA,
     DIMENSIONS,
+    PLAYER_ANIM_FRAMES_MAX,
+    PLAYER_ANIMATION_STATES,
     SPRITE_MIN_FILL,
+    STATE_LOOP_MODES,
+    VFX_MIN_FILL,
     VlmQaPhase,
+    _animation_checks,
+    _composite_contrast_checks,
+    _flip_review_status,
     _sanitize_animation_spec,
     _sanitize_animation_verdict,
     _sanitize_verdict,
@@ -40,6 +52,7 @@ from examples.platformer_pack.vlm_qa import (
     build_vlm_judge,
     derive_animation_qa_warnings,
     derive_qa_warnings,
+    enemy_animation_states,
     enemy_animation_subject,
     make_fake_vlm_responder,
     qa_report_rel,
@@ -136,6 +149,18 @@ class TestAnimationAuthoring:
         assert "jump" in spec
         assert spec["walk"]["frames"] == 9  # the enemy cap (6) would clip this
 
+    def test_fake_judge_authors_the_full_player_state_set(self) -> None:
+        # the canned fake must cover fall/land/skid — a state missing from
+        # canned_frames kills ALL animation for the actor in fake runs
+        spec = author_animation_spec(
+            _fake_judge(), "player", "the hero", b"x",
+            states=PLAYER_ANIMATION_STATES, frames_max=PLAYER_ANIM_FRAMES_MAX,
+        )
+        assert set(spec) == set(PLAYER_ANIMATION_STATES)
+        assert spec["fall"]["frames"] == 3
+        assert spec["land"]["frames"] == 2
+        assert spec["skid"]["frames"] == 2
+
     def test_judge_receives_the_sprite_bytes(self) -> None:
         judge = _fake_judge()
         author_animation_spec(judge, "enemy:hop_toad", self._subject(), b"12345")
@@ -203,6 +228,30 @@ class TestAnimationAuthoring:
         # one fake judge serves BOTH tasks — a qa prompt still yields verdicts
         reply = _fake_judge().judge(_PROMPT_MARKERS.format(lid="l1"), [b"a", b"b", b"c"])
         assert set(DIMENSIONS) <= set(json.loads(reply))
+
+
+class TestStateVocabulary:
+    """G4 — the cross-check that keeps a new state from half-landing: every
+    state either surface can pick must carry a brief (two raw-index KeyError
+    sites), a default frame count, a loop mode, and a contact-sheet row."""
+
+    def test_every_state_fully_registered(self) -> None:
+        union = set(PLAYER_ANIMATION_STATES) | set(ANIMATION_STATES) | {"jump"}
+        for state in union:
+            assert state in _STATE_BRIEF, state
+            assert state in ANIM_DEFAULT_FRAMES, state
+            assert state in STATE_LOOP_MODES, state
+            assert state in _STATE_ORDER, state
+
+    def test_player_states_include_the_new_trio(self) -> None:
+        assert {"fall", "land", "skid"} <= set(PLAYER_ANIMATION_STATES)
+
+    def test_enemy_states_widen_only_for_hopper(self) -> None:
+        for archetype in ("", "patroller", "sentry", "swimmer", "flyer"):
+            enemy = EnemyDefinition(enemy_id="e", archetype=archetype)
+            assert enemy_animation_states(enemy) == ANIMATION_STATES
+        hopper = EnemyDefinition(enemy_id="h", archetype="hopper")
+        assert enemy_animation_states(hopper) == (*ANIMATION_STATES, "jump")
 
 
 class TestAnimationQA:
@@ -342,6 +391,158 @@ class TestAnimationQA:
         assert judge.calls[0]["image_sizes"] == [4, 5]
 
 
+def _strip_ctx(tmp_path: Path):
+    from canon.adapters import JsonOutputAdapter
+
+    return SimpleNamespace(adapter=JsonOutputAdapter(tmp_path))
+
+
+def _write_strip(
+    tmp_path: Path, boxes: list[tuple[int, int, int, int]],
+    fw: int = 32, fh: int = 32, state: str = "walk",
+) -> dict:
+    """One opaque rect per frame (frame-local coords) → a strip on disk +
+    the animation manifest naming it — normalize_frames-style content."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (fw * len(boxes), fh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for i, (x0, y0, x1, y1) in enumerate(boxes):
+        draw.rectangle(
+            [x0 + i * fw, y0, x1 + i * fw, y1], fill=(200, 40, 40, 255)
+        )
+    rel = f"sprite/enemy/x/{state}.png"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    path.write_bytes(buffer.getvalue())
+    return {
+        "states": {
+            state: {
+                "path": rel, "frames": len(boxes), "frame_width": fw,
+                "frame_height": fh, "duration_ms": 120,
+            }
+        }
+    }
+
+
+class TestAnimationWanderMeter:
+    """Ticket 6 — the wander METER that replaced the tautological
+    post-normalize registration check (which measured jitter AFTER
+    normalize_frames had re-anchored every frame — it structurally could not
+    fail). The meter reads the PRE-normalize baseline spread the animation
+    phase recorded at generation time; a spike warns, never gates."""
+
+    def _with_wander(self, tmp_path: Path, frac) -> dict:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 4)
+        if frac is not None:
+            anim["states"]["walk"]["raw_bottom_wander_frac"] = frac
+        return anim
+
+    def test_recorded_low_wander_passes(self, tmp_path: Path) -> None:
+        anim = self._with_wander(tmp_path, 0.05)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_wander")
+        assert rec["passed"] is True
+        assert rec["subject"] == "walk"
+
+    def test_spike_fires_the_meter(self, tmp_path: Path) -> None:
+        # The corrupted-fixture requirement: a kept gate must be PROVEN able
+        # to fire — a 50%-of-sheet-height baseline drift is a real backend
+        # registration failure the old check could never see.
+        anim = self._with_wander(tmp_path, 0.5)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_wander")
+        assert rec["passed"] is False
+        assert "pre-normalize baseline wander 50%" in rec["detail"]
+
+    def test_old_trees_without_the_key_stay_silent(
+        self, tmp_path: Path
+    ) -> None:
+        anim = self._with_wander(tmp_path, None)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        assert not any(c["check"] == "animation_wander" for c in checks)
+
+    def test_registration_check_is_gone(self, tmp_path: Path) -> None:
+        # The tautological check must not resurface.
+        anim = self._with_wander(tmp_path, 0.05)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        assert not any(
+            c["check"] == "animation_registration" for c in checks
+        )
+
+
+class TestAnimationAtlasCheck:
+    """G4 — the packed-atlas code check: silent when no atlas.json exists
+    (old trees), one per-actor record validating png + counts + bounds."""
+
+    def _atlas_json(
+        self, tmp_path: Path, n_rects: int, atlas_px: int = 64
+    ) -> None:
+        from PIL import Image
+
+        d = tmp_path / "sprite/enemy/x"
+        d.mkdir(parents=True, exist_ok=True)
+        buffer = io.BytesIO()
+        Image.new("RGBA", (atlas_px, atlas_px), (0, 0, 0, 0)).save(
+            buffer, format="PNG"
+        )
+        (d / "atlas.png").write_bytes(buffer.getvalue())
+        (d / "atlas.json").write_text(json.dumps({
+            "path": "sprite/enemy/x/atlas.png",
+            "frame_size": [32, 32],
+            "states": {
+                "walk": {
+                    "loop": "loop",
+                    "durations_ms": [120] * n_rects,
+                    "frames": [
+                        {"x": i * 17, "y": 0, "w": 16, "h": 22, "ox": 8, "oy": 10}
+                        for i in range(n_rects)
+                    ],
+                }
+            },
+        }))
+
+    def test_silent_when_no_atlas(self, tmp_path: Path) -> None:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 4)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        assert not any(c["check"] == "animation_atlas" for c in checks)
+
+    def test_matching_atlas_passes(self, tmp_path: Path) -> None:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 3)
+        self._atlas_json(tmp_path, n_rects=3)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        atlas = next(c for c in checks if c["check"] == "animation_atlas")
+        assert atlas["passed"] is True
+        assert atlas["subject"] == "atlas"
+
+    def test_count_mismatch_fails(self, tmp_path: Path) -> None:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 4)
+        self._atlas_json(tmp_path, n_rects=3)
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        atlas = next(c for c in checks if c["check"] == "animation_atlas")
+        assert atlas["passed"] is False
+        assert "3 atlas frame(s) vs manifest 4" in atlas["detail"]
+
+    def test_out_of_bounds_rect_fails(self, tmp_path: Path) -> None:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 3)
+        self._atlas_json(tmp_path, n_rects=3, atlas_px=32)  # 2*17+16 > 32
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        atlas = next(c for c in checks if c["check"] == "animation_atlas")
+        assert atlas["passed"] is False
+        assert "outside atlas" in atlas["detail"]
+
+    def test_missing_atlas_png_fails(self, tmp_path: Path) -> None:
+        anim = _write_strip(tmp_path, [(8, 10, 24, 31)] * 3)
+        self._atlas_json(tmp_path, n_rects=3)
+        (tmp_path / "sprite/enemy/x/atlas.png").unlink()
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        atlas = next(c for c in checks if c["check"] == "animation_atlas")
+        assert atlas["passed"] is False
+        assert "missing on disk" in atlas["detail"]
+
+
 class TestFakeResponder:
     def test_default_level_passes_all_dimensions(self) -> None:
         verdict = json.loads(
@@ -441,6 +642,300 @@ class TestSpriteChecks:
         assert f"min {SPRITE_MIN_FILL:.2f}" in bbox["detail"]
 
 
+def _bare_ctx(tmp_path: Path, **bible_extra) -> SimpleNamespace:
+    """A minimal run_code_checks context: empty bible collections plus
+    whatever ``bible_extra`` injects (props, backdrops, ...)."""
+    from canon.adapters import JsonOutputAdapter
+
+    bible = SimpleNamespace(
+        stages={}, levels={}, tilesets={}, enemy_definitions={},
+        items={}, player=None, props={}, backdrops={},
+    )
+    for key, value in bible_extra.items():
+        setattr(bible, key, value)
+    return SimpleNamespace(adapter=JsonOutputAdapter(tmp_path), bible=bible)
+
+
+class TestVfxPropMinFill:
+    def test_wispy_vfx_prop_passes_relaxed_fill(self, tmp_path: Path) -> None:
+        """dust/splash/sparkle are mostly empty space BY DESIGN — their
+        sprite_bbox gate relaxes to VFX_MIN_FILL while gameplay props
+        (and enemies, per TestSpriteChecks) keep SPRITE_MIN_FILL."""
+        from canon.bible.platformer import StageProps
+
+        assert VFX_MIN_FILL < SPRITE_MIN_FILL
+        sparse = _png((32, 32), (0, 0, 4, 4))  # bbox span 5/32 ≈ 0.16
+        prop_paths = {}
+        for name in ("sparkle", "checkpoint"):
+            rel = f"sprite/prop/s/{name}.png"
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_bytes(sparse)
+            prop_paths[name] = rel
+        props = StageProps(
+            artifact_id="props:s", stage_id="s", prop_paths=prop_paths
+        )
+        ctx = _bare_ctx(tmp_path, props={"s": props})
+        checks = run_code_checks(ctx, "s")
+        bbox = {c["subject"]: c for c in checks if c["check"] == "sprite_bbox"}
+        assert bbox["sprite/prop/s/sparkle.png"]["passed"] is True
+        assert f"min {VFX_MIN_FILL:.2f}" in bbox["sprite/prop/s/sparkle.png"]["detail"]
+        assert bbox["sprite/prop/s/checkpoint.png"]["passed"] is False
+
+
+class TestBackdropTiling:
+    def test_seamless_passes_hard_seam_fails_and_flips_review(
+        self, tmp_path: Path
+    ) -> None:
+        """backdrop_tiling compares a band's left/right edge columns (the
+        horizontal wrap every consumer draws); a hard seam fails and
+        flips the Backdrop's review gate, a clean recompute flips it
+        back."""
+        from PIL import Image
+
+        from canon.bible.platformer import Backdrop
+
+        (tmp_path / "backdrop/s").mkdir(parents=True)
+        seamless = Image.new("RGB", (64, 32), (80, 90, 100))
+        seamless.save(tmp_path / "backdrop/s/band_0.png")
+        seam = Image.new("RGB", (64, 32), (0, 0, 0))
+        for yy in range(32):
+            for xx in range(32, 64):
+                seam.putpixel((xx, yy), (255, 255, 255))
+        seam.save(tmp_path / "backdrop/s/band_1.png")
+
+        backdrop = Backdrop(
+            artifact_id="backdrop:s", stage_id="s",
+            band_paths=["backdrop/s/band_0.png", "backdrop/s/band_1.png"],
+            depths=[0.2, 0.5],
+        )
+        ctx = _bare_ctx(tmp_path, backdrops={"s": backdrop})
+        checks = run_code_checks(ctx, "s")
+        tiling = {
+            c["subject"]: c for c in checks if c["check"] == "backdrop_tiling"
+        }
+        assert set(tiling) == set(backdrop.band_paths)
+        assert all(c["target"] == "backdrop:s" for c in tiling.values())
+        assert tiling["backdrop/s/band_0.png"]["passed"] is True
+        assert tiling["backdrop/s/band_1.png"]["passed"] is False
+        assert f"tolerance {BACKDROP_SEAM_TOLERANCE:.0f}" in (
+            tiling["backdrop/s/band_1.png"]["detail"]
+        )
+        # The review gate covers backdrops: fail → needs-rework, and the
+        # idempotent recompute approves once only passing checks remain.
+        _flip_review_status(ctx, checks)
+        assert backdrop.review_status == "needs-rework"
+        _flip_review_status(ctx, [tiling["backdrop/s/band_0.png"]])
+        assert backdrop.review_status == "approved"
+
+    def test_absent_backdrop_adds_no_records(self, tmp_path: Path) -> None:
+        checks = run_code_checks(_bare_ctx(tmp_path), "s")
+        assert not any(c["check"] == "backdrop_tiling" for c in checks)
+
+
+class TestPaletteDriftMeter:
+    """Ticket 6 — the pre-conform palette drift METER + the 16x floor
+    dedupe. The meter reads the tileset phase's snapshot of how far each RAW
+    generated tile sat from the role hex BEFORE conform_to_palette repaired
+    it; a spike warns but NEVER gates approval (the name-skip contract)."""
+
+    def test_meter_reads_snapshot_and_flags_only_spikes(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _bare_ctx(tmp_path)
+        (tmp_path / "review/s").mkdir(parents=True)
+        (tmp_path / "review/s/palette_drift.json").write_text(
+            json.dumps({"floor": 30.0, "lava": 150.0})
+        )
+        checks = run_code_checks(ctx, "s")
+        drift = {
+            c["subject"]: c for c in checks if c["check"] == "palette_drift"
+        }
+        assert set(drift) == {"floor", "lava"}
+        assert drift["floor"]["passed"] is True
+        assert drift["lava"]["passed"] is False
+        assert "spike at 96" in drift["lava"]["detail"]
+        assert all(
+            c["target"] == "tileset:s" for c in drift.values()
+        )
+
+    def test_absent_snapshot_is_silent(self, tmp_path: Path) -> None:
+        checks = run_code_checks(_bare_ctx(tmp_path), "s")
+        assert not any(c["check"] == "palette_drift" for c in checks)
+
+    def test_drift_spike_never_flips_review_status(
+        self, tmp_path: Path
+    ) -> None:
+        # The meter is advisory: even a hand-corrupted failing record aimed
+        # straight at the tileset must not demote it (composite_contrast
+        # precedent — the skip is the contract).
+        from canon.bible.platformer import Tileset
+
+        tileset = Tileset(artifact_id="tileset:s", stage_id="s")
+        tileset.review_status = "approved"
+        ctx = _bare_ctx(tmp_path, tilesets={"s": tileset})
+        record = {
+            "check": "palette_drift", "target": "tileset:s",
+            "subject": "floor", "passed": False, "detail": "spike",
+        }
+        _flip_review_status(ctx, [record])
+        assert tileset.review_status == "approved"
+
+    def test_floor_variants_dedupe_to_one_record(self, tmp_path: Path) -> None:
+        # 16 mean-preserving shaded copies of ONE generated square used to
+        # yield 16 structurally-identical records — now one per tile NAME.
+        from PIL import Image
+
+        from canon.bible.platformer import Tileset, TileSlot
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        by = {t.name: t for t in DEFAULT_TILES.tiles}
+        palette = {
+            by["floor"].color_role: "#405060",
+            by["wall"].color_role: "#605040",
+        }
+        hexes = ["#405060", "#405060", "#605040"]
+        sheet = Image.new("RGBA", (96, 32))
+        for i, hx in enumerate(hexes):
+            color = tuple(
+                int(hx.lstrip("#")[j : j + 2], 16) for j in (0, 2, 4)
+            ) + (255,)
+            sheet.paste(Image.new("RGBA", (32, 32), color), (i * 32, 0))
+        (tmp_path / "tileset/s").mkdir(parents=True)
+        sheet.save(tmp_path / "tileset/s/sheet.png")
+        tileset = Tileset(
+            artifact_id="tileset:s", stage_id="s",
+            tilesheet_path="tileset/s/sheet.png",
+            palette=palette,
+            slots=[
+                TileSlot(
+                    index=0, tile_type=1, name="floor",
+                    px_region=(0, 0, 32, 32), collision="solid",
+                    params={"autotile_mask": 0},
+                ),
+                TileSlot(
+                    index=1, tile_type=1, name="floor",
+                    px_region=(32, 0, 32, 32), collision="solid",
+                    params={"autotile_mask": 5},
+                ),
+                TileSlot(
+                    index=2, tile_type=3, name="wall",
+                    px_region=(64, 0, 32, 32), collision="solid",
+                ),
+            ],
+        )
+        ctx = _bare_ctx(tmp_path, tilesets={"s": tileset})
+        checks = run_code_checks(ctx, "s")
+        palette_subjects = [
+            c["subject"] for c in checks if c["check"] == "palette_conformance"
+        ]
+        assert palette_subjects == ["floor", "wall"]  # mask-5 deduped away
+
+
+class TestVerdictDemotesReviewStatus:
+    """postmortem ticket 4: a failing VLM per-level verdict that names an
+    asset in its sanitized ``suggested_regen_targets`` demotes that asset's
+    review_status (any single verdict is enough) — before this the review
+    gate was fed CODE checks only, so a backdrop the judge blamed still read
+    'approved'. Oracle = the real plat_ember_paid l4 verdict (readability
+    FAILED, blamed backdrop:cinder_depths + three enemies)."""
+
+    def _ctx(self, tmp_path: Path):
+        from canon.bible.platformer import Backdrop, EnemyDefinition
+
+        backdrop = Backdrop(
+            artifact_id="backdrop:cinder_depths", stage_id="cinder_depths",
+            band_paths=[], depths=[],
+        )
+        enemy = EnemyDefinition(
+            enemy_id="ember_sentinel", archetype="sentry", size=1.0,
+        )
+        return _bare_ctx(
+            tmp_path,
+            backdrops={"cinder_depths": backdrop},
+            enemy_definitions={"ember_sentinel": enemy},
+        )
+
+    def _paid_l4_levels(self) -> dict:
+        # verbatim shape of plat_ember_paid/review/cinder_depths/qa_report.json
+        return {
+            "l4": {
+                "verdicts": {
+                    "fidelity": {"passed": True},
+                    "style_coherence": {"passed": True},
+                    "readability": {"passed": False},
+                },
+                "suggested_regen_targets": [
+                    "backdrop:cinder_depths", "enemy:ember_sentinel",
+                ],
+            }
+        }
+
+    def test_failing_verdict_demotes_backdrop_and_enemy(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = self._ctx(tmp_path)
+        _flip_review_status(ctx, [], self._paid_l4_levels())
+        assert ctx.bible.backdrops["cinder_depths"].review_status == (
+            "needs-rework"
+        )
+        assert ctx.bible.enemy_definitions["ember_sentinel"].review_status == (
+            "needs-rework"
+        )
+
+    def test_all_passing_verdict_leaves_approved(self, tmp_path: Path) -> None:
+        ctx = self._ctx(tmp_path)
+        levels = {
+            "l4": {
+                "verdicts": {"readability": {"passed": True}},
+                "suggested_regen_targets": [],
+            }
+        }
+        _flip_review_status(ctx, [], levels)
+        # no code checks, no failing verdict → nothing touches the gate,
+        # so review_status stays at its generated default (draft)
+        assert ctx.bible.backdrops["cinder_depths"].review_status == "draft"
+
+    def test_error_entry_is_skipped(self, tmp_path: Path) -> None:
+        ctx = self._ctx(tmp_path)
+        levels = {
+            "l4": {"error": "images missing",
+                   "suggested_regen_targets": ["backdrop:cinder_depths"]}
+        }
+        _flip_review_status(ctx, [], levels)
+        assert ctx.bible.backdrops["cinder_depths"].review_status == "draft"
+
+    def test_verdict_overrides_a_passing_code_check(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = self._ctx(tmp_path)
+        passing = {
+            "check": "backdrop_tiling", "target": "backdrop:cinder_depths",
+            "subject": "band_0", "passed": True, "detail": "",
+        }
+        _flip_review_status(ctx, [passing], self._paid_l4_levels())
+        # merge semantics: a failing verdict forces False even though the
+        # code check passed
+        assert ctx.bible.backdrops["cinder_depths"].review_status == (
+            "needs-rework"
+        )
+
+    def test_rejected_is_never_overwritten(self, tmp_path: Path) -> None:
+        ctx = self._ctx(tmp_path)
+        ctx.bible.backdrops["cinder_depths"].review_status = "rejected"
+        _flip_review_status(ctx, [], self._paid_l4_levels())
+        assert ctx.bible.backdrops["cinder_depths"].review_status == "rejected"
+
+    def test_demotion_is_idempotent_across_runs(self, tmp_path: Path) -> None:
+        ctx = self._ctx(tmp_path)
+        _flip_review_status(ctx, [], self._paid_l4_levels())
+        # a carried-unchanged verdict re-derives the identical blame set,
+        # so a second recompute lands the same status (no oscillation)
+        _flip_review_status(ctx, [], self._paid_l4_levels())
+        assert ctx.bible.backdrops["cinder_depths"].review_status == (
+            "needs-rework"
+        )
+
+
 class TestCodeChecksOnSliceTree:
     def test_placeholder_tree_palette_conforms(self, tmp_path: Path) -> None:
         """The placeholder sheet is painted with the exact palette hexes —
@@ -449,7 +944,14 @@ class TestCodeChecksOnSliceTree:
         ctx = _run_slice(tmp_path / "run")
         checks = run_code_checks(ctx, "ashen_depths")
         assert checks, "expected palette checks for the tileset slots"
-        assert all(c["check"] == "palette_conformance" for c in checks)
+        # The coverage LEDGER record (graphics arc) and the ADVISORY
+        # composite_contrast block (RB3) are informational and always
+        # present; everything else here is palette conformance.
+        assert all(
+            c["check"] in ("palette_conformance", "coverage", "composite_contrast")
+            for c in checks
+        )
+        assert any(c["check"] == "coverage" for c in checks)
         assert all(c["passed"] for c in checks)
 
     def test_sprite_checks_join_the_report(self, tmp_path: Path) -> None:
@@ -464,6 +966,218 @@ class TestCodeChecksOnSliceTree:
         by_check = {(c["check"], c["target"]): c for c in checks}
         assert by_check[("sprite_file", f"enemy:{enemy_id}")]["passed"] is True
         assert by_check[("sprite_bbox", f"enemy:{enemy_id}")]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Composite contrast (RB3 — ADVISORY-ONLY by user lock: never blocks)
+# ---------------------------------------------------------------------------
+
+
+_COMPO_PX = 16
+_COMPO_GRID = (24, 12)  # cells
+
+
+def _composite_ctx(
+    tmp_path: Path,
+    entities: list[tuple[int, int]],
+    *,
+    bg: str = "#3a3a80",
+    enemy: EnemyDefinition | None = None,
+    items: list[tuple[int, int]] | None = None,
+    level_ids: tuple[str, ...] = ("l1",),
+    secret_rooms: tuple[str, ...] = (),
+    skip_png: tuple[str, ...] = (),
+) -> SimpleNamespace:
+    """A minimal one-stage ctx whose skinned renders are FLAT ``bg``
+    images — placements read against exactly that color, so camouflage
+    is a fixture choice, not an emergent render. The default enemy/item
+    placeholder MATCHES the default bg (fully camouflaged)."""
+    from PIL import Image
+
+    from canon.adapters import JsonOutputAdapter
+    from canon.bible.platformer import ItemDefinition
+
+    enemy = enemy or EnemyDefinition(
+        enemy_id="shade", name="Shade", archetype="patroller", size=1.0,
+        stats={"placeholder_color": "#3a3a80"},
+        behavior={"patrol_range": 4},
+    )
+    item = ItemDefinition(
+        item_id="coin", name="Coin", stats={"placeholder_color": "#3a3a80"}
+    )
+    w, h = _COMPO_GRID
+    levels: dict[str, SimpleNamespace] = {}
+    for lid in (*level_ids, *secret_rooms):
+        levels[lid] = SimpleNamespace(
+            level_id=lid, grid_width=w, grid_height=h,
+            entities=[
+                SimpleNamespace(
+                    ref=f"enemy:{enemy.enemy_id}", pos=pos, overrides={}
+                )
+                for pos in entities
+            ],
+            items=[
+                SimpleNamespace(ref="item:coin", pos=pos, overrides={})
+                for pos in (items or [])
+            ],
+            secret_rooms=list(secret_rooms) if lid == level_ids[0] else [],
+        )
+        if lid not in skip_png:
+            path = tmp_path / f"review/s/{lid}_skinned.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            rgb = tuple(int(bg.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4))
+            Image.new("RGB", (w * _COMPO_PX, h * _COMPO_PX), rgb).save(path)
+    bible = SimpleNamespace(
+        stages={"s": SimpleNamespace(stage_id="s", level_ids=list(level_ids))},
+        levels=levels,
+        tilesets={
+            "s": SimpleNamespace(
+                slots=[SimpleNamespace(px_region=(0, 0, _COMPO_PX, _COMPO_PX))]
+            )
+        },
+        enemy_definitions={enemy.enemy_id: enemy},
+        items={"coin": item},
+        player=None, props={}, backdrops={},
+    )
+    return SimpleNamespace(adapter=JsonOutputAdapter(tmp_path), bible=bible)
+
+
+def _composite(ctx: SimpleNamespace) -> list[dict]:
+    from examples.platformer_pack.graphics import DEFAULT_GRAPHICS
+    from examples.platformer_pack.tiles import DEFAULT_TILES
+    from examples.platformer_pack.variants import DEFAULT_VARIANTS
+
+    return _composite_contrast_checks(
+        ctx, "s", DEFAULT_TILES, DEFAULT_GRAPHICS, DEFAULT_VARIANTS
+    )
+
+
+class TestCompositeContrast:
+    """The advisory-only contract is STRUCTURAL, not conventional: every
+    record ships passed=True hard-coded, and the check name is skipped
+    outright by _flip_review_status and derive_qa_warnings — a corrupted
+    record can never block, flip, or warn."""
+
+    def test_camouflaged_placement_flags_advisory_record(
+        self, tmp_path: Path
+    ) -> None:
+        checks = _composite(_composite_ctx(tmp_path, [(10, 8)]))
+        placement = [c for c in checks if c["target"] == "l1"]
+        assert len(placement) == 1
+        rec = placement[0]
+        assert rec["check"] == "composite_contrast"
+        assert rec["subject"] == "enemy:shade@(10,8)"
+        assert rec["passed"] is True  # hard-coded, ADVISORY by construction
+        assert rec["detail"].startswith("ADVISORY — review l1 near (10,8)")
+        assert f"floor {COMPOSITE_MIN_LUMA:.0f}" in rec["detail"]
+        assert f"floor {COMPOSITE_MIN_HUE_SEP:.0f}" in rec["detail"]
+        # patroller: strip = patrol_range (4) cells around column 10
+        assert "patrol strip x in [6,14] cells" in rec["detail"]
+
+    def test_readable_placement_yields_no_record(self, tmp_path: Path) -> None:
+        checks = _composite(_composite_ctx(tmp_path, [(10, 8)], bg="#e8e8f0"))
+        assert [c["subject"] for c in checks] == ["composite readability ledger"]
+        assert "sampled 1 placement(s) across 1 level(s); 0 flagged" in (
+            checks[0]["detail"]
+        )
+
+    def test_hue_separation_alone_clears_the_flag(self, tmp_path: Path) -> None:
+        # deltaL ~9 (under the floor) but red-vs-teal hue separation ~180:
+        # camouflage needs BOTH floors broken, so no record.
+        enemy = EnemyDefinition(
+            enemy_id="shade", archetype="patroller", size=1.0,
+            stats={"placeholder_color": "#a03030"},
+            behavior={"patrol_range": 4},
+        )
+        checks = _composite(
+            _composite_ctx(tmp_path, [(10, 8)], bg="#1a6060", enemy=enemy)
+        )
+        assert [c["subject"] for c in checks] == ["composite readability ledger"]
+
+    def test_ledger_always_present_even_on_bare_tree(
+        self, tmp_path: Path
+    ) -> None:
+        checks = run_code_checks(_bare_ctx(tmp_path), "s")
+        ledger = [c for c in checks if c["check"] == "composite_contrast"]
+        assert len(ledger) == 1
+        assert ledger[0]["target"] == "stage:s"
+        assert ledger[0]["passed"] is True
+        assert "sampled 0 placement(s) across 0 level(s); 0 flagged" in (
+            ledger[0]["detail"]
+        )
+
+    def test_ledger_counts_enemies_and_items(self, tmp_path: Path) -> None:
+        checks = _composite(
+            _composite_ctx(tmp_path, [(4, 8), (10, 8)], items=[(16, 5)])
+        )
+        # items sample too (1-cell ring), against the same camouflaged bg
+        assert "item:coin@(16,5)" in [c["subject"] for c in checks]
+        assert "sampled 3 placement(s) across 1 level(s); 3 flagged" in (
+            checks[-1]["detail"]
+        )
+
+    def test_sentry_margin_is_one_cell(self, tmp_path: Path) -> None:
+        sentry = EnemyDefinition(
+            enemy_id="shade", archetype="sentry", size=1.0,
+            stats={"placeholder_color": "#3a3a80"},
+            behavior={"patrol_range": 5},  # ignored: sentries hold position
+        )
+        checks = _composite(_composite_ctx(tmp_path, [(10, 8)], enemy=sentry))
+        rec = next(c for c in checks if c["target"] == "l1")
+        assert "patrol strip x in [9,11] cells" in rec["detail"]
+
+    def test_level_edge_samples_one_sided(self, tmp_path: Path) -> None:
+        # column 0: no left sub-crop exists — the right side alone still
+        # measures (and flags) the placement instead of skipping it
+        checks = _composite(_composite_ctx(tmp_path, [(0, 8)]))
+        rec = next(c for c in checks if c["target"] == "l1")
+        assert rec["subject"] == "enemy:shade@(0,8)"
+        assert "patrol strip x in [0,4] cells" in rec["detail"]
+
+    def test_missing_skinned_counted_and_skipped(self, tmp_path: Path) -> None:
+        checks = _composite(
+            _composite_ctx(
+                tmp_path, [(10, 8)], level_ids=("l1", "l2"), skip_png=("l2",)
+            )
+        )
+        assert not any(c["target"] == "l2" for c in checks)
+        assert "skinned missing for: l2" in checks[-1]["detail"]
+        assert "sampled 1 placement(s) across 1 level(s); 1 flagged" in (
+            checks[-1]["detail"]
+        )
+
+    def test_secret_room_levels_are_sampled(self, tmp_path: Path) -> None:
+        checks = _composite(
+            _composite_ctx(tmp_path, [(10, 8)], secret_rooms=("l1r1",))
+        )
+        assert [
+            c["target"] for c in checks if c["target"] != "stage:s"
+        ] == ["l1", "l1r1"]
+        assert "across 2 level(s)" in checks[-1]["detail"]
+
+    def test_never_a_manifest_warning_even_hand_corrupted(
+        self, tmp_path: Path
+    ) -> None:
+        checks = _composite(_composite_ctx(tmp_path, [(10, 8)]))
+        report = {"stage_id": "s", "code_checks": checks, "levels": {}}
+        assert derive_qa_warnings(report) == []
+        # structural, not conventional: hand-corrupted passed=False
+        # composite records STILL derive nothing
+        corrupted = [dict(c, passed=False) for c in checks]
+        assert derive_qa_warnings(
+            {"stage_id": "s", "code_checks": corrupted, "levels": {}}
+        ) == []
+
+    def test_review_status_untouched(self, tmp_path: Path) -> None:
+        ctx = _composite_ctx(tmp_path, [(10, 8)])
+        enemy = ctx.bible.enemy_definitions["shade"]
+        enemy.review_status = "approved"
+        checks = _composite(ctx)
+        # even a corrupted failing record aimed straight at the enemy
+        # must not flip the review gate — the name-skip is the contract
+        corrupted = dict(checks[0], passed=False, target="enemy:shade")
+        _flip_review_status(ctx, [*checks, corrupted])
+        assert enemy.review_status == "approved"
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +1263,8 @@ class TestEndToEnd:
         report = json.loads((out / "review/ashen_depths/qa_report.json").read_text())
         assert report["stage_id"] == "ashen_depths"
         assert report["vlm_model"] == "fake-vlm"
-        assert sorted(report["levels"]) == ["l1", "l2", "l3"]
+        # Every level INCLUDING rolled secret rooms gets a QA row.
+        assert sorted(report["levels"]) == sorted(ctx.bible.levels)
         for entry in report["levels"].values():
             assert set(entry["verdicts"]) == set(DIMENSIONS)
         assert report["levels"]["l2"]["verdicts"]["readability"]["passed"] is False
@@ -595,19 +1310,24 @@ class TestEndToEnd:
 
     def test_unvalidatable_verdict_is_loud_not_fatal(self, tmp_path: Path) -> None:
         out = tmp_path / "run"
-        _run_slice(out, vlm_judge=FakeVLMBackend(lambda prompt, images: "not json"))
+        ctx = _run_slice(
+            out, vlm_judge=FakeVLMBackend(lambda prompt, images: "not json")
+        )
         report = json.loads((out / "review/ashen_depths/qa_report.json").read_text())
         assert all(
             entry["error"] == "verdict never validated after retries"
             for entry in report["levels"].values()
         )
         warnings = json.loads((out / "manifest.json").read_text())["warnings"]
-        assert sum(1 for w in warnings if "no verdict" in w) == 3
+        assert sum(1 for w in warnings if "no verdict" in w) == len(
+            ctx.bible.levels
+        )
 
     def test_judge_sees_five_images_per_level(self, tmp_path: Path) -> None:
         judge = _fake_judge()
-        _run_slice(tmp_path / "run", vlm_judge=judge)
-        assert len(judge.calls) == 3  # one judgment per level, no retries
+        ctx = _run_slice(tmp_path / "run", vlm_judge=judge)
+        # One judgment per level (secret rooms included), no retries.
+        assert len(judge.calls) == len(ctx.bible.levels)
         for call in judge.calls:
             # block + skinned + legend + the two play-scale crops (QA v2)
             assert len(call["image_sizes"]) == 5

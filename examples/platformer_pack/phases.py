@@ -24,6 +24,7 @@ from canon.pipeline.retry import retry_with_feedback
 from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
+from examples.platformer_pack import color as color_math
 
 SCHEMAS_DIR = Path(__file__).parent / "schemas"
 PROMPT_VERSION = "slice-1"
@@ -161,22 +162,76 @@ def _in_band(hue: float, band: tuple[float, float]) -> bool:
     return (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
 
 
+#: Minimum |luminance| between an actor's placeholder color and every
+#: stage background — the composite-readability floor (first paid run:
+#: a dark-navy beetle vanished against a near-black backdrop). Mirrors
+#: style.MIN_CONTRAST (not imported — cycle).
+ACTOR_BG_MIN_LUMA = 40.0
+
+
 def placeholder_color(
     index: int,
     reserved: tuple[tuple[float, float], ...] = DEFAULT_RESERVED_HUES,
+    background_lums: tuple[float, ...] = (),
 ) -> str:
     """Deterministic, well-spaced enemy colors: golden-angle hue steps
     starting at green. ``reserved`` hue bands (derived from the game's
     ACTUAL hazard/volume palette hues since the style agent — red/blue
     only as the palette-less fallback) get nudged out so enemies never
-    read as hazards or volumes."""
+    read as hazards or volumes. ``background_lums`` (each stage
+    background's luminance) enforces ``ACTOR_BG_MIN_LUMA`` via a
+    hue-preserving lightness shift — an HSV value walk can't reach the
+    floor for every hue, the closed-form lerp always can."""
     hue = (140.0 + index * 137.508) % 360.0
     for _ in range(12):  # bounded: bands can't cover the whole wheel
         if not any(_in_band(hue, band) for band in reserved):
             break
         hue = (hue + 47.0) % 360.0
     r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.78, 0.95)
-    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    hex_color = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    if not background_lums:
+        return hex_color
+    lum = color_math.luminance(hex_color)
+    if min(abs(lum - bg) for bg in background_lums) >= ACTOR_BG_MIN_LUMA:
+        return hex_color
+    up = max(background_lums) + ACTOR_BG_MIN_LUMA + 2
+    down = min(background_lums) - ACTOR_BG_MIN_LUMA - 2
+    if up <= 255.0:
+        target = up
+    elif down >= 0.0:
+        target = down
+    else:  # backgrounds span the range: take the side with more room
+        target = up if (255.0 - max(background_lums)) >= min(
+            background_lums
+        ) else down
+        target = min(255.0, max(0.0, target))
+    return color_math.shift_luminance(hex_color, target)
+
+
+def _ctx_palettes(ctx: Any) -> dict[str, dict[str, str]]:
+    """Every stage palette in ctx (tests/legacy: the single palette)."""
+    palettes = ctx.artifacts.get("palettes", {})
+    if not palettes:
+        single = ctx.artifacts.get("palette")
+        palettes = {"": single} if single else {}
+    return palettes
+
+
+def background_luminances(
+    palettes: dict[str, dict[str, str]], tiles: Any
+) -> tuple[float, ...]:
+    """Each stage background's luminance, sorted + deduped (deterministic)
+    — the values actor placeholders must clear by ``ACTOR_BG_MIN_LUMA``.
+    Degrades to () when no palette carries the background role."""
+    empty = next((t for t in tiles.tiles if t.category == "empty"), None)
+    if empty is None or not empty.color_role:
+        return ()
+    lums = {
+        round(color_math.luminance(palette[empty.color_role]), 4)
+        for palette in palettes.values()
+        if empty.color_role in palette
+    }
+    return tuple(sorted(lums))
 
 
 def reserved_hue_bands(
@@ -332,6 +387,7 @@ class StagePhase:
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         ctx.artifacts.setdefault("level_briefs", {})
         ctx.artifacts.setdefault("level_views", {})
+        ctx.artifacts.setdefault("level_rules", {})
         ctx.artifacts.setdefault("roster_briefs", {})
         for number, stage_id in enumerate(stage_ids, start=1):
             data = llm_json(
@@ -359,6 +415,17 @@ class StagePhase:
             # standard (the game-global framing). Deliberate exceptions only.
             views = [str(v) for v in data.get("level_views") or []]
             views = (views + ["standard"] * self.num_levels)[: self.num_levels]
+            # Per-level RULE-override proposals (combat/level-picks arc):
+            # optional, one dict per level, most empty — validated
+            # FAIL-CLOSED against the pack vocabulary at stamp time (a
+            # design choice the LLM makes; the bounds are code's).
+            rule_flags = [
+                dict(r) if isinstance(r, dict) else {}
+                for r in (data.get("level_rules") or [])
+            ]
+            rule_flags = (rule_flags + [{}] * self.num_levels)[
+                : self.num_levels
+            ]
             first = (number - 1) * self.num_levels
             level_ids = [f"l{first + i + 1}" for i in range(self.num_levels)]
 
@@ -384,6 +451,7 @@ class StagePhase:
             ctx.bible.stages[stage_id] = stage
             ctx.artifacts["level_briefs"].update(dict(zip(level_ids, briefs)))
             ctx.artifacts["level_views"].update(dict(zip(level_ids, views)))
+            ctx.artifacts["level_rules"].update(dict(zip(level_ids, rule_flags)))
             ctx.artifacts["roster_briefs"][stage_id] = str(data["roster_brief"])
             logger.info(
                 "StagePhase planned stage %r (%d/%d, theme %r): levels %s; "
@@ -408,6 +476,10 @@ class StagePhase:
 #: row; ``float`` drifts diagonally through the body.
 SWIM_STYLES: tuple[tuple[str, int], ...] = (
     ("within", 2), ("surface", 1), ("float", 1),
+    # Unbounded cruiser (water arc): swims a straight line across the
+    # whole body of water, flipping only at walls/water's edge — no
+    # patrol tether (the Cheep-Cheep).
+    ("cruise", 1),
 )
 
 #: Chance (out of the weights' total) that a COMMON / UNCOMMON enemy
@@ -462,12 +534,8 @@ class EnemyGeneratorPhase:
     def _reserved_bands(self, ctx: Any) -> tuple[tuple[float, float], ...]:
         """Union of every stage palette's hazard/volume hue bands (enemy
         colors must read against ALL biomes — commons travel)."""
-        palettes = ctx.artifacts.get("palettes", {})
-        if not palettes:  # tests / single-palette legacy path
-            single = ctx.artifacts.get("palette")
-            palettes = {"": single} if single else {}
         bands: list[tuple[float, float]] = []
-        for palette in palettes.values():
+        for palette in _ctx_palettes(ctx).values():
             bands.extend(reserved_hue_bands(palette, self.tiles))
         return tuple(dict.fromkeys(bands)) or DEFAULT_RESERVED_HUES
 
@@ -488,6 +556,7 @@ class EnemyGeneratorPhase:
             }
         seed = str(getattr(ctx.config, "seed", ""))
         reserved = self._reserved_bands(ctx)
+        bg_lums = background_luminances(_ctx_palettes(ctx), self.tiles)
         seen_ids: set[str] = set()
         used_names: list[str] = []
 
@@ -518,6 +587,15 @@ class EnemyGeneratorPhase:
                 swim_style = derive_rng(
                     seed, f"{self.name}:swim", i
                 ).choices(styles, weights=weights)[0]
+            # Hop tuning (combat/level-picks arc): archetype-dependent
+            # params can't live in the schema yet — rolled here like
+            # swim_style, on an independent key.
+            hop_height = 0
+            hop_period_s = 0.0
+            if skeleton["archetype"] == "hopper":
+                hop_rng = derive_rng(seed, f"{self.name}:hop", i)
+                hop_height = int(hop_rng.randint(2, 3))
+                hop_period_s = round(0.8 + 0.8 * float(hop_rng.random()), 2)
             # Home = the first habitat biome's stage (theme + fauna brief
             # context for the prompt). Worldwide creatures are named for
             # the WORLD — no single biome's fauna brief (the first run
@@ -595,6 +673,9 @@ class EnemyGeneratorPhase:
             }
             if swim_style:
                 behavior["swim_style"] = swim_style
+            if hop_height:
+                behavior["hop_height"] = hop_height
+                behavior["hop_period_s"] = hop_period_s
             enemy = EnemyDefinition(
                 artifact_id=make_artifact_id("enemy", enemy_id),
                 enemy_id=enemy_id,
@@ -611,7 +692,9 @@ class EnemyGeneratorPhase:
                     "damage": skeleton["damage"],
                     "speed": skeleton["speed"],
                     "flavor": str(data.get("flavor", "")),
-                    "placeholder_color": placeholder_color(i, reserved),
+                    "placeholder_color": placeholder_color(
+                        i, reserved, bg_lums
+                    ),
                 },
                 behavior=behavior,
                 # Ecology edges: the world, plus every habitat stage —
@@ -718,10 +801,16 @@ class ItemGeneratorPhase:
     GUARANTEED_KINDS = ("coin", "heal")
 
     def __init__(
-        self, count: int = 5, schema_path: str | Path | None = None
+        self,
+        count: int = 5,
+        schema_path: str | Path | None = None,
+        tiles: Any = None,
     ) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
         self.count = count
         self.schema_path = Path(schema_path or SCHEMAS_DIR / "item.json")
+        self.tiles = tiles or DEFAULT_TILES
 
     #: Rolled params that ride on the definition when non-zero.
     _PARAM_FIELDS = ("duration_s", "heal_amount", "coin_value", "boost_mult")
@@ -732,6 +821,7 @@ class ItemGeneratorPhase:
         spec_raw = json.loads(self.schema_path.read_text())
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         seed = str(getattr(ctx.config, "seed", ""))
+        bg_lums = background_luminances(_ctx_palettes(ctx), self.tiles)
         seen_ids: set[str] = set()
         used_names: list[str] = []
 
@@ -792,7 +882,9 @@ class ItemGeneratorPhase:
                     "flavor": str(data.get("flavor", "")),
                     # Offset past the enemy pool's golden-angle walk so
                     # item swatches never collide with roster colors.
-                    "placeholder_color": placeholder_color(i + 40),
+                    "placeholder_color": placeholder_color(
+                        i + 40, DEFAULT_RESERVED_HUES, bg_lums
+                    ),
                 },
                 parents=[make_artifact_id("world")],
             )

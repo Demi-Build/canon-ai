@@ -17,11 +17,35 @@ import json
 from canon.llm.request import LLMRequest
 from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.effects import describe_vocabulary as _effects_vocabulary
-from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
-from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.movement import (
+    PlayerMovementSpec,
+    max_dx_for_rise,
+    run_jump_width,
+)
+from examples.platformer_pack.rules import (
+    DEFAULT_OVERRIDE_VOCABULARY,
+    DEFAULT_RULES,
+    GameRules,
+)
 from examples.platformer_pack.sections import SECTION_OVERLAP
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
+
+
+def _override_vocabulary_line() -> str:
+    """The per-level rule-override menu the stage prompt offers — derived
+    from the pack's closed vocabulary (rule_overrides.json), so a game
+    that edits the data reshapes the offer with zero prompt code."""
+    parts = []
+    for key, spec in DEFAULT_OVERRIDE_VOCABULARY.items():
+        kind = str(spec.get("type", "float"))
+        band = spec.get("band")
+        desc = f'"{key}" ({kind}'
+        if band is not None:
+            desc += f" {band[0]}..{band[1]}"
+        desc += ")"
+        parts.append(desc)
+    return ", ".join(parts) + "."
 
 # Per-task system prompts: every generator is TOLD what artifact it is
 # producing and its exact field/arg contract, so the model stops inventing
@@ -93,7 +117,17 @@ def _volume_blurb(tile) -> str:
 
 def _physics_guidance(movement: PlayerMovementSpec) -> str:
     """The RUN-UP MOMENTUM physics paragraph shared by the whole-level and
-    per-section layout prompts (ends with a newline)."""
+    per-section layout prompts (ends with a newline). Every number is
+    DERIVED from ``movement`` — per-level overrides flow through — and the
+    closing sentence restates the limits in the VALIDATOR'S own vocabulary
+    (foothold-to-foothold), so a rejection reads back in the same units
+    the prompt taught (the paid l7 loop rejected on 'max jump distance 4',
+    a number the prompt had never stated)."""
+    run_jump = run_jump_width(movement)
+    rise_table = ", ".join(
+        f"rise {r} -> {max_dx_for_rise(movement, r)}"
+        for r in range(1, movement.jump_height + 1)
+    )
     return (
         f"Player physics (RUN-UP MOMENTUM): max jump rise "
         f"{movement.jump_height} cells (RISING COSTS RANGE — at full "
@@ -103,17 +137,26 @@ def _physics_guidance(movement: PlayerMovementSpec) -> str:
         f"standing/walking jump clears a gap up to "
         f"{movement.jump_width - 1} columns. A RUNNING jump (the "
         f"player builds speed over ~{int(movement.run_up_cells)} clear "
-        "flat columns) clears up to ~6 columns — but ONLY with that "
-        "runway: a wide gap right after a wall, ledge, or narrow "
-        "platform (no room to build speed) is UNBEATABLE. So keep "
-        f"MOST gaps at most {movement.jump_width - 1} columns (ordinary "
-        "jumps); you MAY sprinkle in the occasional WIDE (4-6 column) "
-        "gap as a deliberate run-and-jump challenge, but ALWAYS give "
+        f"flat columns) clears up to ~{run_jump} columns — but ONLY "
+        "with that runway: a wide gap right after a wall, ledge, or "
+        "narrow platform (no room to build speed) is UNBEATABLE. So "
+        f"keep MOST gaps at most {movement.jump_width - 1} columns "
+        "(ordinary jumps); you MAY sprinkle in the occasional WIDE "
+        f"({movement.jump_width}-{run_jump} column) gap as a deliberate "
+        "run-and-jump challenge, but ALWAYS give "
         f"~{int(movement.run_up_cells)} clear flat columns of runway "
-        "right before it. Any gap wider than ~6 columns needs a "
-        "stepping platform. Each platform step must sit within "
+        f"right before it. Any gap wider than ~{run_jump} columns needs "
+        "a stepping platform. Each platform step must sit within "
         f"{movement.jump_height} rows above the previous foothold, and "
-        "the higher the step the closer it must be.\n"
+        "the higher the step the closer it must be. The validator "
+        "measures FOOTHOLD-TO-FOOTHOLD (takeoff cell to landing cell): "
+        f"max jump distance {movement.jump_width} columns "
+        "foothold-to-foothold, and rising spends it — max columns by "
+        f"rise: {rise_table}. Leave at least 2 open cells ABOVE every "
+        "platform or ledge the player should stand on — never place a "
+        "wall, floor, or block directly on, or one cell above, a one-way "
+        "platform's top (there must be room to jump up INTO it), and keep "
+        "walkable corridors at least 2 cells tall.\n"
     )
 
 
@@ -224,6 +267,12 @@ class PlatformerPrompts:
                 'within a game. Use "vista" ONLY where zooming out is meant '
                 'to inspire (a big reveal), "intimate" ONLY for tight, '
                 "claustrophobic moments], "
+                f'"level_rules": [exactly {num_levels} objects — a per-level '
+                "RULE TWIST, almost always {{}} (empty). Use one ONLY where "
+                "the level's brief begs for it, from this closed menu: "
+                + _override_vocabulary_line()
+                + " Example: a moon-vault level might set "
+                '{"gravity": 20.0}.], '
                 f'"roster_brief": str (what kinds of creatures inhabit this '
                 "biome), "
                 '"effects": [0-2 ambient effect records '
@@ -337,6 +386,8 @@ class PlatformerPrompts:
         rules: GameRules | None = None,
         max_items: int = 24,
         has_box: bool = True,
+        directive: str = "",
+        water_summary: str = "",
         previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
@@ -377,11 +428,19 @@ class PlatformerPrompts:
                 f"Item pool (id, kind, rarity, params): {json.dumps(pool)}\n"
                 f"Standable cells (x, y are grid coords, y from top): "
                 f"{standable_summary}\n"
-                f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
+                + (
+                    "Swimmable water cells (items may FLOAT in water — "
+                    "the player swims through them to collect): "
+                    f"{water_summary}\n"
+                    if water_summary and water_summary != "none"
+                    else ""
+                )
+                + f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
                 f"Exit: {list(exit_) if exit_ else 'unknown'}\n"
                 f"Enemies already placed (id, at): {json.dumps(enemies)}\n"
                 f"{anchors}"
-                "PLACEMENT DOCTRINE:\n"
+                + (f"ROOM DIRECTIVE: {directive}\n" if directive else "")
+                + "PLACEMENT DOCTRINE:\n"
                 "- COINS are FREQUENT and guide the player: lay short "
                 "trails of them along the traversal route (on or just "
                 "above standable cells), arc them over gaps the player "
@@ -738,6 +797,7 @@ class PlatformerPrompts:
         intensity: str = "medium",
         water: str = "optional",
         axis: str = "horizontal",
+        difficulty: int = 1,
         previous: str | None = None,
         feedback: list[str] | None = None,
         predecessor: str | None = None,
@@ -764,10 +824,24 @@ class PlatformerPrompts:
         section (cohesion — what the level has done so far);
         ``successor_occupied`` (regenerations only) describes the shared band
         with the already-built NEXT section, so a regenerated interior
-        section meshes with BOTH neighbours."""
+        section meshes with BOTH neighbours.
+
+        ``difficulty`` (the level's rolled knob) steers CHALLENGE, never the
+        physics: at 3+ one paragraph tells the model to build difficulty
+        from enemies/hazards/precision INSIDE the physics envelope — the
+        paid difficulty-3 traces burned regen rounds on gaps the simulator
+        can never approve."""
         fb = self._layout_feedback(previous, feedback)
         volumes = tiles.named("volume")
         ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
+        challenge = ""
+        if difficulty >= 3:
+            challenge = (
+                "This is a HIGH-DIFFICULTY section: build the challenge "
+                "from enemies, hazards, and precision placement INSIDE "
+                "the numbers above — never from wider gaps or higher "
+                "steps; the simulator rejects anything beyond them.\n"
+            )
         character = (
             f"Section character — {section_name}: {flavor}\n"
             + _bias_guidance(feature_bias)
@@ -947,6 +1021,7 @@ class PlatformerPrompts:
                 + seam_line
                 + handoff
                 + _physics_guidance(movement)
+                + challenge
                 + "\n".join(vocab_lines)
                 + f"\n{fb}\n"
                 "Emit the section as DSL ops, one per line, nothing else:\n"
@@ -980,6 +1055,9 @@ class PlatformerPrompts:
         variants: VariantSet = DEFAULT_VARIANTS,
         rules: GameRules = DEFAULT_RULES,
         combat: CombatSpec = DEFAULT_COMBAT,
+        directive: str = "",
+        seabed_summary: str = "none",
+        hazard_summary: str = "none",
         previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
@@ -1005,7 +1083,15 @@ class PlatformerPrompts:
                 )
                 cap = rules.variant_caps.get(v.name)
                 cap_note = f"at most {cap} per level" if cap else "uncapped"
-                described.append(f"{v.name} ({mults or 'cosmetic'}; {cap_note})")
+                extra = (
+                    "; HAZARD-IMMUNE — may be POSTED ON hazard tiles "
+                    "(the hazard cells listed above)"
+                    if v.behavior.get("hazard_immune")
+                    else ""
+                )
+                described.append(
+                    f"{v.name} ({mults or 'cosmetic'}; {cap_note}{extra})"
+                )
             variant_offer = (
                 'You may mark a placement with "variant": one of '
                 f"{sorted(variants.by_name)} — tougher versions of their "
@@ -1022,8 +1108,40 @@ class PlatformerPrompts:
                 f"{json.dumps(roster)}\n"
                 f"Standable cells (x, y are grid coords, y from top): "
                 f"{standable_summary}\n"
-                f"Volume cells by tile (swimmers ONLY go here): {volume_summary}\n"
-                f"Open-air cells (FLYERS hover here, above the ground): "
+                "Volume cells by tile ("
+                + (
+                    "swimmers go here, EXCEPT the submerged-ground cells "
+                    "listed below where LAND enemies may wade"
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else "swimmers ONLY go here"
+                )
+                + f"): {volume_summary}\n"
+                + (
+                    "Submerged ground (underwater flats — LAND enemies "
+                    "may WADE here, posted on the seabed; ONLY these cells "
+                    "have a solid floor below — deeper water without a floor "
+                    "is swimmers-only): "
+                    f"{seabed_summary}\n"
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else ""
+                )
+                + (
+                    "Hazard cells with footing (ONLY a hazard-immune "
+                    "variant may be posted here, standing on the spikes): "
+                    f"{hazard_summary}\n"
+                    if hazard_summary
+                    and hazard_summary != "none"
+                    and any(
+                        v.behavior.get("hazard_immune")
+                        for v in variants.variants
+                    )
+                    else ""
+                )
+                + f"Open-air cells (FLYERS hover here, above the ground): "
                 f"{air_summary}\n"
                 f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
                 + (
@@ -1033,6 +1151,7 @@ class PlatformerPrompts:
                     if encounter_summary
                     else ""
                 )
+                + (f"ROOM DIRECTIVE: {directive}\n" if directive else "")
                 + f"{fb}\n"
                 f"Place 1..{max_enemies} enemies to fit the brief. Spread "
                 "them out; put slower enemies on patrol routes and ranged/"
@@ -1041,10 +1160,20 @@ class PlatformerPrompts:
                 'swim_style matters: "surface" riders go on the water\'s '
                 'TOP row (open air above), "float" drifters need a deep '
                 '2x2 pocket, "within" swimmers just need their body in '
-                "water. FLYER-archetype enemies MUST be placed in open-air "
-                "cells — they hover above the ground and never stand on it. "
-                "Every other archetype MUST be on standable land. "
-                "Sizes are in cells: a size-2.0 body "
+                'water, "cruise" swimmers roam UNBOUNDED straight lines — '
+                "give them long open water. FLYER-archetype enemies MUST "
+                "be placed in open-air cells — they hover above the ground "
+                "and never stand on it. "
+                + (
+                    "Every other archetype stands on land — or WADES on "
+                    "submerged ground (the seabed cells above): a wading "
+                    "enemy patrols where it was posted. "
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else "Every other archetype MUST be on standable land. "
+                )
+                + "Sizes are in cells: a size-2.0 body "
                 "occupies TWO columns (x and x+1 both standable) and two "
                 "rows of clearance; size 1.5 needs one column but two rows "
                 "of headroom — put big enemies on wide open ground. Keep "

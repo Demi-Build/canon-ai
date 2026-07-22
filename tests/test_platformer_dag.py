@@ -99,6 +99,7 @@ class TestOrchestratedGeneration:
                 assert f"level:ashen_depths/{lid}/{step}" in done
             assert f"review:ashen_depths/{lid}" in done
         assert "review:legend" in done
+        assert "phase:plat:world_art" in done  # world splash art node
         assert "plat:manifest" in done
         assert not report.escalated and not report.blocked
 
@@ -112,14 +113,19 @@ class TestOrchestratedGeneration:
         # Only the cheap always-fresh derivations re-ran (vlm_qa is an
         # always node so the explicit flag alone decides whether it
         # judges — a no-op stamp on flagless runs like this one).
-        assert sorted(report.done) == [
-            "plat:manifest",
-            "plat:vlm_qa",
-            "review:ashen_depths/l1",
-            "review:ashen_depths/l2",
-            "review:ashen_depths/l3",
-            "review:legend",
-        ]
+        # One review render per level AND per rolled secret room — all
+        # always nodes, so a no-op resume re-derives exactly them.
+        assert sorted(report.done) == sorted(
+            [
+                "plat:manifest",
+                "plat:vlm_qa",
+                "review:legend",
+                *(
+                    f"review:ashen_depths/{lid}"
+                    for lid in _ctx2.bible.levels
+                ),
+            ]
+        )
         assert not report.escalated
 
     def test_bible_round_trips_node_state(self, tmp_path: Path) -> None:
@@ -339,11 +345,13 @@ class TestRegenVerb:
         assert any("FALLBACK" in w for w in manifest["warnings"])
 
         # A clean no-op resume (good responder, nothing marked) rebuilds
-        # the manifest; the fallback notice must still be there.
-        _resume(run)
+        # the manifest; the fallback notice must still be there — one per
+        # fallback level (secret rooms fell back too under the broken
+        # responder), no dupes.
+        ctx2, _edits, _report = _resume(run)
         manifest = json.loads((run / "manifest.json").read_text())
         fallback_notes = [w for w in manifest["warnings"] if "FALLBACK" in w]
-        assert len(fallback_notes) == 3  # one per fallback level, no dupes
+        assert len(fallback_notes) == len(ctx2.bible.levels)
         assert all("_layout_attempts.json" in w for w in fallback_notes)
 
     def test_regen_step_reruns_exactly_that_chain(self, tmp_path: Path) -> None:

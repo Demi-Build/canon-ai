@@ -39,8 +39,9 @@ class TestStaleness:
     def test_unchanged_rerun_carries_all_verdicts(self, tmp_path: Path) -> None:
         out = tmp_path / "run"
         first = _fake_judge()
-        _run_slice(out, vlm_judge=first)
-        assert sorted(_level_judge_calls(first)) == ["l1", "l2", "l3"]
+        ctx = _run_slice(out, vlm_judge=first)
+        # Every level — rolled secret rooms included — is judged once.
+        assert sorted(_level_judge_calls(first)) == sorted(ctx.bible.levels)
         report_bytes = (out / REPORT).read_bytes()
 
         second = _fake_judge()
@@ -75,12 +76,12 @@ class TestStaleness:
 
     def test_model_change_rejudges_everything(self, tmp_path: Path) -> None:
         out = tmp_path / "run"
-        _run_slice(out, vlm_judge=_fake_judge())
+        ctx = _run_slice(out, vlm_judge=_fake_judge())
 
         second = _fake_judge()
         second.model = "fake-vlm-v2"  # instance override of the class attr
         _run_slice(out, vlm_judge=second)
-        assert sorted(_level_judge_calls(second)) == ["l1", "l2", "l3"]
+        assert sorted(_level_judge_calls(second)) == sorted(ctx.bible.levels)
 
     def test_report_entries_carry_judged_inputs(self, tmp_path: Path) -> None:
         out = tmp_path / "run"

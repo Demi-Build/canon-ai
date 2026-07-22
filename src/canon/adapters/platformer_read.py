@@ -77,6 +77,16 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
 
     stage_id = _stage_for_level(manifest, level_id)
     if stage_id is None:
+        # Secret rooms are deliberately absent from manifest stages/world_map
+        # (they're not in stage.level_ids) — discover them on disk under their
+        # parent's stage directory instead.
+        level_root = pack / "level"
+        if level_root.is_dir():
+            for stage_dir in sorted(level_root.iterdir()):
+                if (stage_dir / level_id / "level.json").is_file():
+                    stage_id = stage_dir.name
+                    break
+    if stage_id is None:
         raise FileNotFoundError(
             f"level {level_id!r} not found in any stage of {manifest_path}"
         )
@@ -119,6 +129,34 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
             }
         )
 
+    # Item placements resolved against global item definitions. The level's
+    # `items` (Placement list) is the authoritative overlay; box-source items
+    # also drop a solid tile that consumers overlay onto collision.
+    items: list[dict] = []
+    item_cache: dict[str, dict] = {}
+    for placement in level.get("items", []):
+        ref = placement.get("ref", "")
+        item_id = ref.split(":", 1)[1] if ":" in ref else ref
+        if item_id not in item_cache:
+            item_path = pack / "item" / f"{item_id}.json"
+            item_cache[item_id] = _read_json(item_path) if item_path.exists() else {}
+        item = item_cache[item_id]
+        pos = placement.get("pos", [0, 0])
+        items.append(
+            {
+                "item_id": item_id,
+                "x": pos[0],
+                "y": pos[1],
+                "source": placement.get("overrides", {}).get("source"),
+                "name": item.get("name", item_id),
+                "kind": item.get("kind"),
+                "placeholder_color": item.get("stats", {}).get(
+                    "placeholder_color", "#ffd700"
+                ),
+                "sprite_path_abs": _abs(pack, item.get("sprite_path")),
+            }
+        )
+
     # Backdrop parallax bands (optional).
     backdrop: dict | None = None
     backdrop_path = pack / "backdrop" / stage_id / "manifest.json"
@@ -129,6 +167,14 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
             "band_paths_abs": [_abs(pack, p) for p in bd.get("band_paths", [])],
         }
 
+    # Stage props (checkpoint/exit/vfx sprites) — abs-resolved for the art view.
+    props = {
+        name: _abs(pack, rel)
+        for name, rel in (manifest.get("props", {}).get(stage_id, {}) or {}).items()
+    }
+
+    slots = tileset.get("slots", [])
+    graphics = manifest.get("graphics", {})
     return {
         "level_id": level_id,
         "stage_id": stage_id,
@@ -138,7 +184,14 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "spawn": level.get("spawn"),
         "exit": level.get("exit"),
         "layout_fallback": level.get("layout_fallback", False),
+        "parent_level": level.get("parent_level"),
         "brief": level.get("brief"),
+        # Render tuning the art view mirrors from canon's skinned renderer.
+        "tile_px": slots[0]["px_region"][2] if slots else 32,
+        "actor_scale": graphics.get("actor_scale", 1.0),
+        "water_alpha": graphics.get("water_alpha", 1.0),
+        # Enemy-variant vocabulary (elite/champion/…) for the editor palette.
+        "variants": [v.get("name") for v in manifest.get("variants", []) if v.get("name")],
         "grids": {
             "collision": load_grid(level_dir / "collision.npz"),
             "terrain": load_grid(level_dir / "terrain.npz"),
@@ -150,5 +203,7 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "triggers": level.get("triggers", []),
         "foreground": level.get("foreground", []),
         "entities": entities,
+        "items": items,
+        "props": props,
         "backdrop": backdrop,
     }

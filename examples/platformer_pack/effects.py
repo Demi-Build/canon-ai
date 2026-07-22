@@ -14,6 +14,15 @@ v1 kinds:
   interpreter, different params. ``density`` (particles on screen),
   ``speed`` (fall px/s), ``size`` (px), ``color`` (hex), ``drift``
   (horizontal px/s, signed).
+
+Lighting kinds (Godot-only interpreters — pygame's name filter leaves
+them inert, per the art-surface-of-record doctrine):
+
+- ``canvas_tint`` — a whole-canvas color wash toward ``color`` by
+  ``strength``.
+- ``player_light`` — a point light following the player (``radius``
+  px) over a scene darkened by ``dim``.
+- ``glow`` — bloom over bright pixels, ``intensity`` energy.
 """
 
 from __future__ import annotations
@@ -31,6 +40,9 @@ KINDS: dict[str, dict[str, tuple[float, float, float]]] = {
         "size": (1, 8, 2),
         "drift": (-120, 120, 0),
     },
+    "canvas_tint": {"strength": (0.0, 1.0, 0.35)},
+    "player_light": {"radius": (32, 400, 160), "dim": (0.0, 1.0, 0.6)},
+    "glow": {"intensity": (0.0, 2.0, 0.8)},
 }
 
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -44,6 +56,10 @@ _UNITS: dict[str, str] = {
     "speed": "fall px/s",
     "size": "px",
     "drift": "horizontal px/s",
+    "strength": "0-1 blend",
+    "radius": "px",
+    "dim": "0-1 darkness",
+    "intensity": "bloom energy",
 }
 
 

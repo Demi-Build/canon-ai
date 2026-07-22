@@ -61,6 +61,13 @@ class ArtifactMeta(BaseModel):
     status: ArtifactStatus = ArtifactStatus.PENDING
     provenance_hash: str = ""
     parents: list[str] = Field(default_factory=list)
+    #: Human/QA review verdict of the asset's CONTENT (graphics arc) —
+    #: a different axis from ``status`` (pipeline lifecycle): "draft"
+    #: (generated, unreviewed), "approved", "rejected", "needs-rework".
+    #: QA flips draft→approved/needs-rework from its checks+verdicts;
+    #: "approved" is what the sample→lock step freezes. Additive — old
+    #: bibles load as draft.
+    review_status: str = "draft"
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +91,11 @@ LEVEL_STEPS: tuple[str, ...] = (
 #: ``world`` is a singleton; ``level`` is ``<stage_id>/<level_id>/<step>``.
 _NAMESPACE_ARITY: dict[str, int] = {
     "world": 0,
+    #: World-scoped splash ART rides its own LEAF id (not ``world``):
+    #: nothing depends on splash pixels, so a hand-edited card must
+    #: never cascade staleness through the world's descendants — the
+    #: backdrop-band precedent, applied at world scope.
+    "splash": 0,
     "stage": 1,
     "enemy": 1,
     "boss": 1,
@@ -163,6 +175,7 @@ def _validate(namespace: str, parts: tuple[str, ...]) -> None:
 def _example(namespace: str) -> str:
     return {
         "world": "world",
+        "splash": "splash",
         "stage": "stage:s1",
         "enemy": "enemy:goblin_grunt",
         "boss": "boss:ember_king",

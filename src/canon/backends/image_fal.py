@@ -103,6 +103,25 @@ class FalImageBackend:
             # Don't fail at construction; only at first generate call
             pass
         self.last_cost: float = 0.0
+        # Backend-reported provenance from the most recent response — stamped
+        # by art_provenance (postmortem ticket 5c: previously discarded, so
+        # canon:image-seed always shipped empty on paid runs).
+        self.last_seed: int | None = None
+        self.last_request_id: str | None = None
+
+    def _note_provenance(self, result: object) -> None:
+        """Capture the fal response's seed / request id (both optional and
+        model-dependent) so the provenance stamp can carry them."""
+        if isinstance(result, dict):
+            seed = result.get("seed")
+            self.last_seed = (
+                int(seed) if isinstance(seed, (int, float)) else None
+            )
+            req = result.get("request_id") or result.get("requestId")
+            self.last_request_id = str(req) if req else None
+        else:
+            self.last_seed = None
+            self.last_request_id = None
 
     def _arguments(self, prompt: str, width: int, height: int) -> dict:
         """Request arguments per model dialect: ``image_size`` for models
@@ -134,6 +153,7 @@ class FalImageBackend:
             self.model,
             arguments=self._arguments(prompt, width, height),
         )
+        self._note_provenance(result)
         url = self._extract_image_url(result)
         return self._conform_size(self._download_url(url), width, height)
 
@@ -152,6 +172,7 @@ class FalImageBackend:
             self.model,
             arguments=self._arguments(prompt, width, height),
         )
+        self._note_provenance(result)
         url = self._extract_image_url(result)
         # NOTE: download is sync via urllib; could be async with httpx in v0.3
         return self._conform_size(self._download_url(url), width, height)
@@ -186,35 +207,50 @@ class FalImageBackend:
 
     # -- img2img (implements ``ImageEditBackend``) --------------------------
 
-    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
-        """Sync img2img: upload ``image_bytes``, edit it per ``prompt`` via
-        the ``edit_model`` endpoint, return bytes conformed to
-        ``width`` x ``height`` (same size contract as ``generate``).
+    def edit(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
+    ) -> bytes:
+        """Sync img2img: upload ``image_bytes`` (plus any ``references``), edit
+        per ``prompt`` via the ``edit_model`` endpoint, return bytes conformed
+        to ``width`` x ``height`` (same size contract as ``generate``).
 
-        Args:
-            image_bytes: PNG-encoded source image to edit.
-            prompt: Text instructions describing the desired edit.
-            width: Output width in pixels.
-            height: Output height in pixels.
+        ``references`` are attached AFTER the source in ``image_urls`` — the
+        source stays first so its role (the frame to keep) is unchanged; the
+        extra images steer identity/layout (postmortem ticket 7).
         """
-        image_url = self._fal.upload(image_bytes, "image/png")
+        urls = [self._fal.upload(image_bytes, "image/png")]
+        urls += [self._fal.upload(r, "image/png") for r in (references or [])]
         result = self._fal.subscribe(
             self.edit_model,
-            arguments={"prompt": prompt, "image_urls": [image_url]},
+            arguments={"prompt": prompt, "image_urls": urls},
         )
+        self._note_provenance(result)
         url = self._extract_image_url(result)
         return self._conform_size(self._download_url(url), width, height)
 
     async def edit_async(
-        self, image_bytes: bytes, prompt: str, width: int, height: int
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
     ) -> bytes:
         """Async img2img via ``fal_client.subscribe_async``. The upload is
         sync in fal-client, so it is offloaded with ``asyncio.to_thread``."""
-        image_url = await asyncio.to_thread(self._fal.upload, image_bytes, "image/png")
+        urls = [await asyncio.to_thread(self._fal.upload, image_bytes, "image/png")]
+        for r in references or []:
+            urls.append(await asyncio.to_thread(self._fal.upload, r, "image/png"))
         result = await self._fal.subscribe_async(
             self.edit_model,
-            arguments={"prompt": prompt, "image_urls": [image_url]},
+            arguments={"prompt": prompt, "image_urls": urls},
         )
+        self._note_provenance(result)
         url = self._extract_image_url(result)
         return self._conform_size(self._download_url(url), width, height)
 

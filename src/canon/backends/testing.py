@@ -200,14 +200,27 @@ class FakeImageBackend:
     If neither is provided, a minimal 1×1 transparent PNG is generated inline.
     """
 
+    #: The fake-transparency gate (platformer pack ``tileset_art``)
+    #: passes trusted-alpha backends through untouched: placeholder
+    #: bytes are not generated art, and the fake twins' $0 runs must
+    #: stay byte-identical with identical call counts.
+    trusted_alpha = True
+
     def __init__(
         self,
         asset_dir: str | Path | None = None,
         placeholder: str | Path | None = None,
+        capabilities: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.asset_dir = Path(asset_dir) if asset_dir else None
         self.placeholder = Path(placeholder) if placeholder else None
         self.calls: list[dict] = []
+        # Declarable per test (graphics arc): lets $0 tests exercise
+        # capability degradation (a fake claiming native_pixels skips
+        # grid-snap; one without animation_sheets forces the static
+        # fallback). None = the derived default set.
+        if capabilities is not None:
+            self.capabilities = frozenset(capabilities)
 
     def generate(self, prompt: str, width: int, height: int) -> bytes:
         """Return placeholder PNG bytes and record the call."""
@@ -238,12 +251,21 @@ class FakeImageBackend:
 
     # -- img2img (implements ``ImageEditBackend``) --------------------------
 
-    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
+    def edit(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
+    ) -> bytes:
         """Return a deterministic canned multi-frame sprite SHEET and record
         the call. The sheet holds ``_EDIT_SHEET_FRAMES`` opaque blobs on a
         white field, evenly spaced with clear gaps, so content-aware frame
         segmentation recovers exactly that many frames — the animation slicing
-        path runs at $0. Byte-identical for identical ``(width, height)``."""
+        path runs at $0. ``references`` are RECORDED (count) but do not change
+        the output, so fake runs stay byte-identical. Byte-identical for
+        identical ``(width, height)``."""
         self.calls.append(
             {
                 "op": "edit",
@@ -251,15 +273,21 @@ class FakeImageBackend:
                 "width": width,
                 "height": height,
                 "image_bytes": len(image_bytes),
+                "references": len(references or []),
             }
         )
         return self._edit_sheet_bytes(width, height)
 
     async def edit_async(
-        self, image_bytes: bytes, prompt: str, width: int, height: int
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
     ) -> bytes:
         """Async variant of ``edit``."""
-        return self.edit(image_bytes, prompt, width, height)
+        return self.edit(image_bytes, prompt, width, height, references)
 
     #: Frame count the canned edit sheet draws — a fixed, evenly-spaced count
     #: so segmentation is deterministic. Real img2img ignores exact counts;

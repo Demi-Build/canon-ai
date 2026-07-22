@@ -839,6 +839,529 @@ def level_export(
     _emit({"level": bundle})  # type: ignore[possibly-unbound]
 
 
+@level_app.command("apply-edit")
+def level_apply_edit(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id to edit (e.g. l1)."),
+    json_str: str | None = typer.Option(
+        None, "--json", help="Inline edit JSON (partial level: entities/items/triggers/spawn/exit)."
+    ),
+    from_file: Path | None = typer.Option(
+        None, "--from", help="Path to a JSON file with the edit (alternative to --json)."
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who made the edit (journalled)."),
+    session: str | None = typer.Option(None, "--session", help="Session id (journalled)."),
+) -> None:
+    """Apply a sparse-layer hand-edit (moved placements / spawn / exit).
+
+    Rewrites the affected layer files, recomputes hashes, updates level.json,
+    stamps the level ``user_edited``, and journals the before/after mutation to
+    ``.canon/journal.jsonl`` + the content-addressed object store.
+    """
+    try:
+        from canon.adapters.platformer_write import apply_level_edit
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    if json_str and from_file:
+        _emit_error("Pass only one of --json / --from.")
+    if not json_str and not from_file:
+        _emit_error("One of --json / --from is required.")
+    try:
+        raw = json_str if json_str else Path(from_file).read_text(encoding="utf-8")
+        edit = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _emit_error(f"Invalid edit JSON: {e}")
+    try:
+        result = apply_level_edit(  # type: ignore[possibly-unbound]
+            pack_dir, level_id, edit, actor=actor, session=session
+        )
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"Apply-edit failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("baseline")
+def level_baseline(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id to baseline (e.g. l1)."),
+    actor: str = typer.Option("cradle", "--actor", help="Who imported the generation."),
+    session: str | None = typer.Option(None, "--session", help="Session id (journalled)."),
+) -> None:
+    """Record ``generate`` events for a level's as-generated artifacts.
+
+    Cradle calls this when it imports a fresh generation, snapshotting each step
+    artifact into the object store. Idempotent — safe to call on every open.
+    """
+    try:
+        from canon.adapters.platformer_write import baseline_level
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = baseline_level(pack_dir, level_id, actor=actor, session=session)  # type: ignore[possibly-unbound]
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"Baseline failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("history")
+def level_history(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str | None = typer.Option(None, "--level", help="Filter to one level id."),
+) -> None:
+    """Dump the provenance journal (optionally filtered to a level)."""
+    try:
+        from canon.provenance import journal_path
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+
+    jp = journal_path(pack_dir)  # type: ignore[possibly-unbound]
+    if not jp.is_file():
+        _emit({"events": []})
+        return
+    events = []
+    with jp.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if level_id and f"/{level_id}/" not in e.get("artifact_id", ""):
+                continue
+            events.append(e)
+    _emit({"events": events, "count": len(events)})
+
+
+@level_app.command("import-grids")
+def level_import_grids(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id to update (e.g. l1)."),
+    json_str: str | None = typer.Option(
+        None, "--json", help='Inline JSON: {"collision": [[...int rows...]]}'
+    ),
+    from_file: Path | None = typer.Option(None, "--from", help="JSON file (same shape)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Apply a painted/resized collision grid (terrain paint write-back).
+
+    Re-derives terrain (autotile/water-deep), background, and the hazards
+    layer exactly as canon's own phases do, rehashes, stamps ``user_edited``,
+    and journals the edit with before/after grid snapshots.
+    """
+    try:
+        from canon.adapters.platformer_write import import_level_grids
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    if bool(json_str) == bool(from_file):
+        _emit_error("Exactly one of --json / --from is required.")
+    try:
+        raw = json_str if json_str else Path(from_file).read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        rows = payload["collision"] if isinstance(payload, dict) else payload
+    except (json.JSONDecodeError, KeyError) as e:
+        _emit_error(f"Invalid grid JSON: {e}")
+    try:
+        result = import_level_grids(  # type: ignore[possibly-unbound]
+            pack_dir, level_id, rows, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"Grid import failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("create")
+def level_create(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str = typer.Option(..., "--stage", help="Stage the level belongs to."),
+    width: int = typer.Option(60, "--width"),
+    height: int = typer.Option(16, "--height"),
+    level_id: str | None = typer.Option(None, "--id", help="Explicit id (default: next lN)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Scaffold a new hand-built DRAFT level (flat floor, spawn/exit).
+
+    Drafts live on disk and open in cradle, but stay out of the manifest /
+    world map until `canon level publish` inserts them at a position.
+    """
+    try:
+        from canon.adapters.platformer_write import create_level
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = create_level(  # type: ignore[possibly-unbound]
+            pack_dir, stage_id, width, height, level_id, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
+    except Exception as e:
+        _emit_error(f"Create failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("publish")
+def level_publish(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id to (un)publish."),
+    position: int | None = typer.Option(
+        None, "--position", help="1-based slot within the stage (default: append)."
+    ),
+    remove: bool = typer.Option(False, "--remove", help="Unpublish back to draft."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Insert a level into the playable progression (or pull it back out).
+
+    Publishing at --position 2 makes it X-2 and renumbers the rest of the
+    stage; the manifest level order and world map are rebuilt.
+    """
+    try:
+        from canon.adapters.platformer_write import publish_level
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = publish_level(  # type: ignore[possibly-unbound]
+            pack_dir, level_id, position, remove, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"Publish failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("versions")
+def level_versions(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (e.g. l1)."),
+    step: str = typer.Option(..., "--step", help="Step artifact (entities/items/triggers/…)."),
+) -> None:
+    """List the version chain for a level step (the restore picker's source)."""
+    try:
+        from canon.adapters.platformer_write import level_artifact_id
+        from canon.provenance import artifact_versions
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+
+    try:
+        aid = level_artifact_id(pack_dir, level_id, step)  # type: ignore[possibly-unbound]
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    versions = artifact_versions(pack_dir, aid)  # type: ignore[possibly-unbound]
+    _emit({"artifact_id": aid, "versions": versions, "count": len(versions)})  # type: ignore[possibly-unbound]
+
+
+@level_app.command("restore")
+def level_restore(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (e.g. l1)."),
+    step: str = typer.Option(..., "--step", help="Step to revert (entities/items/triggers/…)."),
+    to_hash: str = typer.Option(..., "--to", help="Target version hash (from `level versions`)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Revert a level step to a stored version (original or any prior edit).
+
+    The version being left behind stays in the object store — nothing is lost.
+    """
+    try:
+        from canon.adapters.platformer_write import restore_level_step
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = restore_level_step(  # type: ignore[possibly-unbound]
+            pack_dir, level_id, step, to_hash, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id, step=step)
+    except Exception as e:
+        _emit_error(f"Restore failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+# ---------------------------------------------------------------------------
+# Generation plumbing shared by the db/asset verbs
+# ---------------------------------------------------------------------------
+
+
+def _load_env_file(path: Path | None) -> None:
+    """Load KEY=VALUE lines into the environment (setdefault semantics).
+
+    Canon never auto-reads ``.env``; generation verbs accept ``--env-file``
+    (or the ``CANON_ENV_FILE`` env var) so hosts like cradle can supply
+    provider keys without exporting them shell-wide.
+    """
+    import os
+
+    p = path or (
+        Path(os.environ["CANON_ENV_FILE"])
+        if os.environ.get("CANON_ENV_FILE")
+        else None
+    )
+    if not p or not p.is_file():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def _pack_ops():
+    """Import the platformer pack's ops module.
+
+    The pack code lives under ``examples/`` (not inside the installed canon
+    package); with the editable install the repo root is two levels above the
+    package, so put it on sys.path before importing.
+    """
+    import canon as _canon
+
+    root = Path(_canon.__file__).resolve().parents[2]
+    if (root / "examples").is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from examples.platformer_pack import ops
+    except ImportError as e:  # pragma: no cover — env-specific
+        _emit_error(
+            f"Failed to import the platformer pack ops ({e}); "
+            f"looked for examples/ under {root}."
+        )
+    return ops
+
+
+db_app = typer.Typer(help="Generic database rows: create / LLM-complete (anchored).")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("types")
+def db_types_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+) -> None:
+    """The entity-type registry + field specs (drives editor form UIs)."""
+    ops = _pack_ops()
+    try:
+        _emit({"types": ops.db_types(pack_dir)})
+    except Exception as e:
+        _emit_error(f"db types failed: {e}", traceback=traceback.format_exc())
+
+
+@db_app.command("new")
+def db_new_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item"),
+    fields_json: str | None = typer.Option(
+        None, "--fields",
+        help='Anchors: JSON of user-set fields (e.g. \'{"archetype":"flyer"}\'). '
+        "Locked constraints — the skeleton rolls AROUND them.",
+    ),
+    complete: bool = typer.Option(
+        False, "--complete", help="LLM-author the text fields (name/flavor)."
+    ),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Create ONE new row: anchored skeleton roll + optional LLM completion,
+    exactly as pipeline generation would (same prompts, rng streams, retry)."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    try:
+        fields = json.loads(fields_json) if fields_json else {}
+    except json.JSONDecodeError as e:
+        _emit_error(f"Invalid --fields JSON: {e}")
+    try:
+        llm = ops.build_llm(llm_backend if complete else None, llm_model)
+        result = ops.new_db_row(
+            pack_dir, entity_type, fields,
+            complete=complete, llm=llm, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type)
+    except Exception as e:
+        _emit_error(f"db new failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@db_app.command("complete")
+def db_complete_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item"),
+    entity_id: str = typer.Option(..., "--id"),
+    locked: str | None = typer.Option(
+        None, "--locked", help="Comma-separated field names preserved as constraints."
+    ),
+    reroll: bool = typer.Option(
+        False, "--reroll", help="Also re-roll unlocked mechanical fields."
+    ),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """LLM-complete an existing row, anchored by its locked fields."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    try:
+        llm = ops.build_llm(llm_backend, llm_model)
+        result = ops.complete_db_row(
+            pack_dir, entity_type, entity_id,
+            [s.strip() for s in locked.split(",")] if locked else [],
+            reroll=reroll, llm=llm, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), id=entity_id)
+    except Exception as e:
+        _emit_error(f"db complete failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+asset_app = typer.Typer(help="Pack asset replacement (user art entering the pack).")
+app.add_typer(asset_app, name="asset")
+
+
+@asset_app.command("generate")
+def asset_generate_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> | player | backdrop:<stage> | audio:<stage>",
+    ),
+    image_backend: str | None = typer.Option(None, "--image-backend"),
+    image_model: str | None = typer.Option(None, "--image-model"),
+    image_edit_model: str | None = typer.Option(None, "--image-edit-model"),
+    image_edit_backend: str | None = typer.Option(None, "--image-edit-backend"),
+    music_backend: str | None = typer.Option(None, "--music-backend"),
+    sfx_backend: str | None = typer.Option(None, "--sfx-backend"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """(Re)generate ONE asset via the real art/audio phases (single-image
+    path). Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    try:
+        result = ops.generate_asset(
+            pack_dir, target,
+            image_backend=image_backend, image_model=image_model,
+            image_edit_model=image_edit_model,
+            image_edit_backend=image_edit_backend,
+            music_backend=music_backend, sfx_backend=sfx_backend,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset generate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("animate")
+def asset_animate_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(..., "--target", help="enemy:<id> | player"),
+    image_backend: str | None = typer.Option(None, "--image-backend"),
+    image_model: str | None = typer.Option(None, "--image-model"),
+    image_edit_model: str | None = typer.Option(None, "--image-edit-model"),
+    image_edit_backend: str | None = typer.Option(None, "--image-edit-backend"),
+    vlm_backend: str | None = typer.Option(None, "--vlm-backend"),
+    vlm_model: str | None = typer.Option(None, "--vlm-model"),
+    reuse_spec: bool = typer.Option(
+        False, "--reuse-spec",
+        help="Skip VLM authoring and reuse the stored motion spec.",
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Animate ONE actor (the multi-image path): VLM-authored motion spec →
+    one img2img sheet per state → strips + frames.json + packed atlas."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    try:
+        result = ops.animate_asset(
+            pack_dir, target,
+            image_backend=image_backend, image_model=image_model,
+            image_edit_model=image_edit_model,
+            image_edit_backend=image_edit_backend,
+            vlm_backend=vlm_backend, vlm_model=vlm_model,
+            reuse_spec=reuse_spec, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset animate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("replace")
+def asset_replace(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> | player | tile:<stage>/<name> | backdrop:<stage>/<index>",
+    ),
+    from_file: Path = typer.Option(..., "--from", help="PNG file to install."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Replace an asset's bytes with an uploaded PNG.
+
+    Rehashes every reference, protects the artifact from regen (bible pin when
+    a bible exists, ``user_edited`` otherwise), and journals ``op:"import"``
+    with before/after snapshots. Tile targets re-skin every slot of the type —
+    physics untouched (types-vs-skin).
+    """
+    try:
+        from canon.adapters.platformer_write import replace_asset
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    if not from_file.is_file():
+        _emit_error(f"Source file not found: {from_file}")
+    try:
+        result = replace_asset(  # type: ignore[possibly-unbound]
+            pack_dir, target, from_file, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"Asset replace failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 def main() -> None:
     app()
 

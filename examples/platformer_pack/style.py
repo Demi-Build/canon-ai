@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from examples.platformer_pack import color as color_math
 from examples.platformer_pack.phases import _stamp_metadata, llm_json, warn
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 
@@ -33,14 +34,10 @@ logger = logging.getLogger(__name__)
 MIN_CONTRAST = 40.0
 
 
-def hex_to_rgb(color: str) -> tuple[int, int, int]:
-    color = color.lstrip("#")
-    return tuple(int(color[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
-
-
-def _luminance(color: str) -> float:
-    r, g, b = hex_to_rgb(color)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+# Delegating aliases — the math lives in the leaf ``color`` module so
+# phases.py can share it without importing style (cycle).
+hex_to_rgb = color_math.hex_to_rgb
+_luminance = color_math.luminance
 
 
 def _valid_hex(value: Any) -> bool:
@@ -133,19 +130,7 @@ def check_palette(
     return problems
 
 
-def _shift_luminance(color: str, target: float) -> str:
-    """Blend toward white (or black) to hit ``target`` luminance exactly —
-    hue-preserving lightness arithmetic. lum(lerp(c, white, t)) is linear
-    in t, so both directions have closed forms."""
-    r, g, b = hex_to_rgb(color)
-    lum = _luminance(color)
-    if target > lum:
-        t = (target - lum) / (255.0 - lum) if lum < 255 else 0.0
-        r, g, b = (round(c + t * (255 - c)) for c in (r, g, b))
-    else:
-        t = (lum - target) / lum if lum > 0 else 0.0
-        r, g, b = (round(c * (1 - t)) for c in (r, g, b))
-    return f"#{r:02x}{g:02x}{b:02x}"
+_shift_luminance = color_math.shift_luminance
 
 
 def enforce_contrast(
@@ -227,6 +212,80 @@ def separate_structural_roles(
     return out, adjusted
 
 
+#: Minimum hue separation (degrees) between a SAFE (non-damaging) volume
+#: role and any hazard role. The first paid run's fire biome gave
+#: swimmable water a lava hue 6° from `danger` — a safe liquid must
+#: never wear the hazard family's colors.
+MIN_VOLUME_HAZARD_HUE_SEP = 40.0
+
+#: Where a colliding safe volume's hue snaps to: the blue-cyan band
+#: every player reads as "liquid, not lethal".
+SAFE_VOLUME_HUE = 215.0
+
+
+def separate_safe_volumes_from_hazards(
+    palette: dict[str, str], tiles: TileRegistry
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Repair TOOL: a NON-damaging volume role (swimmable water) whose hue
+    sits within ``MIN_VOLUME_HAZARD_HUE_SEP`` of any hazard role snaps to
+    ``SAFE_VOLUME_HUE`` (saturation/value kept, original luminance
+    restored). Damaging volumes (lava) are deliberately untouched — warm
+    hue = harmful is correct there. Returns ``(palette, {role: old_hex})``."""
+    import colorsys
+
+    damaging = {"damage", "damage_per_second"}
+    safe_volume_roles: list[str] = []
+    hazard_roles: list[str] = []
+    for spec in role_specs(tiles):
+        role_tiles = [t for t in tiles.tiles if t.color_role == spec["role"]]
+        if "hazard" in spec["categories"]:
+            hazard_roles.append(spec["role"])
+        if "volume" in spec["categories"] and not any(
+            t.params.get(k) for t in role_tiles for k in damaging
+            if t.category == "volume"
+        ):
+            safe_volume_roles.append(spec["role"])
+    if not safe_volume_roles or not hazard_roles:
+        return palette, {}
+
+    out = dict(palette)
+    adjusted: dict[str, str] = {}
+    hazard_hues = [
+        h for r in hazard_roles
+        if r in out and (h := color_math.hue_of(out[r])) is not None
+    ]
+    for role in safe_volume_roles:
+        if role not in out:
+            continue
+        hue = color_math.hue_of(out[role])
+        if hue is None or all(
+            color_math.hue_distance(hue, h) >= MIN_VOLUME_HAZARD_HUE_SEP
+            for h in hazard_hues
+        ):
+            continue
+        r, g, b = (c / 255.0 for c in color_math.hex_to_rgb(out[role]))
+        _h, s, v = colorsys.rgb_to_hsv(r, g, b)
+        target_hue, original_lum = SAFE_VOLUME_HUE, _luminance(out[role])
+        for _step in range(1 + 6):  # bounded walk if 215° is also taken
+            candidate = color_math.rgb_to_hex(
+                tuple(
+                    round(c * 255)
+                    for c in colorsys.hsv_to_rgb(target_hue / 360.0, s, v)
+                )
+            )
+            cand_hue = color_math.hue_of(candidate)
+            if cand_hue is None or all(
+                color_math.hue_distance(cand_hue, h)
+                >= MIN_VOLUME_HAZARD_HUE_SEP
+                for h in hazard_hues
+            ):
+                break
+            target_hue = (target_hue + 20.0) % 360.0
+        adjusted[role] = out[role]
+        out[role] = _shift_luminance(candidate, original_lum)
+    return out, adjusted
+
+
 def fallback_palette(tiles: TileRegistry) -> dict[str, str]:
     """The hardcoded placeholder palette, as hex, for this registry's
     roles — the loud fallback when the LLM never validates."""
@@ -299,6 +358,20 @@ class StyleGuidePhase:
                 f"style: LLM palette for stage {stage_id!r} never "
                 "validated; tiles use the PLACEHOLDER palette, not "
                 "generated style.",
+            )
+        palette, safe_vols = separate_safe_volumes_from_hazards(
+            palette, self.tiles
+        )
+        if safe_vols:
+            logger.info(
+                "StyleGuidePhase volume-hue tool rotated %d role(s) for "
+                "%s: %s (luminance preserved, hue snapped to the "
+                "safe-liquid band).",
+                len(safe_vols), stage_id,
+                ", ".join(
+                    f"{role} {old}->{palette[role]}"
+                    for role, old in safe_vols.items()
+                ),
             )
         palette, separated = separate_structural_roles(palette, self.tiles)
         if separated:

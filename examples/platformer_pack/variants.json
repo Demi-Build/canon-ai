@@ -14,6 +14,12 @@
       "visual": "outline_scale"
     },
     {
+      "name": "emberborn",
+      "stat_mults": { "hp": 1.5 },
+      "visual": "outline",
+      "behavior": { "hazard_immune": true }
+    },
+    {
       "name": "relentless",
       "stat_mults": { "hp": 1.5 },
       "speed_mult": 1.05,

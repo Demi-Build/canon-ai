@@ -1,0 +1,11 @@
+{
+  "_doc": "The CLOSED per-level override vocabulary (combat/level-picks arc): which game_rules / movement keys the stage plan may override per level, and the numeric band each value must land in. Validation is FAIL-CLOSED in code (rules.py validate_overrides): an unknown key or out-of-band value is dropped with a warning, never applied. target 'movement' keys override PlayerMovementSpec (the level VALIDATES under its own physics); everything else overrides GameRules. NEVER add checkpoint_enemy_reset without fixing its read OUTSIDE run_level (platformer_play.py main() eject purge). water_containment / enemy_water_policy stay un-overridable (they gate generation).",
+  "keys": {
+    "platform_drop_through": { "type": "bool" },
+    "chase_speed_mult": { "type": "float", "band": [1.0, 2.5] },
+    "break_delay_s": { "type": "float", "band": [0.2, 1.5] },
+    "gravity": { "type": "float", "band": [15.0, 60.0], "target": "movement" },
+    "jump_height": { "type": "int", "band": [2, 5], "target": "movement" },
+    "run_speed": { "type": "float", "band": [5.0, 11.0], "target": "movement" }
+  }
+}

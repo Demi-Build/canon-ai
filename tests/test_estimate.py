@@ -137,6 +137,17 @@ class TestEstimatorCounting:
         # Zero-token (fake) entries never calibrate.
         assert "plat:decorator" not in actuals
 
+    def test_world_art_node_prices_one_splash_image(self) -> None:
+        from examples.platformer_pack.estimate import _price_assets
+
+        bible = _StubBible(stages=1, enemies=0)
+        cost_model = {"assets": {"image_usd_per_call": 0.04, "images_world": 1}}
+        priced = _price_assets(
+            [_node("phase:plat:world_art")], bible, cost_model, []
+        )
+        assert priced["images"]["count"] == 1
+        assert _price_assets([], bible, cost_model, [])["images"]["count"] == 0
+
     def test_fresh_mode_prices_the_fresh_plan(self, tmp_path: Path) -> None:
         ctx = PipelineContext(
             bible=Bible.empty(seed="est"),
@@ -146,9 +157,11 @@ class TestEstimatorCounting:
         result = estimate_run(ctx, [], Bible.empty(seed="est"))
         assert result["mode"] == "fresh"
         assert result["calibration"] == "defaults"
-        # fresh_plan defaults: 3 stages x 3 levels, 7 enemies -> the
-        # macro+level call volume of a full run (~70 measured).
-        assert 50 <= result["llm"]["calls"] <= 90
+        # fresh_plan defaults: 3 stages x 3 levels, 7 enemies -> ~70
+        # calls measured pre-rooms, plus ~5 expected SECRET ROOMS
+        # (secret_rooms_avg 0.6/level) each priced as a small level
+        # (multi-room arc) -> ~90.
+        assert 70 <= result["llm"]["calls"] <= 115
         assert result["total_usd"]["worst"] > result["total_usd"]["best"] > 0
         assert result["assets"]["images"]["count"] > 0
 

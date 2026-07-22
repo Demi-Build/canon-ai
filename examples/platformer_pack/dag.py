@@ -94,6 +94,29 @@ def _stages(ctx: Any) -> list:
     return stages
 
 
+def _stage_level_entries(
+    ctx: Any, stage: Any, width: int = 48, height: int = 16
+) -> list[tuple[int, str, list[str]]]:
+    """``[(index, level_id, [room_ids])]`` for one stage — the DAG's
+    secret-room recompute. Expansion runs BEFORE any level body, so it
+    cannot read ``Level.secret_rooms``; it recomputes the same
+    deterministic roll the bodies use (``level_secret_rooms``). The dims
+    defaults must match the layout phase's (they only matter for schemas
+    without grid bands)."""
+    from examples.platformer_pack.level import level_secret_rooms
+
+    out: list[tuple[int, str, list[str]]] = []
+    for index, lid in enumerate(stage.level_ids):
+        rooms = [
+            s.room_id
+            for s in level_secret_rooms(
+                ctx, lid, index, default_width=width, default_height=height
+            )
+        ]
+        out.append((index, lid, rooms))
+    return out
+
+
 class LevelStepsDagPhase:
     """Expands the per-level layer steps into (step, level) nodes.
 
@@ -138,10 +161,10 @@ class LevelStepsDagPhase:
         def aid(sid: str, level_id: str, step: str) -> str:
             return f"level:{sid}/{level_id}/{step}"
 
-        def collision_body(level_id: str, index: int):
+        def collision_body(level_id: str, index: int, room_of: str | None = None):
             def run(c: Any) -> None:
                 level = stamp_level_collision(
-                    c, level_id, index,
+                    c, level_id, index, room_of=room_of,
                     movement=self.movement, rules=self.rules,
                     tiles=self.tiles, graphics=self.graphics,
                     default_width=self.width,
@@ -160,127 +183,156 @@ class LevelStepsDagPhase:
         # Step-major node order ACROSS ALL STAGES (all collisions in
         # world order, then all hazards, ...) so a cap-1 orchestrated run
         # executes in the same order as the sequential phases — identical
-        # warning order, identical logs, identical bytes.
+        # warning order, identical logs, identical bytes. Secret rooms
+        # interleave PER PARENT inside every step loop (parent first,
+        # then its rooms — the sequential phases' exact order).
         per_stage = [
-            (stage.stage_id, stage.tileset_ref, list(stage.level_ids))
+            (
+                stage.stage_id,
+                stage.tileset_ref,
+                _stage_level_entries(ctx, stage, self.width, self.height),
+            )
             for stage in stages
         ]
         nodes: list[Node] = []
         # collision creates the Level entity; everything else reads it.
-        for sid, _ts, level_ids in per_stage:
-            for index, lid in enumerate(level_ids):
+        # A room's collision requires its parent's (linkage + warn order
+        # stay correct even above cap 1).
+        for sid, _ts, entries in per_stage:
+            for index, lid, rooms in entries:
                 nodes.append(
                     Node(
                         node_id=aid(sid, lid, "collision"),
                         run=collision_body(lid, index),
                     )
                 )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "hazards"),
-                        run=level_body(lid, write_level_hazards),
-                        requires=[aid(sid, lid, "collision")],
+                for rid in rooms:
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, rid, "collision"),
+                            run=collision_body(rid, index, room_of=lid),
+                            requires=[aid(sid, lid, "collision")],
+                        )
                     )
-                )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "triggers"),
-                        run=level_body(lid, write_level_triggers),
-                        requires=[aid(sid, lid, "collision")],
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "hazards"),
+                            run=level_body(xid, write_level_hazards),
+                            requires=[aid(sid, xid, "collision")],
+                        )
                     )
-                )
-        for sid, tileset_aid, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "terrain"),
-                        run=level_body(lid, assign_level_terrain),
-                        requires=[aid(sid, lid, "collision"), tileset_aid],
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "triggers"),
+                            run=level_body(xid, write_level_triggers),
+                            requires=[aid(sid, xid, "collision")],
+                        )
                     )
-                )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "background"),
-                        run=level_body(lid, paint_level_background),
-                        requires=[aid(sid, lid, "collision")],
+        for sid, tileset_aid, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "terrain"),
+                            run=level_body(xid, assign_level_terrain),
+                            requires=[aid(sid, xid, "collision"), tileset_aid],
+                        )
                     )
-                )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "entities"),
-                        run=level_body(
-                            lid, place_level_entities,
-                            max_enemies=self.max_enemies, rules=self.rules,
-                            tiles=self.tiles, variants=self.variants,
-                            combat=self.combat, phase_name="plat:placement",
-                        ),
-                        # Placement reads each definition's SIZE (footprint
-                        # validation) — an enemy re-roll must schedule before
-                        # and cascade into entities, or a grown body silently
-                        # invalidates the stored placements.
-                        requires=[
-                            aid(sid, lid, "collision"),
-                            aid(sid, lid, "hazards"),
-                            "phase:plat:enemies",
-                        ],
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "background"),
+                            run=level_body(xid, paint_level_background),
+                            requires=[aid(sid, xid, "collision")],
+                        )
                     )
-                )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "items"),
-                        run=level_body(
-                            lid, place_level_items,
-                            max_items=self.max_items, rules=self.rules,
-                            tiles=self.tiles, movement=self.movement,
-                            phase_name="plat:item_placement",
-                        ),
-                        # Items place AFTER enemies (power-ups stage around
-                        # them), read reward anchors from triggers, and
-                        # validate against the collision grid; rarity caps
-                        # read the pool definitions (whole-pool edges).
-                        requires=[
-                            aid(sid, lid, "collision"),
-                            aid(sid, lid, "hazards"),
-                            aid(sid, lid, "triggers"),
-                            aid(sid, lid, "entities"),
-                            "phase:plat:items",
-                        ],
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "entities"),
+                            run=level_body(
+                                xid, place_level_entities,
+                                max_enemies=self.max_enemies, rules=self.rules,
+                                tiles=self.tiles, variants=self.variants,
+                                combat=self.combat,
+                                phase_name="plat:placement",
+                            ),
+                            # Placement reads each definition's SIZE
+                            # (footprint validation) — an enemy re-roll must
+                            # schedule before and cascade into entities, or a
+                            # grown body silently invalidates the stored
+                            # placements.
+                            requires=[
+                                aid(sid, xid, "collision"),
+                                aid(sid, xid, "hazards"),
+                                "phase:plat:enemies",
+                            ],
+                        )
                     )
-                )
-        for sid, tileset_aid, level_ids in per_stage:
-            for lid in level_ids:
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "foreground"),
-                        run=level_body(
-                            lid, decorate_level,
-                            max_decor=self.max_decor,
-                            phase_name="plat:decorator",
-                        ),
-                        requires=[aid(sid, lid, "collision"), tileset_aid],
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "items"),
+                            run=level_body(
+                                xid, place_level_items,
+                                max_items=self.max_items, rules=self.rules,
+                                tiles=self.tiles, movement=self.movement,
+                                phase_name="plat:item_placement",
+                            ),
+                            # Items place AFTER enemies (power-ups stage
+                            # around them), read reward anchors from
+                            # triggers, and validate against the collision
+                            # grid; rarity caps read the pool definitions
+                            # (whole-pool edges).
+                            requires=[
+                                aid(sid, xid, "collision"),
+                                aid(sid, xid, "hazards"),
+                                aid(sid, xid, "triggers"),
+                                aid(sid, xid, "entities"),
+                                "phase:plat:items",
+                            ],
+                        )
                     )
-                )
-        for sid, _ts, level_ids in per_stage:
-            for lid in level_ids:
-                # The per-level manifest descends from EVERY layer step
-                # (LEVEL_STEPS), so any layer edit/regen re-freshens it.
-                nodes.append(
-                    Node(
-                        node_id=aid(sid, lid, "level"),
-                        run=level_body(lid, write_level_manifest),
-                        requires=[aid(sid, lid, step) for step in LEVEL_STEPS],
+        for sid, tileset_aid, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "foreground"),
+                            run=level_body(
+                                xid, decorate_level,
+                                max_decor=self.max_decor,
+                                phase_name="plat:decorator",
+                            ),
+                            requires=[aid(sid, xid, "collision"), tileset_aid],
+                        )
                     )
-                )
+        for sid, _ts, entries in per_stage:
+            for _index, lid, rooms in entries:
+                for xid in (lid, *rooms):
+                    # The per-level manifest descends from EVERY layer step
+                    # (LEVEL_STEPS), so any layer edit/regen re-freshens it.
+                    nodes.append(
+                        Node(
+                            node_id=aid(sid, xid, "level"),
+                            run=level_body(xid, write_level_manifest),
+                            requires=[
+                                aid(sid, xid, step) for step in LEVEL_STEPS
+                            ],
+                        )
+                    )
         return nodes
 
 
@@ -322,7 +374,11 @@ class RenderDagPhase:
                 always=True,
             )
             for stage in stages
-            for lid in stage.level_ids
+            for _index, parent, rooms in _stage_level_entries(ctx, stage)
+            # Rooms render like levels (per-parent interleave — the
+            # sequential RenderPhase iterates bible.levels in exactly this
+            # insertion order, and orch==seq is a byte contract).
+            for lid in (parent, *rooms)
         ]
         nodes.append(
             Node(
@@ -368,7 +424,8 @@ class VlmQaDagPhase:
         requires = [
             f"review:{stage.stage_id}/{lid}"
             for stage in stages
-            for lid in stage.level_ids
+            for _index, parent, rooms in _stage_level_entries(ctx, stage)
+            for lid in (parent, *rooms)
         ]
         requires.append("review:legend")
         return [
@@ -406,15 +463,21 @@ class ManifestDagPhase:
         stages = _stages(ctx)
         if not stages:
             return []
+        entries = {
+            stage.stage_id: _stage_level_entries(ctx, stage)
+            for stage in stages
+        }
         requires = [
             f"level:{stage.stage_id}/{lid}/level"
             for stage in stages
-            for lid in stage.level_ids
+            for _index, parent, rooms in entries[stage.stage_id]
+            for lid in (parent, *rooms)
         ]
         requires += [
             f"review:{stage.stage_id}/{lid}"
             for stage in stages
-            for lid in stage.level_ids
+            for _index, parent, rooms in entries[stage.stage_id]
+            for lid in (parent, *rooms)
         ]
         requires.append("review:legend")
         # QA verdicts become manifest warnings — the report must be
@@ -465,7 +528,7 @@ def macro_phases(num_levels: int = 3, num_enemies: int = 4,
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         StyleGuidePhase(tiles=tiles),
         EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
-        ItemGeneratorPhase(count=num_items),
+        ItemGeneratorPhase(count=num_items, tiles=tiles),
         PlaceholderTilesetPhase(tiles=tiles, graphics=graphics),
     ]
 
@@ -496,6 +559,7 @@ def compose_dag_pipeline(
         SpriteAnimationPhase,
         SpriteArtPhase,
         TilesetArtPhase,
+        WorldArtPhase,
     )
     from examples.platformer_pack.audio_phases import AudioPhase
 
@@ -517,6 +581,7 @@ def compose_dag_pipeline(
             producer=image_producer, judge=vlm_judge, graphics=graphics
         ),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        WorldArtPhase(producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderDagPhase(variants=variants, graphics=graphics),
         VlmQaDagPhase(
@@ -637,6 +702,8 @@ def cli_phases_factory(ctx: Any) -> list:
     producer = build_image_producer(
         os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
         os.environ.get("CANON_PLAT_IMAGE_MODEL") or None,
+        os.environ.get("CANON_PLAT_IMAGE_EDIT_MODEL") or None,
+        edit_kind=os.environ.get("CANON_PLAT_IMAGE_EDIT_BACKEND") or None,
     )
     music = build_music_producer(os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""))
     sfx = build_sfx_producer(os.environ.get("CANON_PLAT_SFX_BACKEND", ""))

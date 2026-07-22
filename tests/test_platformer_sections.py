@@ -576,7 +576,12 @@ class TestL2CorridorTrap:
     that no additive/mount/lane repair can open and whose terminal
     single-owner rescue used to lose to the NEIGHBOUR's overlap content.
     The trio: headroom-qualified targets, takeoff-column lane, and the
-    both-neighbours terminal fallback that keeps s2's real content."""
+    both-neighbours terminal fallback that keeps s2's real content.
+
+    NOTE (ticket 1): the momentum rework (ground_accel 6.5->10) now makes this
+    specific corridor traversable, so both tests below assert the level ships
+    directly with NO repair — the repair machinery they used to exercise stays
+    covered by the physics-independent full-height-wall traps."""
 
     def _fixture(self):
         import json
@@ -588,10 +593,15 @@ class TestL2CorridorTrap:
             ).read_text()
         )
 
-    def test_break_locator_skips_one_tall_pockets(self) -> None:
-        """The old run burned every repair round aiming at (15,12) — a
-        standable cell under a solid ledge no 2-tall body fits into. The
-        located break must now name a body-usable foothold."""
+    def test_momentum_rework_opens_the_l2_seam_corridor(self) -> None:
+        """This paid whole-fallback trap is now DIRECTLY REACHABLE under the
+        momentum rework (ticket 1): the higher ground_accel (6.5->10) lets the
+        player build enough speed to make a route past the seam corridor that
+        the old physics couldn't, so the level needs no repair at all. (The
+        headroom-qualified break locator and the terminal-fallback machinery
+        this fixture used to exercise stay covered by the physics-independent
+        full-height-wall traps in TestDoorwayCarve / test_platformer_slice,
+        and _body_stand's 1-tall-pocket filter by TestPlanRoom.)"""
         from examples.platformer_pack.level import (
             _SectionState,
             _stitch_and_repair,
@@ -623,20 +633,21 @@ class TestL2CorridorTrap:
             states, w, h, "horizontal", DEFAULT_MOVEMENT, DEFAULT_RULES,
             DEFAULT_TILES, fx["checkpoint_sections"],
         )
-        # Still a genuine design failure (the trap is real)...
-        assert problems
-        # ...but no longer fixated on the 1-tall pocket: the named foothold
-        # must have headroom.
-        assert "(15, 12)" not in problems[0]
+        # The corridor is now traversable under the reworked physics — the
+        # exit is reachable with zero repairs, no design failure remains.
+        assert problems == []
+        assert whole.exit is not None
 
-    def test_terminal_neighbor_fallback_saves_the_real_sections(
+    def test_l2_ships_real_content_no_fallback_under_new_physics(
         self,
     ) -> None:
         """Drive the REAL _generate_sectioned_level with a scripted LLM that
-        always answers with the paid run's section designs — the whole-level
-        rounds burn exactly like the paid run, but the terminal path now
-        falls back the owner AND its seam neighbour, so s2's real islands
-        content ships instead of a whole-flat level."""
+        replays the paid run's section designs. Under the momentum rework
+        (ticket 1) the seam corridor is now traversable, so the level ships
+        ALL its real sections with NO fallback at all — an even better outcome
+        than the terminal neighbour rescue this trap used to need. (The
+        terminal-fallback path itself stays covered by the physics-independent
+        full-height-wall traps.)"""
         import re as _re
 
         from examples.platformer_pack.level import _generate_sectioned_level
@@ -676,15 +687,13 @@ class TestL2CorridorTrap:
                 phase_name="plat:layout",
             )
         )
-        assert fell_back is True  # the trap is real; sections DID fall back
-        assert diag["whole_fallback"] is False, (
-            "the neighbour rescue should beat the whole-level nuke"
-        )
-        rounds = diag["stitch_rounds"]
-        assert any("terminal_neighbor_fallback" in r for r in rounds)
-        assert rounds[-1]["problems"] == []
-        # s2 (islands, the last ~40 columns) survives with real content
-        # above the floor rows.
+        # The reworked physics makes the corridor traversable — no section
+        # falls back, the whole level ships real content.
+        assert fell_back is False
+        assert diag["whole_fallback"] is False
+        assert diag["stitch_rounds"][-1]["problems"] == []
+        # s2 (islands, the last ~40 columns) ships its real content above the
+        # floor rows — as does every other section now.
         s2 = fx["sections"][2]
         lo = s2["x_off"]
         assert (result.grid[: h - 2, lo:] != 0).any(), (
@@ -734,3 +743,183 @@ class TestDoorwayCarve:
             res.grid, res.spawn, exit_, DEFAULT_MOVEMENT
         )
         assert problems, "a 10-wide block must stay a design failure"
+
+
+class TestRepairEconomics:
+    """Postmortem tickets 3a-3d (paid plat_ember run): the four paid traces
+    (l3 mossy_hollow; l7/l8/l8r1 scorched_summit) are the oracles — three
+    levels burned every regen round resubmitting into an identical residue,
+    and l8's round-3 problem carried a validator-COMPUTED fix as prose."""
+
+    _FIX_LINE = (
+        r"# repair fix-line: platform\(\d+,\d+,2\) "
+        r"\(validator-verified, stamped in code\)"
+    )
+
+    @staticmethod
+    def _fixture(level_id: str) -> dict:
+        import json
+        from pathlib import Path
+
+        return json.loads(
+            (
+                Path(__file__).parent
+                / f"fixtures/plat_ember/{level_id}_layout_attempts.json"
+            ).read_text()
+        )
+
+    @staticmethod
+    def _plain_rounds(fixture: dict) -> list[dict]:
+        return [
+            r
+            for r in fixture["stitch_rounds"]
+            if "terminal_local_fallback" not in r
+            and "terminal_neighbor_fallback" not in r
+        ]
+
+    def test_fix_line_rung_stamps_a_verified_op_past_the_budget(self) -> None:
+        """3a: with the bridge budget exhausted, a simulation-verified
+        suggestion is STAMPED under its own small cap (recorded as a
+        fix-line note) instead of shipping as 'Fix: ADD THIS ONE LINE'
+        prose for an LLM round."""
+        import re
+
+        res = stamp(
+            "floor(0,10)\nfloor(19,29)\nspawn(2)", 30, 12,
+            validate_markers=False,
+        )
+        exit_ = place_exit(res.grid)
+        grid, added, problems = auto_bridge_grid(
+            res.grid, res.spawn, exit_, DEFAULT_MOVEMENT, max_bridges=0
+        )
+        assert problems == [], f"the gap should heal computably: {problems}"
+        fix = [n for n in added if n.startswith("# repair fix-line: ")]
+        assert fix, added
+        assert all(re.fullmatch(self._FIX_LINE, n) for n in fix), fix
+        assert exit_ in reachable_cells(grid, res.spawn, DEFAULT_MOVEMENT)
+
+    def test_fix_line_cap_keeps_design_failures_falling_through(self) -> None:
+        """3a: the overflow rung is bounded (MAX_FIX_LINE_STAMPS) — a level
+        needing more verified bridges than the cap still goes back to its
+        sections as a design failure."""
+        from examples.platformer_pack.validate import MAX_FIX_LINE_STAMPS
+
+        floors = "\n".join(
+            f"floor({x},{x + 10})" for x in (0, 21, 42, 63, 84)
+        )
+        res = stamp(
+            floors + "\nspawn(2)", 95, 12, validate_markers=False
+        )
+        exit_ = place_exit(res.grid)
+        grid, added, problems = auto_bridge_grid(
+            res.grid, res.spawn, exit_, DEFAULT_MOVEMENT, max_bridges=0
+        )
+        fix = [n for n in added if n.startswith("# repair fix-line: ")]
+        assert len(fix) == MAX_FIX_LINE_STAMPS, added
+        assert problems, "past the cap the residue must reach the sections"
+
+    def test_paid_l8_fix_text_parses_to_the_op(self) -> None:
+        """3a text oracle: the paid l8 round-3 problem embeds the exact op
+        the budget refused to stamp — the extraction anchor holds."""
+        import re
+
+        prob = self._fixture("l8")["stitch_rounds"][3]["problems"][0]
+        m = re.search(
+            r"changing nothing else: (platform\(\d+,\d+,\d+\))", prob
+        )
+        assert m is not None and m.group(1) == "platform(71,12,2)"
+
+    def test_verbatim_repeat_fires_on_stalled_traces_only(self) -> None:
+        """3b: the detector fires at round 1 for the three paid traces that
+        resubmitted into a byte-identical residue (l3/l7/l8r1) and NEVER for
+        l8, whose break moved every round (repairs made real progress)."""
+        from examples.platformer_pack.level import _verbatim_repeat
+
+        def first_fire(level_id: str) -> int | None:
+            fed: list[dict] = []
+            for r in self._plain_rounds(self._fixture(level_id)):
+                fed.append(
+                    {"round": r["round"], "problems": list(r["problems"])}
+                )
+                if _verbatim_repeat(fed):
+                    return r["round"]
+            return None
+
+        assert first_fire("l3") == 1
+        assert first_fire("l7") == 1
+        assert first_fire("l8r1") == 1
+        assert first_fire("l8") is None
+
+    def test_verbatim_repeat_ignores_clean_and_single_rounds(self) -> None:
+        from examples.platformer_pack.level import _verbatim_repeat
+
+        assert not _verbatim_repeat([{"problems": ["p"]}])
+        # A clean round equals another clean round — nothing to escalate.
+        assert not _verbatim_repeat([{"problems": []}, {"problems": []}])
+
+    def test_section_feedback_names_local_cell_and_ops(self) -> None:
+        """3c: the routed feedback keeps the original problem strings and
+        ADDS a code-computed line per break — the cell rebased to the
+        section's local frame plus the section's own ops at/bordering it
+        (the paid l7/l8 regens burned prose re-deriving this subtraction)."""
+        from examples.platformer_pack.level import _section_feedback
+        from examples.platformer_pack.sections import PlannedSection
+
+        ps = PlannedSection("cave", 54, x_off=63, y_off=0)
+        dsl = "wall(8,0,19)\ngap(8,8)\nledge(2,5,10)\nplatform(30,5,2)"
+        problems = [
+            "exit at (116, 19) is not reachable from spawn (2, 19). The "
+            "player gets as far as (70, 19) but cannot reach the next "
+            "foothold at (74, 19): no standable path connects them. "
+            "[break@70,19]"
+        ]
+        fb = _section_feedback(problems, ps, "horizontal", dsl)
+        assert fb[: len(problems)] == problems  # originals verbatim
+        assert any("Subtract 63" in ln for ln in fb)  # frame note kept
+        located = [ln for ln in fb if "YOUR local cell" in ln]
+        assert len(located) == 1
+        assert "(7,19)" in located[0]  # 70-63, 19-0
+        assert "wall(8,0,19)" in located[0]  # borders local col 7
+        assert "gap(8,8)" in located[0]
+        assert "platform(30,5,2)" not in located[0]  # far away — not named
+        assert "ledge(2,5,10)" not in located[0]
+
+    def test_l8r1_spawn_clear_repairs_the_covered_room(self) -> None:
+        """3d: the paid l8r1 room — the section's own stairs_up covered the
+        spawn cell, snap_spawn_grid found no valid column within its bound,
+        and the byte-identical problem burned every round. The clear rung
+        removes the covering cell(s) as pure geometry, recorded in snaps."""
+        from examples.platformer_pack.level import (
+            _SectionState,
+            _stitch_and_repair,
+        )
+        from examples.platformer_pack.rules import DEFAULT_RULES
+        from examples.platformer_pack.sections import PlannedSection
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        fx = self._fixture("l8r1")
+        w, h = fx["grid_width"], fx["grid_height"]
+        dsl = fx["attempts"][0]["content"]
+        res = stamp(
+            dsl, w, h, tiles=DEFAULT_TILES, validate_markers=False,
+            lenient=True,
+        )
+        assert res.spawn == (1, 11)  # covered by the section's own stairs
+        # The snap alone is exhausted — the paid loop's exact dead end.
+        snapped, moves = snap_spawn_grid(
+            res.grid.copy(), res.spawn, None, DEFAULT_TILES
+        )
+        assert snapped == (1, 11) and moves == []
+        states = [
+            _SectionState(
+                ps=PlannedSection("gauntlet", w, x_off=0, y_off=0),
+                dsl=dsl, res=res, fell_back=False, attempts=[],
+            )
+        ]
+        whole, bridges, snaps, problems = _stitch_and_repair(
+            states, w, h, "horizontal", DEFAULT_MOVEMENT, DEFAULT_RULES,
+            DEFAULT_TILES, [],
+        )
+        assert snaps and snaps[0] == "spawn-clear: cleared (1,11)"
+        assert len(snaps) <= 2  # bounded: cover cell + solid headroom only
+        assert not any("spawn" in p for p in problems), problems

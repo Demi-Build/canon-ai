@@ -417,7 +417,8 @@ def pinned_ids(bible: Any) -> set[str]:
 
 def pinnable_ids(bible: Any) -> set[str]:
     """What `canon pin` accepts: the hash-tracked, file-backed ART
-    artifacts (tileset/enemy/backdrop/player). Level STEPS are excluded
+    artifacts (tileset/enemy/backdrop/player/splash). Level STEPS
+    are excluded
     even though they're hash-tracked: a pinned step under a regenerating
     parent leaves the Bible claiming content its skipped node never
     restored (the collision step rebuilds the whole Level entity) —
@@ -520,6 +521,18 @@ def _iter_hashed_files(bible: Any):
             "sprite_hash",
         )
 
+    world = getattr(bible, "world", None)
+    if (
+        world is not None
+        and getattr(world, "splash_path", "")
+        and getattr(world, "splash_hash", "")
+    ):
+        # The splash card is LEAF art on the World entity: it is
+        # addressed as "splash", never as the world's own id — a
+        # hand-edited card adopts on the World's splash_hash without
+        # staleness cascading through the world's entire descendant set.
+        yield "splash", world.splash_path, world.splash_hash, world, "splash_hash"
+
 
 def _dependency_edges(bible: Any) -> dict[str, set[str]]:
     """artifact_id -> parent artifact_ids, from entity ``parents`` and
@@ -595,6 +608,11 @@ def mark_stale(bible: Any, targets: list[str]) -> RegenPlan:
     for child, parents in edges.items():
         known.add(child)
         known.update(parents)
+    # Hash-tracked file ids are addressable too: leaf art that rides an
+    # entity WITHOUT its own entry in the edge set ("splash" on World)
+    # appears nowhere above, yet owning phases list it in owns() — the
+    # reschedule path initial_skips walks.
+    known.update(aid for aid, *_ in _iter_hashed_files(bible))
 
     explicit: list[str] = []
     for target in targets:

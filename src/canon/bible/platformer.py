@@ -51,6 +51,8 @@ class TileType(IntEnum):
     BREAKABLE = 4  # solid foothold that crumbles after a fuse (sectioned-levels D)
     BOX = 5  # solid item container, broken by head-bump/stomp (items arc)
     SPIKE = 10
+    URCHIN = 11  # underwater seabed hazard (water arc)
+    MINE = 12  # drifting shell hazard, 2 hearts (water arc)
     WATER = 20
 
 
@@ -136,6 +138,10 @@ class World(ArtifactMeta):
     stage_ids: list[str] = Field(default_factory=list)
     edges: list[tuple[str, str]] = Field(default_factory=list)  # connectivity
     unlock_rules: dict[str, Any] = Field(default_factory=dict)
+    #: Generated boot-splash key art (art track): splash/world.png,
+    #: hash-tracked so the splash is edit-detected and pinnable.
+    splash_path: str = ""  # output_dir-relative; "" = engine title card
+    splash_hash: str = ""
 
 
 class Stage(ArtifactMeta):
@@ -219,6 +225,30 @@ class Level(ArtifactMeta):
     entities_hash: str = ""
     items_hash: str = ""
 
+    #: Secret sub-rooms (multi-room arc): ids of the MINI-LEVEL Levels
+    #: entered from this level. Each room is a first-class Level entity
+    #: with its own ``level/<stage>/<room_id>/`` file set, deliberately
+    #: NOT in ``stage.level_ids`` (world map / unlock flow never see it);
+    #: players reach it through a ``room_entrance`` trigger. Rolled
+    #: deterministically in the blueprint — this field is the durable
+    #: parent→room link resolvers and consumers follow.
+    secret_rooms: list[str] = Field(default_factory=list)
+    #: Set on a secret room: the main-map level it is entered from (None
+    #: on main-map levels). A room shares its parent's stage — stage
+    #: resolution for room ids follows this link.
+    parent_level: str | None = None
+    #: Per-level RULE overrides (combat/level-picks arc): validated
+    #: key→value pairs merged over the game-wide rules by both play
+    #: surfaces at level load ("the deep vents: no drop-through"). The
+    #: stage plan proposes them; code validates fail-closed against the
+    #: pack's closed vocabulary. Empty = the game-wide rules apply.
+    rules_overrides: dict[str, Any] = Field(default_factory=dict)
+    #: Per-level MOVEMENT overrides (same flow): merged over the
+    #: game-wide PlayerMovementSpec — the level was VALIDATED under this
+    #: effective spec at generation time (low-gravity levels validate
+    #: with low gravity). Secret rooms inherit their parent's.
+    movement_overrides: dict[str, Any] = Field(default_factory=dict)
+
     # Placements — references, never copies (§6.1)
     entities: list[Placement] = Field(default_factory=list)
     #: Item placements (Arc 2): ``ref item:<id>``, with
@@ -257,6 +287,16 @@ class EnemyDefinition(ArtifactMeta):
     habitats: list[str] = Field(default_factory=lambda: ["*"])
     stats: dict[str, Any] = Field(default_factory=dict)
     behavior: dict[str, Any] = Field(default_factory=dict)
+    #: USER-ONLY art flag (graphics arc): an asymmetric design (a
+    #: satchel on one shoulder) needs BOTH facings drawn instead of the
+    #: default draw-right-flip-left. Never set by any generation phase
+    #: — a hand edit to the definition JSON.
+    asymmetric: bool = False
+    #: Optional per-enemy palette OVERRIDE (graphics arc): an explicit
+    #: named color list this enemy's art quantizes to, falling back to
+    #: the world/stage palette when empty. Membership-only (no
+    #: per-sprite color caps — deferred).
+    palette_override: list[str] = Field(default_factory=list)
     rig: RigManifest | None = None
     portrait_path: str = ""  # output_dir-relative
     #: Generated sprite (art track). Addressed sprite/enemy/<id>/base.png —
@@ -310,6 +350,9 @@ class PlayerDefinition(ArtifactMeta):
 
     sprite_path: str = ""  # output_dir-relative; "" = consumer placeholder
     sprite_hash: str = ""
+    #: USER-ONLY art flag (graphics arc): asymmetric hero designs get
+    #: both facings drawn (see EnemyDefinition.asymmetric).
+    asymmetric: bool = False
     #: VLM-authored per-state animation manifest (art track): the player's
     #: analog of ``EnemyDefinition.stats["animation"]`` — states → {path, hash,
     #: frames, frame_width, frame_height, duration_ms}. Empty = static sprite.

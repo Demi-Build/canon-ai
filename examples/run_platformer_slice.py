@@ -106,6 +106,7 @@ def _fake_section(
     has_breakable: bool = False,
     has_water_cloud: bool = False,
     has_reward: bool = False,
+    msg_hazards: str = "",
 ) -> str:
     """Deterministic per-SECTION layout for the $0 fake run (the sectioned
     ``stamp_level_collision`` calls the Layout Agent once PER section). Sized
@@ -172,14 +173,18 @@ def _fake_section(
         cloud = [_water(4, g - 4, 6, g - 3)]
     if archetype == "gauntlet" and width >= 16:
         # A short crumbling stretch on the ground (breakable floor, Chunk D —
-        # only if the registry has the tile) + floating platform tiers.
-        # breakable is a solid foothold, so the level stays reachable; a
-        # lingering player would drop through it in play.
+        # only if the registry has the tile) + floating platform tiers +
+        # a short spike strip ON the floor (a dry FOOTED hazard — the
+        # emberborn post + hazard-vocabulary exercise, combat arc).
         crumble = [f"breakable({mid - 3},{mid - 1})"] if has_breakable else []
         lines += crumble + [
             f"platform({mid},{g - 3},3)",
             f"platform({mid + 4},{g - 5},3)",
-        ] + cloud
+        ] + (
+            [f"hazard_strip({haz},{mid + 8},{mid + 9})"]
+            if width >= 22
+            else []
+        ) + cloud
     elif archetype == "cave" and width >= 14:
         # Ceiling stalactites hanging from the top — enclosed, ground clear.
         lines += [
@@ -205,6 +210,48 @@ def _fake_section(
             f"gap({mid + 2},{mid + 3})",
             f"platform({mid + 5},{g - 3},3)",
         ] + cloud
+    elif archetype == "vault" and width >= 12:
+        # A secret-room treasure vault (multi-room arc): dry shelves +
+        # ledges stacked with reward markers — the item pass lands
+        # premium items on the anchors. Every shelf jump-reachable.
+        lines += [
+            f"platform(3,{g - 3},2)",
+            f"ledge({mid},{mid + 2},{g - 4})",
+        ]
+        if has_reward:
+            lines += [
+                f"reward(3,{g - 4})",
+                f"reward({mid + 1},{g - 5})",
+                f"reward({right - 2},{g - 2})",
+            ]
+    elif archetype == "lair" and width >= 12:
+        # A secret-room monster den: an open arena floor with flanking
+        # platforms — room to fight, nothing blocking the portal.
+        lines += [
+            f"platform(3,{g - 3},2)",
+            f"platform({right - 5},{g - 3},2)",
+        ]
+    elif archetype == "reef" and width >= 14:
+        # A submerged reef (water arc): coral shelves + an urchin thicket
+        # on the seabed — generated DRY (jump-reachable) and flooded by
+        # the code pass afterward. Urchin only when the registry offers it.
+        lines += [
+            f"ledge({mid - 4},{mid - 1},{g - 3})",
+            f"platform({mid + 2},{g - 5},3)",
+        ]
+        if "urchin" in msg_hazards:
+            lines.append(f"hazard_strip(urchin,{mid - 7},{mid - 6})")
+    elif archetype == "trench" and width >= 14:
+        # A drowned canyon (water arc): sheer walls with a carved channel
+        # the player threads — dry-reachable pre-flood, swum after. Mine
+        # only when the registry offers it.
+        lines += [
+            f"wall({mid - 2},1,{g - 5})",
+            f"wall({mid + 2},1,{g - 5})",
+            f"carve({mid - 2},{g - 6},{mid + 2},{g - 6})",
+        ]
+        if "mine" in msg_hazards:
+            lines.append(f"hazard_strip(mine,{right - 5},{right - 4})")
     # Checkpoints are STITCHER-placed from the blueprint now (count scales with
     # the section count, reachable by construction) — sections never emit them.
     return "\n".join(lines)
@@ -253,7 +300,10 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
     bodies), "surface" = top-row cells (surface riders), "pocket" =
     cells inside a 2x2 all-water block (floaters)."""
     stand_m = re.search(r"y from top\): (.+)\n", msg)
-    vol_m = re.search(r"swimmers ONLY go here\): (.+)\n", msg)
+    # Anchor on the stable line prefixes, not the parenthetical wording —
+    # the seabed disambiguation (ticket 5a) reworded both parentheticals.
+    vol_m = re.search(r"Volume cells by tile \([^)]*\): (.+)\n", msg)
+    seabed_m = re.search(r"Submerged ground \([^)]*\): (.+)\n", msg)
     spawn_m = re.search(r"Player spawn: \[(\d+), (\d+)\]", msg)
     spawn_x = int(spawn_m.group(1)) if spawn_m else 0
 
@@ -262,6 +312,14 @@ def _fake_spots(msg: str) -> dict[str, list[tuple[int, int]]]:
         for c in (_parse_summary_cells(stand_m.group(1)) if stand_m else [])
         if abs(c[0] - spawn_x) >= 5
     )
+    # WATER LEVELS (water arc): no dry land — a WADING land enemy posts
+    # on the submerged flats the prompt lists (seabed policy).
+    if not land_cells and seabed_m:
+        land_cells = sorted(
+            c
+            for c in _parse_summary_cells(seabed_m.group(1))
+            if abs(c[0] - spawn_x) >= 5
+        )
     land: list[tuple[int, int]] = []
     if land_cells:
         seen_x: set[int] = set()
@@ -443,6 +501,8 @@ _FAKE_PALETTE = {
     "breakable": "#cdb36a",  # pale cracked ochre — distinct from ground/platform
     "box": "#b87d2d",  # bronze item container — reads as openable, not terrain
     "danger": "#e0453a",
+    "urchin": "#b9466e",  # spiny rose — warm (r>b, hazard rule)
+    "mine": "#aa5537",  # rusted shell
     "water": "#3a6ea5",
     "lava": "#e8722c",
     "basalt": "#5a4f5c",
@@ -499,11 +559,18 @@ def make_fake_responder():
             views = ["standard"] * n
             if n and is_last_stage:
                 views[-1] = "vista"
+            # One deterministic RULE TWIST (combat/level-picks arc): the
+            # world finale is a low-gravity vault — the $0 canned run
+            # exercises the per-level override path end to end.
+            rules_flags: list[dict] = [{} for _ in range(n)]
+            if n and is_last_stage:
+                rules_flags[-1] = {"gravity": 20.0}
             return json.dumps(
                 {
                     "theme": theme,
                     "level_briefs": briefs,
                     "level_views": views,
+                    "level_rules": rules_flags,
                     "roster_brief": "Ash-crusted vermin and ember constructs.",
                     "effects": [
                         {
@@ -558,6 +625,32 @@ def make_fake_responder():
             pool = json.loads(pool_match.group(1)) if pool_match else []
             spots = _fake_spots(msg)
             land = list(spots["land"])
+            # WATER LEVELS (water arc): a flooded grid offers no standable
+            # cells — lay the coin trail THROUGH the water instead (items
+            # float; the player swims through them). Boxes stay dry.
+            from_water = False
+            if not land:
+                water_m = re.search(
+                    r"swims through them to collect\): (.+)\n", msg
+                )
+                wcells = (
+                    sorted(_parse_summary_cells(water_m.group(1)))
+                    if water_m
+                    else []
+                )
+                if wcells:
+                    seen_wx: set[int] = set()
+                    for idx in (
+                        len(wcells) // 5, len(wcells) // 2,
+                        (4 * len(wcells)) // 5, 0, len(wcells) - 1,
+                    ):
+                        cell = wcells[idx]
+                        if cell[0] not in seen_wx:
+                            seen_wx.add(cell[0])
+                            land.append(cell)
+                        if len(land) == 3:
+                            break
+                    from_water = bool(land)
             anchors_match = re.search(
                 r"put a rare or power-up item AT each\): (\[.*?\])\n", msg
             )
@@ -586,7 +679,7 @@ def make_fake_responder():
             # prompt only teaches boxes when the game HAS a box tile.
             boxed = (powers or heals or coins) if "ITEM BOX" in msg else []
             boxed_id = ""
-            if land and boxed:
+            if land and boxed and not from_water:
                 bx, by = land[0]
                 boxed_id = boxed[0]["id"]
                 placements.append(
@@ -649,7 +742,9 @@ def make_fake_responder():
             # rolled grid — parse both, so the same canned generator plays
             # emberfall (water/spike), a lava world, and any rolled dims.
             vol_match = re.search(r"Volume tiles for volume\(\): (\w+)", msg)
-            haz_match = re.search(r"Hazard tiles for hazard_strip\(\): (\w+)", msg)
+            haz_match = re.search(
+                r"Hazard tiles for hazard_strip\(\): ([^\n(]+)", msg
+            )
             grid_match = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
             diff_match = re.search(r'"difficulty": (\d+)', msg)
             width, height = (
@@ -658,7 +753,8 @@ def make_fake_responder():
                 else (48, 16)
             )
             vol = vol_match.group(1) if vol_match else "water"
-            haz = haz_match.group(1) if haz_match else "spike"
+            haz_list = haz_match.group(1) if haz_match else "spike"
+            haz = haz_list.split(",")[0].strip()
             # Sectioned levels: one layout prompt PER section carries a
             # "### SECTION: <archetype> (<i> of <n>)" marker + LOCAL dims.
             # Emit a per-section sub-layout so the whole stitched level is
@@ -685,6 +781,7 @@ def make_fake_responder():
                         or "volume_cloud(name,x1,y1,x2,y2)" in msg
                     ),
                     has_reward="reward(x,y)" in msg,
+                    msg_hazards=haz_list,
                 )
             return _fake_layout(
                 width, height, vol=vol, haz=haz,
@@ -701,8 +798,10 @@ def make_fake_responder():
             # first for the default game's canonical look.
             offer_match = re.search(r'"variant": one of \[(.*?)\]', msg)
             offered = re.findall(r"'(\w+)'", offer_match.group(1)) if offer_match else []
+            # emberborn is EXCLUDED from the positional stamping — it only
+            # makes sense ON a hazard cell (emitted explicitly below).
             order = [n for n in ("elite", "champion") if n in offered]
-            order += sorted(set(offered) - set(order))
+            order += sorted(set(offered) - set(order) - {"emberborn"})
             # Rarity caps come from the prompt too ("at most 1 'rare' per
             # level") — the canned agent respects them like a real one.
             caps = {
@@ -754,6 +853,33 @@ def make_fake_responder():
                 if len(placements) < len(order):
                     placement["variant"] = order[len(placements)]
                 placements.append(placement)
+            # An EMBERBORN post (combat arc): when the offer carries the
+            # hazard-immune variant AND the prompt lists footed hazard
+            # cells, station one land creature ON the spikes — the $0 run
+            # exercises the whole hazard-immunity path.
+            if "emberborn" in offered:
+                hz_m = re.search(r"standing on the spikes\): (.+)\n", msg)
+                hz_cells = (
+                    sorted(_parse_summary_cells(hz_m.group(1)))
+                    if hz_m
+                    else []
+                )
+                lander = next(
+                    (
+                        e for e in roster
+                        if e["archetype"] not in ("swimmer", "flyer")
+                    ),
+                    None,
+                )
+                if hz_cells and lander is not None:
+                    hx, hy = hz_cells[len(hz_cells) // 2]
+                    placements.append(
+                        {
+                            "enemy_id": lander["id"],
+                            "x": hx, "y": hy,
+                            "variant": "emberborn",
+                        }
+                    )
             return json.dumps({"placements": placements})
         if task == "decor":
             grid_match = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
@@ -843,7 +969,8 @@ def main() -> None:
         "enemy reset, spawn grace) live in game_rules.json.",
     )
     parser.add_argument(
-        "--image-backend", choices=["none", "fake", "fal", "local"],
+        "--image-backend",
+        choices=["none", "fake", "fal", "retro", "pixellab", "local"],
         default="none",
         help="Tilesheet art source (default none = deterministic "
         "placeholder squares). fal/local generate one texture per tile "
@@ -855,6 +982,44 @@ def main() -> None:
         "--image-model", default=None,
         help="Model id for the image backend (default: the backend's, "
         "e.g. fal-ai/nano-banana).",
+    )
+    parser.add_argument(
+        "--art-sample", default=None, metavar="SUBJECT",
+        help="SAMPLE MODE (art-template system): generate ONE exemplar "
+        "('player', 'tile:<name>', or 'palette') through every backend "
+        "in --sample-backends, write side-by-side outputs + a contact "
+        "sheet + grid-drop checks under <output-dir>/sample/, and EXIT "
+        "(no pipeline run). Judge by eye, iterate, then freeze the "
+        "winner as an art_lock.json.",
+    )
+    parser.add_argument(
+        "--sample-backends", default="fake",
+        help="Comma-separated backend names for --art-sample "
+        "(fake,fal,retro,pixellab,local). Backends with missing keys "
+        "are reported and skipped, never fatal.",
+    )
+    parser.add_argument(
+        "--art-lock", default=None,
+        help="Path to an APPROVED art_lock.json (sample->lock->batch): "
+        "its backend/model/seed override the --image-* flags so batch "
+        "generation reproduces the approved exemplar's config. A "
+        "non-approved lock refuses to run.",
+    )
+    parser.add_argument(
+        "--image-edit-model", default=None,
+        help="Model id for the img2img (animation-sheet) endpoint — its "
+        "own lever: --image-model alone never changes the edit path "
+        "(default: the backend's, e.g. fal-ai/nano-banana/edit).",
+    )
+    parser.add_argument(
+        "--image-edit-backend",
+        choices=["none", "fake", "fal", "retro", "pixellab", "local"],
+        default=None,
+        help="Backend for the ANIMATION img2img, when it should differ from "
+        "--image-backend: e.g. --image-backend pixellab generates the "
+        "character sheets and --image-edit-backend fal has nano animate "
+        "them (the sprite backend has no edit endpoint). Default: reuse "
+        "--image-backend.",
     )
     parser.add_argument(
         "--music-backend", choices=["none", "fake", "lyria"],
@@ -974,11 +1139,73 @@ def main() -> None:
     from examples.platformer_pack.tileset_art import build_image_producer
     from examples.platformer_pack.vlm_qa import build_vlm_judge
 
-    image_producer = build_image_producer(args.image_backend, args.image_model)
+    graphics = load_graphics(args.graphics) if args.graphics else load_graphics()
+
+    # SAMPLE MODE (art-template system): one exemplar across backends,
+    # then exit — the human judges; no pipeline runs, nothing paid
+    # happens unless the user listed a keyed backend themselves.
+    if args.art_sample:
+        from examples.platformer_pack.art_sampling import run_art_sample
+
+        result = run_art_sample(
+            args.art_sample,
+            [b.strip() for b in args.sample_backends.split(",") if b.strip()],
+            graphics,
+            output_dir / "sample",
+            model=args.image_model,
+        )
+        print(f"\nArt sample '{result['subject']}' → {output_dir}/sample/")
+        for entry in result["results"]:
+            files = entry.get("files", {})
+            note = entry.get("error") or ", ".join(
+                str(v) for v in (
+                    files.values() if isinstance(files, dict) else files
+                )
+            )
+            print(f"  {entry['backend']}: {note}")
+        if result.get("contact_sheet"):
+            print(f"  contact sheet: {result['contact_sheet']}")
+        print(
+            "Judge by eye (grid-drop images show footprint/hitbox/anchor); "
+            "iterate on the lane JSON; freeze the winner as art_lock.json "
+            "and batch with --art-lock."
+        )
+        return
+
+    # BATCH under a LOCK: the approved sample's config replaces the
+    # ad-hoc --image-* flags (sample -> lock -> batch).
+    lock_seed: int | None = None
+    if args.art_lock:
+        from examples.platformer_pack.art_lock import load_art_lock
+
+        lock = load_art_lock(args.art_lock)
+        if lock.status != "approved":
+            raise SystemExit(
+                f"--art-lock {args.art_lock} has status {lock.status!r} — "
+                "batch generation runs only against an APPROVED lock "
+                "(locking is the approval)."
+            )
+        if lock.backend:
+            args.image_backend = lock.backend
+        if lock.model:
+            args.image_model = lock.model
+        if lock.edit_model:
+            args.image_edit_model = lock.edit_model
+        lock_seed = lock.seed
+        if lock.graphics and args.graphics and lock.graphics != args.graphics:
+            print(
+                f"!! art_lock froze graphics {lock.graphics!r} but "
+                f"--graphics is {args.graphics!r} — the lock's exemplar "
+                "was approved under a different lane."
+            )
+
+    image_producer = build_image_producer(
+        args.image_backend, args.image_model, args.image_edit_model,
+        seed=lock_seed, edit_kind=args.image_edit_backend,
+    )
     music_producer = build_music_producer(args.music_backend)
     sfx_producer = build_sfx_producer(args.sfx_backend)
     vlm_judge = build_vlm_judge(args.vlm_backend, args.vlm_model)
-    graphics = load_graphics(args.graphics) if args.graphics else load_graphics()
     if args.orchestrate:
         from canon.pipeline.orchestrator import detect_edits
         from examples.platformer_pack.dag import run_orchestrated

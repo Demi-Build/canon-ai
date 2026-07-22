@@ -25,7 +25,8 @@
 # change. Controls: arrows/A-D move, Space/W/Up jump or swim, R restart,
 # Esc quit. Stomp: land on an enemy's head to damage it and bounce.
 #
-# World flow (multi-stage): a DK/SMW-style WORLD MAP (manifest
+# World flow (multi-stage): a boot SPLASH card (manifest "splash" key
+# art, when present) → a DK/SMW-style WORLD MAP (manifest
 # "world_map", code-laid nodes clustered per biome) → START overlay
 # (scene frozen, any input begins + starts the level timer) → play →
 # END overlay ("Congratulations!" + time) → back to the map, node marked
@@ -42,6 +43,7 @@ const BODY_R := 0.85
 var view_w_cells := 20.0
 var view_rows_cells := 16.0  # rows visible for a VERTICAL (climb) level
 var actor_scale := 1.4
+var water_alpha := 0.55  # volume tile opacity — draw only, physics untouched
 # Combat tuning (manifest "combat" block; defaults mirror combat.py).
 var max_hearts := 3
 var stomp_damage := 6
@@ -57,8 +59,8 @@ var level_display := {}  # level_id -> "1-1" display name (world_map nodes)
 var level_ids: Array
 var level_index := 0
 
-# --- world flow: MAP -> START -> PLAYING -> END -> MAP ---
-enum GameState { MAP, START, PLAYING, END }
+# --- world flow: (SPLASH ->) MAP -> START -> PLAYING -> END -> MAP ---
+enum GameState { MAP, START, PLAYING, END, SPLASH }
 var game_state: int = GameState.MAP
 var map_root: CanvasLayer
 var overlay_root: CanvasLayer
@@ -68,6 +70,13 @@ var map_move_cool := 0.0
 var input_armed := false  # any-key gates fire only after all keys release
 var beaten := {}  # level_id -> true; persisted per seed
 var level_time := 0.0
+# Boot splash (generated world key art): hold, then fade to the map. The
+# PLAT_LEVEL fast paths return from _ready before this state can exist.
+const SPLASH_HOLD_S := 1.2
+const SPLASH_FADE_S := 0.6
+var splash_root: CanvasLayer
+var splash_view: Node2D  # modulated for the fade (CanvasLayer can't be)
+var splash_t := 0.0  # counts down HOLD + FADE
 # Verification-only: PLAT_TRAJ=<path> dumps every enemy's world position +
 # alerted flag per PLAYING frame (the pygame harness dumps the same format),
 # so the two surfaces' movement can be diffed in world space independent of
@@ -80,7 +89,30 @@ var _traj_frame := 0
 var _hold_mode := ""
 var _hold_jump_every := 0
 var _play_frame := 0
+# PLAT_ACTIONS="<frame>:<down|up>,..." — scripted SINGLE-FRAME inputs the
+# PLAT_HOLD vocabulary can't express: "down" holds the Down key for exactly
+# that frame (pipe entry / drop-through), "up" presses jump/Up (door entry;
+# dry ground only — both surfaces ignore a submerged scripted up). Frame
+# numbers are the traj line numbers. Mirrors the pygame hook.
+var _actions: Dictionary = {}
 var save_path := ""
+
+# --- multi-room secret levels ---------------------------------------------
+# A secret room is a mini-level entered from a room_entrance trigger (pipe =
+# Down, door = Up/jump) and left through its room_portal (same verb). The
+# player's CARRY state (hearts/coins/held/level_time) crosses the switch;
+# per-level CACHES restore what a map looked like when you left it; death
+# inside a room EJECTS to the parent's checkpoint (user-locked doctrine).
+# platformer_play.py mirrors every branch — mechanics parity.
+var _in_room := false
+var _room_return_level := ""
+var _room_return_at := Vector2.ZERO
+var _pending_eject := false
+var _current_level_id := ""
+var _level_caches: Dictionary = {}  # level_id -> persistent map state
+var room_marks: Array = []  # entrance/portal marks on the CURRENT map
+var _crumbled: Array = []  # cells crumbled on the CURRENT map (cache food)
+var _room_id_re: RegEx = null
 
 var grid: Array = []
 var terrain: Array = []
@@ -111,6 +143,14 @@ var air_jump_ok := false
 # cosmetic rise of a box's item as it auto-collects. Mirrors pygame.
 var spent_boxes := {}
 var pops: Array = []
+# One-shot VFX (dust/splash/sparkle prop sprites): the pops {node, t}
+# idiom, faded over VFX_LIFE_S then freed. GODOT-ONLY cosmetics — the
+# pygame harness stays the pre-art surface; never read by physics.
+const VFX_LIFE_S := 0.35
+var vfx: Array = []
+# Volume-ENTRY latch (the was_airborne idiom): last frame's in-volume
+# state, so a splash fires once per plunge — not every submerged frame.
+var in_volume_prev := false
 var enemies: Array = []
 var checkpoints: Array = []
 
@@ -147,11 +187,22 @@ var on_ground := false
 # Armed each tick from the deterministic foot probe, consumed by any jump.
 # Mirrors platformer_play.py byte-for-byte.
 var coyote_t := 0.0
-# Player animation (art track): idle/walk/JUMP, loaded at spawn. Empty → the
-# static base sprite plays (loud fallback).
+# Player animation (art track): idle/walk/jump/fall/land/skid, loaded at
+# spawn. Empty → the static base sprite plays (loud fallback).
 var player_anim: Dictionary = {}
 var player_anim_t := 0.0
+var player_anim_state := ""  # last picked state — the "once"/clock latch
 var player_facing := 1.0
+# Landing one-shot window (presentation only): armed on the airborne →
+# grounded EDGE in the physics step, read by the anim candidates + the
+# landing squash — never by physics. platformer_play.py shares the value.
+const LAND_ANIM_S := 0.15
+var land_t := 0.0
+# Squash & stretch (godot-only visual): base node scale + untrimmed texture
+# size captured at spawn for bottom-center-compensated scaling (Sprite2D
+# only; the ColorRect fallback never scales).
+var player_base_scale := Vector2.ONE
+var player_tex_size := Vector2.ZERO
 var won := false
 var hearts := 3
 var iframes := 0.0  # post-hit invulnerability countdown
@@ -168,7 +219,17 @@ var world_root: Node2D
 var decor_root: Node2D
 var sky_root: CanvasLayer
 var backdrop_root: ParallaxBackground
+# FOREGROUND occlusion bands (backdrop depths > 1.0): scene-canvas
+# Parallax2D nodes raised above decor_root — in front of the world and
+# the player, still under the UI CanvasLayer (a CanvasLayer integer
+# can't sit between 0 and 1).
+var foreground_root: Node2D
 var effects_root: CanvasLayer
+# Lighting effect kinds build SCENE-canvas nodes (CanvasModulate /
+# PointLight2D / WorldEnvironment) — the effects_root CanvasLayer would
+# tint its own overlay canvas, not the world.
+var light_root: Node2D
+var player_light_node: PointLight2D = null
 var camera: Camera2D
 var player_node: CanvasItem
 var status: Label
@@ -200,6 +261,7 @@ func _ready() -> void:
 	view_w_cells = float(gfx.get("view_cells", 20))
 	view_rows_cells = float(gfx.get("view_rows", 16))
 	actor_scale = float(gfx.get("actor_scale", 1.4))
+	water_alpha = float(gfx.get("water_alpha", 0.55))
 	var combat: Dictionary = manifest.get("combat", {})
 	max_hearts = int(combat.get("player_max_hearts", 3))
 	stomp_damage = int(combat.get("stomp_damage", 6))
@@ -234,6 +296,12 @@ func _ready() -> void:
 	var hje := OS.get_environment("PLAT_HOLD_JUMP_EVERY")
 	if hje != "":
 		_hold_jump_every = int(hje)
+	var acts := OS.get_environment("PLAT_ACTIONS")
+	if acts != "":
+		for token in acts.split(",", false):
+			var pair := token.split(":")
+			if pair.size() == 2:
+				_actions[int(pair[0])] = String(pair[1]).strip_edges()
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
 	# DIRECTLY (no map, no start overlay — frame-capture runs verify any
 	# level without input).
@@ -245,7 +313,84 @@ func _ready() -> void:
 			_load_level(level_index)
 			game_state = GameState.PLAYING
 			return
-	_enter_map()
+		if _stage_for_id(env_level) != "":
+			# A SECRET ROOM id (never in level_ids) boots directly by id —
+			# the scenario hook for room-mechanics verification runs.
+			_load_level_by_id(env_level)
+			game_state = GameState.PLAYING
+			return
+	# Boot splash: the world's key art (manifest "splash", written by
+	# WorldArtPhase). Read defensively — older trees carry no key; a
+	# missing key or file boots straight to the map, exactly as before.
+	var splash_rel := str(manifest.get("splash", ""))
+	if splash_rel != "" and FileAccess.file_exists("res://" + splash_rel):
+		_enter_splash(splash_rel)
+	else:
+		_enter_map()
+
+
+# ---------------------------------------------------------------------------
+# Boot splash — the world's key art letterboxed over black, title + "press
+# any key"; hold then fade to the map (countdown-modulate idiom, no
+# tweens). No asset => the map boots directly (code screens need no
+# images — loud-fallback doctrine).
+# ---------------------------------------------------------------------------
+
+
+func _enter_splash(splash_rel: String) -> void:
+	splash_root = CanvasLayer.new()
+	# Above the START/END overlay layer (20): the card owns the screen.
+	splash_root.layer = 30
+	add_child(splash_root)
+	splash_view = Node2D.new()
+	splash_root.add_child(splash_view)
+	var vp := get_viewport_rect().size
+	var bg := ColorRect.new()
+	bg.color = Color.BLACK
+	bg.size = vp
+	splash_view.add_child(bg)
+	var image := Image.load_from_file(
+		ProjectSettings.globalize_path("res://" + splash_rel)
+	)
+	if image != null:
+		var texture := ImageTexture.create_from_image(image)
+		var sprite := Sprite2D.new()
+		sprite.texture = texture
+		sprite.centered = false
+		sprite.texture_filter = tile_filter
+		# Uniform FIT scale: letterboxed, centered in the 1280x720 viewport.
+		var s := minf(
+			vp.x / float(image.get_width()), vp.y / float(image.get_height())
+		)
+		sprite.scale = Vector2(s, s)
+		sprite.position = (
+			vp - Vector2(image.get_width(), image.get_height()) * s
+		) / 2.0
+		splash_view.add_child(sprite)
+	var title_label := Label.new()
+	title_label.text = str(manifest["world"])
+	title_label.add_theme_font_size_override("font_size", 72)
+	title_label.position = Vector2(0.0, vp.y * 0.68)
+	title_label.size = Vector2(vp.x, 90.0)
+	title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	splash_view.add_child(title_label)
+	var sub_label := Label.new()
+	sub_label.text = "press any key"
+	sub_label.add_theme_font_size_override("font_size", 24)
+	sub_label.position = Vector2(0.0, vp.y * 0.68 + 96.0)
+	sub_label.size = Vector2(vp.x, 40.0)
+	sub_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	splash_view.add_child(sub_label)
+	splash_t = SPLASH_HOLD_S + SPLASH_FADE_S
+	game_state = GameState.SPLASH
+	input_armed = false
+
+
+func _dismiss_splash() -> void:
+	if splash_root != null:
+		splash_root.queue_free()
+		splash_root = null
+		splash_view = null
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +416,17 @@ func _world_complete() -> bool:
 func _enter_map() -> void:
 	# The map replaces the level view: free the world, keep the last
 	# stage's music playing (its biome is where the player stands).
-	for node in [world_root, backdrop_root, effects_root]:
+	for node in [world_root, backdrop_root, foreground_root, effects_root, light_root]:
 		if node != null:
 			node.queue_free()
 	world_root = null
 	backdrop_root = null
+	foreground_root = null
 	effects_root = null
+	light_root = null
+	player_light_node = null
 	_dismiss_overlay()
+	_dismiss_splash()
 	if hearts_root != null:
 		hearts_root.visible = false
 	map_selected = clampi(_first_unbeaten(), 0, level_ids.size() - 1)
@@ -556,11 +705,50 @@ func _load_item_defs() -> void:
 		item_defs[item_id] = _load_json("res://item/%s.json" % item_id)
 
 
+func _stage_for_id(level_id: String) -> String:
+	# The stage owning a level id. A SECRET ROOM id (l3r1 — never in the
+	# manifest stages lists) resolves to its parent's stage, so a room is
+	# loadable even as the very first level (PLAT_LEVEL=l3r1 scenarios).
+	if level_stage.has(level_id):
+		return str(level_stage[level_id])
+	if _room_id_re == null:
+		_room_id_re = RegEx.new()
+		_room_id_re.compile("^(.+\\d)r\\d+$")
+	var m := _room_id_re.search(level_id)
+	if m != null and level_stage.has(m.get_string(1)):
+		return str(level_stage[m.get_string(1)])
+	return stage_id
+
+
 func _load_level(index: int) -> void:
-	var level_id: String = level_ids[index]
-	_enter_stage(level_stage.get(level_id, stage_id))
+	# Index wrapper for the world-map/retry flow; ids are the real key —
+	# a SECRET ROOM (multi-room arc) is a level id that is never in
+	# level_ids, loaded by id through _load_level_by_id.
+	level_index = index
+	_load_level_by_id(level_ids[index])
+
+
+func _load_level_by_id(level_id: String, preserve := false, arrive: Variant = null) -> void:
+	# ``preserve`` = a state-preserving ROOM SWITCH: the carried player
+	# state (hearts/coins/held/timer) survives, and the map's persistent
+	# cache restores after the rebuild. ``arrive`` overrides the landing
+	# cell (a return point, or the sentinel "respawn" for an eject).
+	_current_level_id = level_id
+	_enter_stage(_stage_for_id(level_id))
 	var base := "res://level/%s/%s" % [stage_id, level_id]
 	var level: Dictionary = _load_json(base + "/level.json")
+	# Per-level overrides (combat/level-picks arc): re-derive the
+	# EFFECTIVE rules/movement for THIS level — manifest base + the
+	# level's validated override dicts. Every other rules read is live
+	# off the member; break_delay_s is the one cached scalar. Mirrors
+	# platformer_play.py's run_level merge (mechanics parity).
+	movement = (manifest["movement"] as Dictionary).duplicate()
+	for k in (level.get("movement_overrides", {}) as Dictionary):
+		movement[k] = level["movement_overrides"][k]
+	rules = (manifest.get("rules", {}) as Dictionary).duplicate()
+	for k in (level.get("rules_overrides", {}) as Dictionary):
+		rules[k] = level["rules_overrides"][k]
+	break_delay_s = float(rules.get("break_delay_s", 0.6))
 	grid = _load_json(base + "/collision.grid.json")["collision"]
 	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
 	tile_fuses.clear()  # per-level breakable state (broken tiles reset on reload)
@@ -602,11 +790,17 @@ func _load_level(index: int) -> void:
 	# Items layer BEFORE tile building: box placements overlay their solid
 	# tile onto the grid, so _build_tiles gives them real tile nodes and
 	# collision Just Works (platformer_play.py overlays identically).
-	# Fresh level load = fresh item state; respawn never touches it.
+	# Fresh level load = fresh item state; respawn never touches it. A
+	# room SWITCH preserves the carried coins (per-map state comes back
+	# from the cache after the rebuild instead).
 	level_items.clear()
-	coins = 0
+	if not preserve:
+		coins = 0
 	spent_boxes.clear()
 	pops.clear()
+	vfx.clear()  # nodes die with world_root; the pool list resets with it
+	in_volume_prev = false
+	_crumbled = []
 	if FileAccess.file_exists(base + "/items.json"):
 		for rec in (_load_json(base + "/items.json") as Array):
 			var d: Dictionary = item_defs.get(str(rec["item_id"]), {})
@@ -636,8 +830,24 @@ func _load_level(index: int) -> void:
 	_build_markers(level.get("triggers", []))
 	_build_items()
 	_spawn_enemies(_load_json(base + "/entities.json"))
-	_spawn_player()
+	_spawn_player(preserve)
+	# Persistent per-map state comes back AFTER every node exists
+	# (collected items hide, spent boxes shade, crumbles clear, claimed
+	# checkpoints raise, dead enemies stay dead, respawn point moves).
+	_restore_level_cache()
+	if preserve:
+		if typeof(arrive) == TYPE_STRING and str(arrive) == "respawn":
+			_place_player_at(respawn_point)
+		elif arrive != null:
+			_place_player_at(arrive)
+		_refresh_hearts()
 	_build_decor(level.get("foreground", []))
+	if foreground_root != null:
+		# Occlusion bands in front of everything on the scene canvas —
+		# decor and the player included. CanvasLayers (UI/effects/sky)
+		# order by layer number, not sibling order, so this only reorders
+		# the layer-0 draw.
+		move_child(foreground_root, get_child_count() - 1)
 	_build_effects()
 	won = false
 	if hearts_root != null:
@@ -686,9 +896,17 @@ func _build_backdrop() -> void:
 	# Generated parallax scenery (art track) — ParallaxBackground scrolls
 	# each band by its authored depth as the camera moves. Absent bands
 	# (fake/fallback path) leave the gradient sky as the whole backdrop.
+	# Depth SPLIT: bands <= 1.0 land in the layer -100 ParallaxBackground
+	# behind gameplay; depth > 1.0 = FOREGROUND occluders on the scene
+	# canvas (Parallax2D, scroll_scale > 1), raised above decor_root after
+	# _build_decor so they draw in front of the world and the player but
+	# behind the UI CanvasLayer.
 	if backdrop_root != null:
 		backdrop_root.queue_free()
 		backdrop_root = null
+	if foreground_root != null:
+		foreground_root.queue_free()
+		foreground_root = null
 	if not FileAccess.file_exists("res://backdrop/%s/manifest.json" % stage_id):
 		return
 	var bd: Dictionary = _load_json("res://backdrop/%s/manifest.json" % stage_id)
@@ -705,24 +923,38 @@ func _build_backdrop() -> void:
 		)
 		if image == null:
 			continue
-		var layer := ParallaxLayer.new()
 		var depth := float(depths[i]) if i < depths.size() else 0.5
-		layer.motion_scale = Vector2(depth, 1.0)
 		var texture := ImageTexture.create_from_image(image)
 		var s := (grid_h * CELL) / float(image.get_height())
 		var band_w := image.get_width() * s
+		if depth > 1.0:
+			if foreground_root == null:
+				foreground_root = Node2D.new()
+				add_child(foreground_root)
+			var par := Parallax2D.new()
+			par.scroll_scale = Vector2(depth, 1.0)
+			par.repeat_size = Vector2(band_w, 0)
+			_add_band_copies(par, texture, s, band_w)
+			foreground_root.add_child(par)
+			continue
+		var layer := ParallaxLayer.new()
+		layer.motion_scale = Vector2(depth, 1.0)
 		layer.motion_mirroring = Vector2(band_w, 0)
-		# Two copies side by side: mirroring alone left a void beyond one
-		# band width until the camera moved (seen in frame captures).
-		for copy_index in range(2):
-			var sprite := Sprite2D.new()
-			sprite.texture = texture
-			sprite.centered = false
-			sprite.texture_filter = tile_filter
-			sprite.scale = Vector2(s, s)
-			sprite.position = Vector2(band_w * copy_index, 0)
-			layer.add_child(sprite)
+		_add_band_copies(layer, texture, s, band_w)
 		backdrop_root.add_child(layer)
+
+
+func _add_band_copies(parent: Node2D, texture: Texture2D, s: float, band_w: float) -> void:
+	# Two copies side by side: mirroring/repeat alone left a void beyond
+	# one band width until the camera moved (seen in frame captures).
+	for copy_index in range(2):
+		var sprite := Sprite2D.new()
+		sprite.texture = texture
+		sprite.centered = false
+		sprite.texture_filter = tile_filter
+		sprite.scale = Vector2(s, s)
+		sprite.position = Vector2(band_w * copy_index, 0)
+		parent.add_child(sprite)
 
 
 func _build_effects() -> void:
@@ -735,32 +967,109 @@ func _build_effects() -> void:
 	if effects_root != null:
 		effects_root.queue_free()
 		effects_root = null
+	if light_root != null:
+		light_root.queue_free()
+		light_root = null
+	player_light_node = null
 	if stage_effects.is_empty():
 		return
 	effects_root = CanvasLayer.new()
 	effects_root.layer = 10
 	add_child(effects_root)
+	# Lighting kinds live on the SCENE canvas: a CanvasModulate inside
+	# effects_root (its own CanvasLayer) would tint the overlay, not the
+	# world. Sibling order is irrelevant for modulate/light/environment.
+	light_root = Node2D.new()
+	add_child(light_root)
 	for effect in stage_effects:
-		if str(effect.get("name", "")) != "particles_falling":
-			continue
 		var params: Dictionary = effect.get("params", {})
-		var speed := float(params.get("speed", 80))
-		var particles := CPUParticles2D.new()
-		particles.amount = int(params.get("density", 40))
-		particles.lifetime = (vp.y + 64.0) / maxf(speed, 1.0)
-		particles.preprocess = particles.lifetime
-		particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
-		particles.emission_rect_extents = Vector2(vp.x / 2.0 + 32.0, 4.0)
-		particles.position = Vector2(vp.x / 2.0, -8.0)
-		particles.direction = Vector2(float(params.get("drift", 0)), speed)
-		particles.spread = 6.0
-		particles.gravity = Vector2.ZERO
-		particles.initial_velocity_min = speed * 0.8
-		particles.initial_velocity_max = speed * 1.2
-		particles.scale_amount_min = float(params.get("size", 2))
-		particles.scale_amount_max = float(params.get("size", 2)) * 1.5
-		particles.color = Color(str(params.get("color", "#e8e8f0")))
-		effects_root.add_child(particles)
+		match str(effect.get("name", "")):
+			"particles_falling":
+				var speed := float(params.get("speed", 80))
+				var particles := CPUParticles2D.new()
+				particles.amount = int(params.get("density", 40))
+				particles.lifetime = (vp.y + 64.0) / maxf(speed, 1.0)
+				particles.preprocess = particles.lifetime
+				particles.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+				particles.emission_rect_extents = Vector2(vp.x / 2.0 + 32.0, 4.0)
+				particles.position = Vector2(vp.x / 2.0, -8.0)
+				particles.direction = Vector2(float(params.get("drift", 0)), speed)
+				particles.spread = 6.0
+				particles.gravity = Vector2.ZERO
+				particles.initial_velocity_min = speed * 0.8
+				particles.initial_velocity_max = speed * 1.2
+				particles.scale_amount_min = float(params.get("size", 2))
+				particles.scale_amount_max = float(params.get("size", 2)) * 1.5
+				particles.color = Color(str(params.get("color", "#e8e8f0")))
+				effects_root.add_child(particles)
+			"canvas_tint":
+				_build_canvas_tint(params)
+			"player_light":
+				_build_player_light(params)
+			"glow":
+				_build_glow(params)
+			_:
+				pass  # unknown kinds stay inert until an interpreter exists (E.7)
+
+
+func _build_canvas_tint(params: Dictionary) -> void:
+	# Ambient color grade: blend the scene canvas toward the effect color
+	# by strength. The sky and the parallax bands live on their OWN
+	# CanvasLayers (CanvasModulate is per-canvas), so they take the same
+	# blend via modulate — layers must not visibly disagree.
+	var strength := clampf(float(params.get("strength", 0.35)), 0.0, 1.0)
+	var blend := Color.WHITE.lerp(
+		Color(str(params.get("color", "#e8e8f0"))), strength
+	)
+	var tint := CanvasModulate.new()
+	tint.color = blend
+	light_root.add_child(tint)
+	if sky_root != null:
+		for child in sky_root.get_children():
+			(child as CanvasItem).modulate = blend
+	if backdrop_root != null:
+		for layer in backdrop_root.get_children():
+			(layer as CanvasItem).modulate = blend
+
+
+func _build_player_light(params: Dictionary) -> void:
+	# A radial light glued to the player (positioned per-frame beside the
+	# node update — visual only, physics never reads it) over a canvas
+	# darkened by `dim` toward black. Texture is a code-built radial
+	# gradient — the template ships no imported assets.
+	var dark := CanvasModulate.new()
+	dark.color = Color.WHITE.lerp(
+		Color.BLACK, clampf(float(params.get("dim", 0.6)), 0.0, 1.0)
+	)
+	light_root.add_child(dark)
+	var gradient := Gradient.new()
+	gradient.set_color(0, Color(str(params.get("color", "#e8e8f0"))))
+	gradient.set_color(1, Color(0.0, 0.0, 0.0, 0.0))
+	var texture := GradientTexture2D.new()
+	texture.gradient = gradient
+	texture.fill = GradientTexture2D.FILL_RADIAL
+	texture.fill_from = Vector2(0.5, 0.5)
+	texture.fill_to = Vector2(0.5, 0.0)
+	var light := PointLight2D.new()
+	light.texture = texture
+	# GradientTexture2D is 64px square: scale so the lit diameter spans
+	# 2 x radius (params.radius is px).
+	light.texture_scale = float(params.get("radius", 160)) / 32.0
+	light_root.add_child(light)
+	player_light_node = light
+
+
+func _build_glow(params: Dictionary) -> void:
+	# 2D bloom: WorldEnvironment with glow over the canvas. Needs
+	# rendering/viewport/hdr_2d=true — shipped statically in the template
+	# project.godot (glow is silently inert without it).
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CANVAS
+	env.glow_enabled = true
+	env.glow_intensity = float(params.get("intensity", 0.8))
+	var world_env := WorldEnvironment.new()
+	world_env.environment = env
+	light_root.add_child(world_env)
 
 
 func _build_tiles() -> void:
@@ -776,6 +1085,10 @@ func _build_tiles() -> void:
 			sprite.texture_filter = tile_filter
 			sprite.position = Vector2(x, y) * CELL
 			sprite.scale = Vector2(CELL, CELL) / sprite.texture.get_size()
+			# Translucent water: volume tiles show the parallax behind
+			# them — draw only; the physics `volumes` map is untouched.
+			if str(slot_category.get(slot, "")) == "volume":
+				sprite.modulate.a = water_alpha
 			world_root.add_child(sprite)
 			# Remember a breakable tile's node so the fuse can free it on break.
 			if breakable_types.has(int(grid[y][x])):
@@ -786,14 +1099,38 @@ func _build_markers(triggers: Array) -> void:
 	# VISIBLE gameplay props (playtest ask: the exit had no graphic so
 	# levels read as continuing past a teleport, and checkpoints were
 	# abstract boxes). Generated prop sprites when the art track produced
-	# them (manifest "props"), drawn placeholder shapes otherwise. The
-	# exit ZONE stays the whole column — the goal object marks it; the
-	# checkpoint flag raises its colored pennant once claimed.
+	# them (manifest "props"), drawn placeholder shapes otherwise. No
+	# exit-goal doorway is drawn anymore (postmortem ticket 3): the win
+	# zone is the whole column/summit, so the single-cell doorway was a
+	# false affordance. The checkpoint flag still raises its pennant; a
+	# full-height finish-line over the exit column is the future marker.
 	var props: Dictionary = manifest.get("props", {}).get(stage_id, {})
-	_build_exit_goal(str(props.get("exit", "")))
 	checkpoints.clear()
+	room_marks.clear()
 	for t in triggers:
-		if str(t.get("type", "")) != "checkpoint":
+		var kind := str(t.get("type", ""))
+		if kind == "room_entrance" or kind == "room_portal":
+			# Secret-room entrance (main map) / return portal (in-room):
+			# stand on the cell + the entry verb (pipe = Down, door = Up).
+			var params: Dictionary = t.get("params", {})
+			var verb := str(params.get("verb", "pipe"))
+			_build_room_prop(
+				props, verb,
+				Vector2(
+					(float(t["x"]) + 0.5) * CELL, (float(t["y"]) + 1.0) * CELL
+				),
+			)
+			room_marks.append({
+				"x": int(t["x"]),
+				"y": int(t["y"]),
+				"kind": kind,
+				"verb": verb,
+				"room_id": str(params.get("room_id", "")),
+				"return_x": int(params.get("return_x", int(t["x"]))),
+				"return_y": int(params.get("return_y", int(t["y"]))),
+			})
+			continue
+		if kind != "checkpoint":
 			continue
 		var claimed := _build_checkpoint_flag(
 			str(props.get("checkpoint", "")),
@@ -804,6 +1141,40 @@ func _build_markers(triggers: Array) -> void:
 			"active": false,
 			"node": claimed,  # activation flips it visible (claimed look)
 		})
+
+
+func _build_room_prop(props: Dictionary, verb: String, foot: Vector2) -> void:
+	# A green PIPE (enter with Down) or a brown DOOR (enter with Up) —
+	# prop sprite when the art track made one, drawn placeholder shape
+	# otherwise (mirrors platformer_play.py's placeholders).
+	var sprite := _prop_sprite(str(props.get(verb, "")), foot, CELL * 1.5)
+	if sprite != null:
+		world_root.add_child(sprite)
+		return
+	if verb == "pipe":
+		var body := ColorRect.new()
+		body.color = Color8(46, 160, 92)
+		body.size = Vector2(CELL * 0.9, CELL * 1.1)
+		body.position = Vector2(foot.x - CELL * 0.45, foot.y - CELL * 1.1)
+		world_root.add_child(body)
+		var lip := ColorRect.new()
+		lip.color = Color8(58, 190, 110)
+		lip.size = Vector2(CELL * 1.2, CELL * 0.4)
+		lip.position = Vector2(foot.x - CELL * 0.6, foot.y - CELL * 1.5)
+		world_root.add_child(lip)
+	else:
+		var door := ColorRect.new()
+		door.color = Color8(122, 82, 46)
+		door.size = Vector2(CELL * 0.9, CELL * 1.5)
+		door.position = Vector2(foot.x - CELL * 0.45, foot.y - CELL * 1.5)
+		world_root.add_child(door)
+		var knob := ColorRect.new()
+		knob.color = Color8(220, 190, 90)
+		knob.size = Vector2(6, 6)
+		knob.position = Vector2(
+			foot.x + CELL * 0.45 - 10, foot.y - CELL * 0.8
+		)
+		world_root.add_child(knob)
 
 
 func _prop_sprite(sprite_rel: String, foot: Vector2, side: float) -> Sprite2D:
@@ -823,6 +1194,19 @@ func _prop_sprite(sprite_rel: String, foot: Vector2, side: float) -> Sprite2D:
 	sprite.scale = Vector2(side, side) / sprite.texture.get_size()
 	sprite.position = Vector2(foot.x - side / 2.0, foot.y - side)
 	return sprite
+
+
+func _spawn_vfx(prop_name: String, foot: Vector2) -> void:
+	# One-shot cosmetic puff (dust/splash/sparkle): bottom-anchored prop
+	# sprite at ~CELL size, faded out by the pool below. SILENT no-op when
+	# the art track made nothing — a placeholder rectangle for wispy VFX
+	# reads as a bug. GODOT-ONLY; physics never reads the pool.
+	var props: Dictionary = manifest.get("props", {}).get(stage_id, {})
+	var sprite := _prop_sprite(str(props.get(prop_name, "")), foot, CELL)
+	if sprite == null:
+		return
+	world_root.add_child(sprite)
+	vfx.append({"node": sprite, "t": VFX_LIFE_S})
 
 
 func _collect_item(it: Dictionary) -> void:
@@ -847,6 +1231,9 @@ func _collect_item(it: Dictionary) -> void:
 		}
 		held_t = float((it["params"] as Dictionary).get("duration_s", 0))
 	_refresh_hearts()
+	_spawn_vfx("sparkle", Vector2(
+		(float(it["x"]) + 0.5) * CELL, (float(it["y"]) + 1.0) * CELL
+	))
 	_play_sfx("checkpoint")  # closed SFX set — reuse (v1)
 
 
@@ -941,27 +1328,6 @@ func _build_checkpoint_flag(sprite_rel: String, foot: Vector2) -> CanvasItem:
 	return claimed
 
 
-func _build_exit_goal(sprite_rel: String) -> void:
-	# The goal object standing ON the exit cell — the level visibly ENDS
-	# here (you still leave through the whole column, any height).
-	var foot := Vector2((exit_cell.x + 0.5) * CELL, (exit_cell.y + 1.0) * CELL)
-	var sprite := _prop_sprite(sprite_rel, foot, CELL * 2.0)
-	if sprite != null:
-		world_root.add_child(sprite)
-		return
-	# Placeholder goal: a green doorway — frame + translucent glow.
-	var door := Vector2(CELL * 1.1, CELL * 1.8)
-	var glow := ColorRect.new()
-	glow.color = Color(0.25, 1.0, 0.44, 0.35)
-	glow.size = door
-	glow.position = Vector2(foot.x - door.x / 2.0, foot.y - door.y)
-	world_root.add_child(glow)
-	var frame := _outline_frame(door)
-	frame.modulate = Color(0.25, 1.0, 0.44)
-	frame.position = glow.position
-	world_root.add_child(frame)
-
-
 func _spawn_enemies(placements: Array) -> void:
 	enemies.clear()
 	for p in placements:
@@ -1029,14 +1395,26 @@ func _spawn_enemies(placements: Array) -> void:
 			"pos": Vector2(p["x"], p["y"]),
 			"home": Vector2(p["x"], p["y"]),
 			"home_x": float(p["x"]),
+			# WADING (water arc, "seabed" policy): a LAND enemy posted on
+			# a submerged flat may occupy water — computed ONCE from its
+			# placement cell (platformer_play.py mirrors).
+			"amphibious": volumes.has(_tile(float(p["x"]), float(p["y"]))),
+			# Hopper state (combat/level-picks arc): vy + grounded flag +
+			# the hop cadence clock (platformer_play.py mirrors).
+			"vy": 0.0,
+			"hop_t": 0.0,
+			"e_grounded": true,
 			"dir": 1.0,
 			"node": rect,
 			"frame": frame,
 			"frame_off": frame_off,
-			# Per-state animation (art track, B4): frames + clock + last pos
-			# for the moving check. Empty when there's no frames.json (static).
+			# Per-state animation (art track, B4/G4): frames + clock + last
+			# pos for the moving check + the last-picked-state latch (a
+			# state change zeroes the clock so "once" states restart).
+			# Empty when there's no atlas.json/frames.json (static).
 			"anim": _load_anim(str(spec.get("sprite_path", ""))),
 			"anim_t": 0.0,
+			"anim_state": "",
 			"anim_prev": Vector2(p["x"], p["y"]),
 		})
 
@@ -1125,49 +1503,216 @@ func _actor_visual(sprite_rel: String, fallback: Color, size_px: Vector2) -> Can
 
 
 func _load_anim(sprite_rel: String) -> Dictionary:
-	# Per-state animation frames (art track, B4): frames.json beside base.png,
-	# each <state>.png a horizontal strip sliced by frame count. Frames are the
-	# SAME size as base.png (sprite_size square) so a texture swap keeps the
-	# node scale valid. Missing/garbled → {} and the static base sprite plays
-	# (the loud fallback). Returns {"states": {state: [Texture]}, "durs": {...}}.
+	# Per-state animation frames (art track, B4/G4). atlas.json beside
+	# base.png wins: one packed sheet, each frame an AtlasTexture whose
+	# margin re-inflates the trimmed crop to the UNTRIMMED frame_size square
+	# — reported size stays the sprite_size square, so the once-set node
+	# scale stays valid. Fallback: frames.json strips (base.png-sized
+	# uniform cells), then the static base sprite (the loud fallback).
+	# Authored left-facing frames load as "states_left" and play UNFLIPPED.
+	# Returns {"states": {state: [Texture]}, "states_left": {...},
+	# "durs": {state: [float_seconds, ...]}, "loops": {state: String}}.
 	if sprite_rel == "":
 		return {}
-	var meta_path := "res://" + sprite_rel.get_base_dir() + "/frames.json"
+	var base_dir := sprite_rel.get_base_dir()
+	var atlas_anim := _load_atlas_anim(base_dir)
+	if not atlas_anim.is_empty():
+		return atlas_anim
+	var meta_path := "res://" + base_dir + "/frames.json"
 	if not FileAccess.file_exists(meta_path):
 		return {}
 	var meta = JSON.parse_string(FileAccess.get_file_as_string(meta_path))
 	if typeof(meta) != TYPE_DICTIONARY:
 		return {}
 	var states := {}
+	var states_left := {}
 	var durs := {}
+	var loops := {}
 	for state in meta:
 		var m: Dictionary = meta[state]
 		var n := int(m.get("frames", 0))
 		var rel := str(m.get("path", ""))
 		if n < 1 or not FileAccess.file_exists("res://" + rel):
 			continue
-		var image := Image.load_from_file(
-			ProjectSettings.globalize_path("res://" + rel)
-		)
-		if image == null:
+		var texs := _strip_frames(rel, n)
+		if texs.is_empty():
 			continue
-		var fw := image.get_width() / n
-		var fh := image.get_height()
-		var texs: Array = []
-		for i in range(n):
-			var sub := image.get_region(Rect2i(i * fw, 0, fw, fh))
-			texs.append(ImageTexture.create_from_image(sub))
+		var left_rel := str(m.get("path_left", ""))
+		if (
+			left_rel != "" and int(m.get("frames_left", 0)) == n
+			and FileAccess.file_exists("res://" + left_rel)
+		):
+			var left := _strip_frames(left_rel, n)
+			if left.size() == n:
+				states_left[state] = left
 		states[state] = texs
-		durs[state] = maxf(0.001, float(m.get("duration_ms", 120)) / 1000.0)
+		durs[state] = _anim_durs(m, n)
+		loops[state] = str(m.get("loop", "loop"))
 	if states.is_empty():
 		return {}
-	return {"states": states, "durs": durs}
+	return {
+		"states": states, "states_left": states_left,
+		"durs": durs, "loops": loops,
+	}
+
+
+func _strip_frames(rel: String, n: int) -> Array:
+	# One horizontal strip sliced into n uniform base.png-sized cells.
+	var image := Image.load_from_file(
+		ProjectSettings.globalize_path("res://" + rel)
+	)
+	if image == null:
+		return []
+	@warning_ignore("integer_division")
+	var fw := image.get_width() / n
+	var fh := image.get_height()
+	var texs: Array = []
+	for i in range(n):
+		var sub := image.get_region(Rect2i(i * fw, 0, fw, fh))
+		texs.append(ImageTexture.create_from_image(sub))
+	return texs
+
+
+func _load_atlas_anim(base_dir: String) -> Dictionary:
+	# Packed-atlas manifest (G4): {"path", "frame_size", "states": {state:
+	# {"loop", "durations_ms", "frames": [rects], "frames_left": [...]}}}.
+	# Garbled/missing → {} and the caller falls back to the strip path.
+	var meta_path := "res://" + base_dir + "/atlas.json"
+	if not FileAccess.file_exists(meta_path):
+		return {}
+	var meta = JSON.parse_string(FileAccess.get_file_as_string(meta_path))
+	if typeof(meta) != TYPE_DICTIONARY:
+		return {}
+	var rel := str(meta.get("path", ""))
+	var fsize: Variant = meta.get("frame_size", [])
+	var sdict: Variant = meta.get("states", {})
+	if (
+		typeof(fsize) != TYPE_ARRAY or (fsize as Array).size() != 2
+		or typeof(sdict) != TYPE_DICTIONARY
+		or rel == "" or not FileAccess.file_exists("res://" + rel)
+	):
+		return {}
+	var image := Image.load_from_file(
+		ProjectSettings.globalize_path("res://" + rel)
+	)
+	if image == null:
+		return {}
+	var sheet := ImageTexture.create_from_image(image)
+	var fw := int(fsize[0])
+	var fh := int(fsize[1])
+	var states := {}
+	var states_left := {}
+	var durs := {}
+	var loops := {}
+	for state in sdict:
+		var m: Dictionary = sdict[state]
+		var texs := _atlas_frames(sheet, m.get("frames", []), fw, fh)
+		if texs.is_empty():
+			continue
+		var left := _atlas_frames(sheet, m.get("frames_left", []), fw, fh)
+		if left.size() == texs.size():
+			states_left[state] = left
+		states[state] = texs
+		durs[state] = _anim_durs(m, texs.size())
+		loops[state] = str(m.get("loop", "loop"))
+	if states.is_empty():
+		return {}
+	return {
+		"states": states, "states_left": states_left,
+		"durs": durs, "loops": loops,
+	}
+
+
+func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int) -> Array:
+	# AtlasTexture margin re-inflates a trimmed crop: the reported size
+	# becomes the untrimmed frame square, so scale/anchor math holds.
+	var texs: Array = []
+	if typeof(rects) != TYPE_ARRAY:
+		return texs
+	for r in rects:
+		if typeof(r) != TYPE_DICTIONARY:
+			return []
+		var w := int(r.get("w", 0))
+		var h := int(r.get("h", 0))
+		var ox := int(r.get("ox", 0))
+		var oy := int(r.get("oy", 0))
+		var atlas := AtlasTexture.new()
+		atlas.atlas = sheet
+		atlas.region = Rect2(int(r.get("x", 0)), int(r.get("y", 0)), w, h)
+		atlas.margin = Rect2(ox, oy, fw - w - ox, fh - h - oy)
+		texs.append(atlas)
+	return texs
+
+
+func _anim_durs(m: Dictionary, n: int) -> Array:
+	# Per-frame durations in seconds, floored at 1ms. A "durations_ms" list
+	# is honored only when its length matches the frame count (the writer
+	# guarantees it; a desynced hand-edit falls back loudly-uniform); old
+	# entries fan the scalar duration_ms out uniformly — today's behavior
+	# exactly. Mirror of platformer_play._anim_timing.
+	var raw: Variant = m.get("durations_ms")
+	var durs: Array = []
+	if typeof(raw) == TYPE_ARRAY and (raw as Array).size() == n:
+		for d in raw:
+			durs.append(maxf(0.001, float(d) / 1000.0))
+	else:
+		var one := maxf(0.001, float(m.get("duration_ms", 120)) / 1000.0)
+		for i in range(n):
+			durs.append(one)
+	return durs
+
+
+func _walk_durs(t: float, durs: Array) -> int:
+	# Cumulative-duration walk: the frame whose window contains t.
+	var acc := 0.0
+	for i in range(durs.size()):
+		acc += float(durs[i])
+		if t < acc:
+			return i
+	return durs.size() - 1
+
+
+func _anim_index(t: float, durs: Array, loop_mode: String) -> int:
+	# Pure frame-index math for one state (mirror of platformer_play's
+	# _anim_index): per-frame durations walked cumulatively. "loop" (and any
+	# unknown mode) wraps — uniform lists keep the legacy int(t / dur) % n
+	# arithmetic bit-exact for old trees; "once" clamps at the last frame;
+	# "ping_pong" walks 0..n-1..1 on the mirrored cycle. The loader floors
+	# every duration at 1ms, so the sums never hit zero.
+	var n := durs.size()
+	if n <= 1:
+		return 0
+	var total := 0.0
+	for d in durs:
+		total += float(d)
+	if loop_mode == "once":
+		if t >= total:
+			return n - 1
+		return _walk_durs(t, durs)
+	if loop_mode == "ping_pong":
+		var cycle := durs.duplicate()
+		var csum := total
+		for j in range(n - 2, 0, -1):
+			cycle.append(durs[j])
+			csum += float(durs[j])
+		var i := _walk_durs(fmod(t, csum), cycle)
+		return i if i < n else 2 * (n - 1) - i
+	var uniform := true
+	for d in durs:
+		if float(d) != float(durs[0]):
+			uniform = false
+			break
+	if uniform:
+		return int(t / float(durs[0])) % n
+	return _walk_durs(fmod(t, total), durs)
 
 
 func _anim_pick(candidates: Array, states: Dictionary) -> String:
-	# Mirror of platformer_play.pick_anim_frame (parity): the caller builds the
-	# candidate priority list from runtime signals (enemy: hurt>walk>idle;
-	# player: jump>walk>idle); the first that exists wins.
+	# Mirror of platformer_play.pick_anim_frame's state half (parity): the
+	# caller builds the candidate priority list from runtime signals (enemy:
+	# hurt>jump>walk>idle; player: fall/jump airborne, skid>land>walk>idle
+	# grounded) — the first that exists wins. The caller also owns the
+	# state-change latch that zeroes the clock so "once" states restart.
 	for s in candidates:
 		if states.has(s):
 			return s
@@ -1177,7 +1722,7 @@ func _anim_pick(candidates: Array, states: Dictionary) -> String:
 var player_vis_off := Vector2(4, 4)
 
 
-func _spawn_player() -> void:
+func _spawn_player(preserve := false) -> void:
 	if player_node != null:
 		player_node.queue_free()
 	player_node = _actor_visual(
@@ -1186,13 +1731,27 @@ func _spawn_player() -> void:
 		Vector2(CELL - 8, CELL - 8),
 	)
 	player_vis_off = Vector2(4, 4)
+	# Squash/stretch anchor data + the anim latches reset with the node
+	# (pygame's run_level rebuilds its locals the same way per level).
+	player_base_scale = Vector2.ONE
+	player_tex_size = Vector2.ZERO
+	player_anim_state = ""
+	land_t = 0.0
 	if player_node is Sprite2D:
 		# Overdrawn hero: x-centered on the hitbox cell, feet on its floor.
 		var vis := (CELL - 8.0) * actor_scale
 		player_vis_off = Vector2((CELL - vis) / 2.0, CELL - 4.0 - vis)
+		player_base_scale = player_node.scale
+		player_tex_size = player_node.texture.get_size()
 	player_anim = _load_anim("sprite/player/base.png")
 	add_child(player_node)
-	_respawn()
+	if preserve:
+		# Room switch: place only — hearts/held/enemy state carry through
+		# (the caller may re-place at the arrival cell after the cache
+		# restore). The full heal + un-kill trio is death/fresh-load only.
+		_place_player_at(spawn)
+	else:
+		_respawn()
 
 
 func _setup_audio(audio: Dictionary) -> void:
@@ -1241,19 +1800,132 @@ func _play_sfx(event: String) -> void:
 		sfx_players[event].play()
 
 
-func _respawn() -> void:
-	player_pos = respawn_point
+func _save_level_cache() -> void:
+	# Snapshot the CURRENT map's persistent state before leaving it —
+	# what a return trip restores (indices are deterministic: build order
+	# matches the on-disk record order on both surfaces).
+	var collected: Array = []
+	for i in range(level_items.size()):
+		if bool(level_items[i]["collected"]):
+			collected.append(i)
+	var claimed: Array = []
+	for i in range(checkpoints.size()):
+		if bool(checkpoints[i]["active"]):
+			claimed.append(i)
+	var dead: Array = []
+	for i in range(enemies.size()):
+		if not bool(enemies[i]["alive"]):
+			dead.append(i)
+	_level_caches[_current_level_id] = {
+		"collected": collected,
+		"spent": spent_boxes.keys(),
+		"fuses": tile_fuses.duplicate(),
+		"crumbled": _crumbled.duplicate(),
+		"checkpoints": claimed,
+		"dead": dead,
+		"respawn": respawn_point,
+	}
+
+
+func _restore_level_cache() -> void:
+	var cache: Dictionary = _level_caches.get(_current_level_id, {})
+	if cache.is_empty():
+		return
+	for i in cache.get("collected", []):
+		if i >= 0 and i < level_items.size():
+			var it: Dictionary = level_items[i]
+			it["collected"] = true
+			if it["node"] != null:
+				(it["node"] as Node2D).visible = false
+	for key in cache.get("spent", []):
+		var cell: Vector2i = key
+		spent_boxes[cell] = true
+		var shade := ColorRect.new()
+		shade.color = Color8(48, 36, 24)
+		shade.position = Vector2(cell.x * CELL + 4, cell.y * CELL + 4)
+		shade.size = Vector2(CELL - 8, CELL - 8)
+		world_root.add_child(shade)
+	for key in cache.get("fuses", {}):
+		tile_fuses[key] = float(cache["fuses"][key])
+	for key in cache.get("crumbled", []):
+		var ccell: Vector2i = key
+		grid[ccell.y][ccell.x] = 0
+		_crumbled.append(ccell)
+		if tile_nodes.has(ccell):
+			(tile_nodes[ccell] as Node).queue_free()
+			tile_nodes.erase(ccell)
+	for i in cache.get("checkpoints", []):
+		if i >= 0 and i < checkpoints.size():
+			checkpoints[i]["active"] = true
+			(checkpoints[i]["node"] as Node2D).visible = true
+	if cache.has("respawn"):
+		respawn_point = cache["respawn"]
+	for i in cache.get("dead", []):
+		if i >= 0 and i < enemies.size():
+			var enemy: Dictionary = enemies[i]
+			enemy["hp"] = 0.0
+			enemy["alive"] = false
+			enemy["dying_t"] = 0.0
+			(enemy["node"] as Node2D).visible = false
+			if enemy["frame"] != null:
+				(enemy["frame"] as Node2D).visible = false
+
+
+func _enter_room(mark: Dictionary) -> void:
+	# Pipe/door entry: carry the player state into the mini-level; the
+	# return cell (detour = the entrance, shortcut = further along) waits
+	# on this side. level_time keeps running — one level, one timer.
+	_save_level_cache()
+	_room_return_level = _current_level_id
+	_room_return_at = Vector2(mark["return_x"], mark["return_y"])
+	_in_room = true
+	_load_level_by_id(str(mark["room_id"]), true)
+
+
+func _return_from_room() -> void:
+	_save_level_cache()
+	_in_room = false
+	_load_level_by_id(_room_return_level, true, _room_return_at)
+
+
+func _eject_to_parent() -> void:
+	# Death inside a secret room: normal death semantics at the PARENT's
+	# checkpoint — hearts refill, held clears, coins persist, and killed
+	# enemies return EVERYWHERE (checkpoint_enemy_reset), while
+	# collected/spent stay collected (the persistence doctrine).
+	_save_level_cache()
+	if bool(rules.get("checkpoint_enemy_reset", true)):
+		for cache in _level_caches.values():
+			cache["dead"] = []
+	_in_room = false
+	_load_level_by_id(_room_return_level, true, "respawn")
+	_reset_survival()
+	_reset_enemies()
+	_refresh_hearts()
+
+
+func _place_player_at(point: Vector2) -> void:
+	# Position/velocity + the per-arrival transients ONLY — no heal, no
+	# enemy reset. The state-preserving half of a (re)spawn: the
+	# multi-room switch places the player without touching survival.
+	player_pos = point
 	player_vy = 0.0
 	player_vx = 0.0
 	damage_soaked = 0.0
-	hearts = max_hearts
 	iframes = 0.0
 	spawn_shield = 0.0
 	coyote_t = 0.0
+	moved = false  # spawn grace re-engages until the first input
+
+
+func _reset_survival() -> void:
+	hearts = max_hearts
 	held = {}
 	held_t = 0.0
 	air_jump_ok = false  # power-up dies with you
-	moved = false  # spawn grace re-engages until the first input
+
+
+func _reset_enemies() -> void:
 	if bool(rules.get("checkpoint_enemy_reset", true)):
 		# Killed enemies come back on a checkpoint respawn — dying never
 		# leaves a half-cleared level (GameRules kind).
@@ -1266,6 +1938,9 @@ func _respawn() -> void:
 			enemy["swoop_t"] = 0.0
 			enemy["swoop_dir"] = 1.0
 			enemy["swoop_dep"] = 0.0
+			enemy["vy"] = 0.0
+			enemy["hop_t"] = 0.0
+			enemy["e_grounded"] = true
 			enemy["hp"] = enemy["max_hp"]
 			enemy["alive"] = true
 			enemy["hurt_t"] = 0.0
@@ -1273,6 +1948,23 @@ func _respawn() -> void:
 			enemy["node"].visible = true
 			if enemy["frame"] != null:
 				enemy["frame"].visible = true
+
+
+func _respawn() -> void:
+	# Death/arrival: place + full heal + un-kill (the chained trio the
+	# multi-room arc splits so a room switch can preserve state).
+	if _in_room:
+		# Death (or R) inside a secret room EJECTS to the parent's
+		# checkpoint (user-locked). Deferred to the END of _process so
+		# this frame trajs the dead pose — platformer_play.py defers its
+		# eject to the loop bottom the same way (parity).
+		if not _pending_eject:
+			_play_sfx("death")
+		_pending_eject = true
+		return
+	_place_player_at(respawn_point)
+	_reset_survival()
+	_reset_enemies()
 	_refresh_hearts()
 	_play_sfx("death")
 
@@ -1418,17 +2110,25 @@ func _volume_params(x: float, y: float) -> Variant:
 	return null
 
 
-func _enemy_can_occupy(archetype: String, x: float, y: float, swim_style: String = "") -> bool:
+func _enemy_can_occupy(archetype: String, x: float, y: float, swim_style: String = "", amphibious: bool = false, airborne: bool = false, hazard_immune: bool = false) -> bool:
 	# Terrain constraint for an enemy's next step (GameRules-aware):
 	# swimmers stay in their volume (surface-riders on its TOP row); land
-	# enemies keep solid footing and — unless the game is 'amphibious' —
+	# enemies keep solid footing and — unless the game is 'amphibious', or
+	# 'seabed' with THIS enemy posted in water (wading, water arc) —
 	# never enter a volume. NO enemy walks into a hazard or clips through
 	# a solid (behavior doctrine; jumpers are v2). Mirrors
 	# platformer_play.py (mechanics parity).
 	var cell := _tile(x, y)
 	var below := _tile(x, y + 1.0)
-	if hazard.has(cell):
-		return false  # nobody strolls into spikes
+	if airborne:
+		# AIRBORNE occupancy (a hopper mid-arc): solids/one-ways/volumes
+		# block the drift, hazard veto + footing SKIPPED — the arc
+		# carries it over spikes and gaps. platformer_play.py mirrors.
+		return not (blocking.has(cell) or one_way.has(cell) or volumes.has(cell))
+	if hazard.has(cell) and not hazard_immune:
+		# Nobody strolls into spikes — except a hazard-immune variant
+		# (emberborn, combat arc). platformer_play.py mirrors.
+		return false
 	if archetype == "swimmer":
 		if not volumes.has(cell):
 			return false
@@ -1441,7 +2141,8 @@ func _enemy_can_occupy(archetype: String, x: float, y: float, swim_style: String
 		return not (blocking.has(cell) or one_way.has(cell) or volumes.has(cell))
 	if blocking.has(cell) or one_way.has(cell):
 		return false  # no clipping through terrain
-	if volumes.has(cell) and str(rules.get("enemy_water_policy", "swimmers_only")) != "amphibious":
+	var policy := str(rules.get("enemy_water_policy", "swimmers_only"))
+	if volumes.has(cell) and policy != "amphibious" and not (policy == "seabed" and amphibious):
 		return false
 	return blocking.has(below) or one_way.has(below)  # no cliff-walking
 
@@ -1509,7 +2210,11 @@ func _ground_toward(enemy: Dictionary, pos: Vector2, target_x: float, step: floa
 	var nx: float = pos.x + dir_to * step
 	if absf(target_x - pos.x) < step:
 		nx = target_x
-	if _enemy_can_occupy(archetype, nx, pos.y):
+	if _enemy_can_occupy(
+		archetype, nx, pos.y, "",
+		bool(enemy.get("amphibious", false)), false,
+		bool((enemy["behavior"] as Dictionary).get("hazard_immune", false))
+	):
 		pos.x = nx
 	return pos
 
@@ -1575,16 +2280,41 @@ func _process(delta: float) -> void:
 			if input_armed and Input.is_anything_pressed():
 				_enter_map()
 			return
+		GameState.SPLASH:
+			# Hold, then fade (the VFX pool's countdown-modulate idiom);
+			# any key once armed skips straight to the map. _enter_map
+			# frees the splash layer on every path.
+			splash_t -= delta
+			if splash_t <= 0.0 or (input_armed and Input.is_anything_pressed()):
+				_enter_map()
+			elif splash_t <= SPLASH_FADE_S and splash_view != null:
+				splash_view.modulate.a = splash_t / SPLASH_FADE_S
+			return
 	if Input.is_key_pressed(KEY_R):
+		# Full fresh restart of the map LEVEL — persistent room/level
+		# caches for this session are discarded with it.
+		_level_caches.clear()
+		_in_room = false
+		_pending_eject = false
 		_load_level(level_index)
 		level_time = 0.0
 		return
 	level_time += delta
 
 	var volume: Variant = _volume_params(player_pos.x, player_pos.y)
+	# Volume-ENTRY edge (prev-frame latch, the was_airborne idiom): one
+	# splash per plunge, at the player's foot. Cosmetic only.
+	if volume != null and not in_volume_prev:
+		_spawn_vfx("splash", Vector2(
+			(player_pos.x + 0.5) * CELL, (player_pos.y + 1.0) * CELL
+		))
+	in_volume_prev = volume != null
 
 	# --- player: same integration as the pygame harness (run-up momentum) ---
 	_play_frame += 1
+	# Scripted single-frame input (PLAT_ACTIONS): the action for THIS frame
+	# (zero-based like pygame's frame_i — _play_frame was ++'d above), or "".
+	var script_act := str(_actions.get(_play_frame - 1, ""))
 	var dx := 0.0
 	if Input.is_key_pressed(KEY_RIGHT) or Input.is_key_pressed(KEY_D):
 		dx += 1.0
@@ -1649,7 +2379,34 @@ func _process(delta: float) -> void:
 	)
 	if _hold_mode != "" and _hold_jump_every > 0 and (on_ground or coyote_t > 0.0 or can_air_jump) and (_play_frame - 1) % _hold_jump_every == 0:
 		jump_pressed = true
-	var down_held := Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
+	if script_act == "up" and volume == null:
+		# Scripted Up press (dry ground only — pygame gates its scripted
+		# up on `volume is None` too, so a submerged frame is inert on
+		# BOTH surfaces rather than a one-sided swim stroke).
+		jump_pressed = true
+	var down_held := (
+		Input.is_key_pressed(KEY_DOWN) or Input.is_key_pressed(KEY_S)
+		or script_act == "down"
+	)
+	# --- secret-room entry/return (multi-room arc): stand grounded on a
+	# mark + the verb press — DOOR swallows the jump (genre-standard),
+	# PIPE is Down ALONE (Down+jump stays the drop-through gesture). The
+	# transition ends the frame BEFORE physics: no traj line, no frame
+	# tick — platformer_play.py breaks its loop at the same point. ---
+	if grounded_probe and volume == null:
+		for mark in room_marks:
+			if int(player_pos.x) != int(mark["x"]) or int(player_pos.y) != int(mark["y"]):
+				continue
+			var verb := str(mark["verb"])
+			if (verb == "door" and jump_pressed) or (
+				verb == "pipe" and down_held and not jump_pressed
+			):
+				_note_move()
+				if str(mark["kind"]) == "room_entrance":
+					_enter_room(mark)
+				else:
+					_return_from_room()
+				return
 	if jump_pressed:
 		_note_move()  # a jump ends the grace, starts the shield
 		grace = _spawn_grace() and not moved
@@ -1707,8 +2464,21 @@ func _process(delta: float) -> void:
 			if not held.is_empty() and str(held.get("kind", "")) == "run_boost":
 				target *= float((held.get("params", {}) as Dictionary).get("boost_mult", 1.5))
 			var desired := dx * target
-			var step: float = (float(movement.get("ground_accel", 0.0)) if gmove else float(movement.get("air_accel", 0.0))) * delta
-			player_vx = minf(player_vx + step, desired) if player_vx < desired else maxf(player_vx - step, desired)
+			var ground_a := float(movement.get("ground_accel", 0.0))
+			var brake_a := float(movement.get("brake_accel", ground_a))
+			var rate: float = 0.0
+			if player_vx * dx < 0.0:
+				# REVERSAL — held direction opposes vx: decisive ground
+				# brake, WEAK air-brake (the ONLY thing that sheds air
+				# speed). Brakes toward `desired`, through 0.
+				rate = (brake_a if gmove else 0.3 * brake_a) * delta
+			elif gmove:
+				rate = ground_a * delta  # build up AND bleed overspeed
+			elif absf(player_vx) < absf(desired):
+				rate = float(movement.get("air_accel", 0.0)) * delta  # air, same dir: build
+			# else: air at/over target, same dir -> hold (rate stays 0.0)
+			if rate != 0.0:
+				player_vx = minf(player_vx + rate, desired) if player_vx < desired else maxf(player_vx - rate, desired)
 		else:
 			var fric: float = (float(movement.get("ground_friction", 0.0)) if gmove else float(movement.get("air_friction", 0.0))) * delta
 			player_vx = maxf(0.0, player_vx - fric) if player_vx > 0.0 else minf(0.0, player_vx + fric)
@@ -1720,6 +2490,9 @@ func _process(delta: float) -> void:
 	else:
 		player_pos.x = clampf(new_x, 0.0, grid_w - 1.0)
 
+	# Landing-edge capture (presentation): airborne state BEFORE the
+	# vertical step — platformer_play.py snapshots at the same point.
+	var was_airborne := not on_ground
 	if volume != null:
 		player_vy += float(volume.get("gravity", 8.0)) * delta
 		player_vy = minf(player_vy, 3.0)  # terminal sink speed
@@ -1763,6 +2536,14 @@ func _process(delta: float) -> void:
 	else:
 		player_pos.y = new_y
 		on_ground = false
+	land_t = maxf(0.0, land_t - delta)
+	if was_airborne and on_ground:
+		# Airborne → grounded EDGE: arm the land one-shot window (read by
+		# the anim candidates + the landing squash; never by physics).
+		land_t = LAND_ANIM_S
+		_spawn_vfx("dust", Vector2(
+			(player_pos.x + 0.5) * CELL, (player_pos.y + 1.0) * CELL
+		))
 
 	# Breakable floors — byte-identical to platformer_play.py: the SAME
 	# deterministic foot probe (never the on_ground flag), the SAME countdown
@@ -1785,6 +2566,7 @@ func _process(delta: float) -> void:
 				var rem: float = float(tile_fuses.get(bkey, break_delay_s)) - delta
 				if rem <= 0.0:
 					grid[bfoot][bx] = 0  # crumble — empty, player falls
+					_crumbled.append(bkey)  # cache survives room trips
 					tile_fuses.erase(bkey)
 					if tile_nodes.has(bkey):
 						(tile_nodes[bkey] as Node).queue_free()
@@ -1821,6 +2603,16 @@ func _process(delta: float) -> void:
 			pops.erase(pop)
 		else:
 			(pop["node"] as ColorRect).position.y -= 2.5 * CELL * delta
+
+	# One-shot VFX (dust/splash/sparkle) fade out over their life, then
+	# free — the pops idiom; cosmetic, never read by physics.
+	for fx in vfx.duplicate():
+		fx["t"] = float(fx["t"]) - delta
+		if float(fx["t"]) <= 0.0:
+			(fx["node"] as Node).queue_free()
+			vfx.erase(fx)
+		else:
+			(fx["node"] as CanvasItem).modulate.a = float(fx["t"]) / VFX_LIFE_S
 
 	# Damaging volumes (swimmable lava): drain hearts continuously —
 	# every accumulated point costs one heart; the fraction resets on
@@ -1877,11 +2669,24 @@ func _process(delta: float) -> void:
 				if enemy["node"] is Sprite2D and not anim_d.is_empty():
 					var st_d: Dictionary = anim_d["states"]
 					var state_d := _anim_pick(["death", "hurt", "idle"], st_d)
+					if state_d != str(enemy["anim_state"]):
+						# State-change latch: restart the clock so "once"
+						# states (death) play from frame 0 and hold. pygame
+						# mirrors in _enemy_frame.
+						enemy["anim_state"] = state_d
+						enemy["anim_t"] = 0.0
 					var texs_d: Array = st_d[state_d]
-					var dur_d: float = anim_d["durs"][state_d]
-					enemy["node"].texture = texs_d[
-						int(float(enemy["anim_t"]) / dur_d) % texs_d.size()
-					]
+					var left_d: Dictionary = anim_d["states_left"]
+					var left_used_d: bool = enemy["dir"] < 0.0 and left_d.has(state_d)
+					if left_used_d:
+						# Authored left-facing frames play UNFLIPPED.
+						texs_d = left_d[state_d]
+					enemy["node"].flip_h = enemy["dir"] < 0.0 and not left_used_d
+					enemy["node"].texture = texs_d[_anim_index(
+						float(enemy["anim_t"]),
+						anim_d["durs"][state_d],
+						str(anim_d["loops"][state_d]),
+					)]
 				enemy["node"].visible = true
 				if dying <= 0.0:
 					enemy["node"].visible = false
@@ -1931,6 +2736,16 @@ func _process(delta: float) -> void:
 				else:
 					pos.y = drift_y
 				enemy["dir_y"] = dir_y
+			elif swim_style == "cruise":
+				# Unbounded cruiser (water arc): a straight line across
+				# the whole body of water, flipping only at walls/the
+				# water's edge — no patrol tether. platformer_play.py
+				# mirrors this.
+				var cruise_x: float = pos.x + enemy["dir"] * walk
+				if _enemy_can_occupy(archetype, cruise_x, pos.y, swim_style):
+					pos.x = cruise_x
+				else:
+					enemy["dir"] = enemy["dir"] * -1.0
 			else:
 				# Passive within/surface swimmer: x-bounce patrol.
 				var next_x: float = pos.x + enemy["dir"] * walk
@@ -1941,6 +2756,60 @@ func _process(delta: float) -> void:
 					enemy["dir"] = enemy["dir"] * -1.0
 				else:
 					pos.x = next_x
+		elif archetype == "hopper" and espeed > 0.0:
+			# HOPPER (combat/level-picks arc): grounded = the hop clock
+			# ticks and it launches at cadence facing its mode's target;
+			# airborne = gravity + AIRBORNE-mode X drift + anchor-only
+			# landing on support below; falls out of the world = gone.
+			# platformer_play.py + the test stepper mirror every branch.
+			var hop_h := float(behavior.get("hop_height", 2))
+			var hop_period := float(behavior.get("hop_period_s", 1.0))
+			var hop_grav := float(movement.get("gravity", 40.0))
+			if bool(enemy["e_grounded"]):
+				enemy["hop_t"] = float(enemy["hop_t"]) + delta
+				if mode == "chase":
+					enemy["dir"] = 1.0 if player_pos.x >= pos.x else -1.0
+				elif mode == "return":
+					enemy["dir"] = 1.0 if enemy["home_x"] >= pos.x else -1.0
+				if float(enemy["hop_t"]) >= hop_period:
+					enemy["hop_t"] = 0.0
+					enemy["vy"] = -sqrt(2.0 * hop_grav * (hop_h + 0.25))
+					enemy["e_grounded"] = false
+			else:
+				# Positions QUANTIZED to the traj's 1e-3 lattice so tile-
+				# boundary decisions agree across surfaces (float32
+				# Vector2 vs pygame's float64). platformer_play mirrors.
+				var hop_step := chase if mode == "chase" else walk
+				var hop_x := snappedf(pos.x + enemy["dir"] * hop_step, 0.001)
+				if _enemy_can_occupy(archetype, hop_x, pos.y, "", false, true):
+					pos.x = hop_x
+				else:
+					enemy["dir"] = enemy["dir"] * -1.0
+				enemy["vy"] = float(enemy["vy"]) + hop_grav * delta
+				var hop_ny := snappedf(pos.y + float(enemy["vy"]) * delta, 0.001)
+				if float(enemy["vy"]) < 0.0 and blocking.has(_tile(pos.x, hop_ny)):
+					# Ceiling bonk: stop rising, fall from here.
+					enemy["vy"] = 0.0
+				elif float(enemy["vy"]) > 0.0 and (
+					blocking.has(_tile(pos.x, hop_ny + 1.0))
+					or one_way.has(_tile(pos.x, hop_ny + 1.0))
+				):
+					var hop_target := float(int(hop_ny + 1.0) - 1)
+					if hop_ny >= hop_target:
+						pos.y = hop_target
+						enemy["vy"] = 0.0
+						enemy["e_grounded"] = true
+					else:
+						pos.y = hop_ny
+				else:
+					pos.y = hop_ny
+				if pos.y > grid_h + 2.0:
+					# Hopped off the world: gone (no death linger).
+					enemy["alive"] = false
+					enemy["dying_t"] = 0.0
+					enemy["node"].visible = false
+					if enemy["frame"] != null:
+						enemy["frame"].visible = false
 		elif archetype == "patroller" and espeed > 0.0:
 			if mode == "chase":
 				pos = _ground_toward(enemy, pos, player_pos.x, chase)
@@ -1951,7 +2820,11 @@ func _process(delta: float) -> void:
 				var next_x: float = pos.x + enemy["dir"] * walk
 				if (
 					absf(next_x - enemy["home_x"]) >= patrol_range
-					or not _enemy_can_occupy(archetype, next_x, pos.y)
+					or not _enemy_can_occupy(
+						archetype, next_x, pos.y, "",
+						bool(enemy.get("amphibious", false)), false,
+						bool((behavior as Dictionary).get("hazard_immune", false))
+					)
 				):
 					enemy["dir"] = enemy["dir"] * -1.0
 				else:
@@ -2046,10 +2919,12 @@ func _process(delta: float) -> void:
 		enemy["node"].position = pos * CELL + enemy["vis_off"]
 		if enemy["node"] is Sprite2D:
 			enemy["node"].flip_h = enemy["dir"] < 0.0
-		# Per-state frame playback (B4): advance the clock, pick the state
-		# off the same runtime signals as pygame (hurt_t / moving), swap the
-		# texture. Frames are base.png-sized so the node scale stays valid;
-		# an empty anim dict leaves the static base sprite (loud fallback).
+		# Per-state frame playback (B4/G4): advance the clock, pick the state
+		# off the same runtime signals as pygame (hurt_t / hopper-airborne /
+		# moving), swap the texture. Frames report the untrimmed sprite_size
+		# square (strips are base.png-sized; atlas frames re-inflate via
+		# margin) so the node scale stays valid; an empty anim dict leaves
+		# the static base sprite (loud fallback).
 		var anim: Dictionary = enemy["anim"]
 		if enemy["node"] is Sprite2D and not anim.is_empty():
 			var moving: bool = (pos - enemy["anim_prev"]).length() > 0.0001
@@ -2059,13 +2934,31 @@ func _process(delta: float) -> void:
 			var cand: Array = []
 			if float(enemy["hurt_t"]) > 0.0:
 				cand.append("hurt")
+			if not bool(enemy["e_grounded"]):
+				# Hopper mid-hop (every other archetype keeps e_grounded
+				# true, so the candidate is safely universal).
+				cand.append("jump")
 			if moving:
 				cand.append("walk")
 			cand.append_array(["idle", "walk", "hurt", "death"])
 			var state := _anim_pick(cand, st)
+			if state != str(enemy["anim_state"]):
+				# State-change latch: restart the clock so "once" states
+				# play from frame 0. pygame mirrors in _enemy_frame.
+				enemy["anim_state"] = state
+				enemy["anim_t"] = 0.0
 			var texs: Array = st[state]
-			var dur: float = anim["durs"][state]
-			var idx := int(float(enemy["anim_t"]) / dur) % texs.size()
+			var eleft: Dictionary = anim["states_left"]
+			var eleft_used: bool = enemy["dir"] < 0.0 and eleft.has(state)
+			if eleft_used:
+				# Authored left-facing frames play UNFLIPPED (asymmetric art).
+				texs = eleft[state]
+			enemy["node"].flip_h = enemy["dir"] < 0.0 and not eleft_used
+			var idx := _anim_index(
+				float(enemy["anim_t"]),
+				anim["durs"][state],
+				str(anim["loops"][state]),
+			)
 			enemy["node"].texture = texs[idx]
 		# Stomp flash: a surviving stomp blinks the body briefly.
 		enemy["node"].visible = not (
@@ -2112,7 +3005,17 @@ func _process(delta: float) -> void:
 				enemy["hurt_t"] = 0.25
 			var gravity_b := float(movement["gravity"])
 			var jump_v := sqrt(2.0 * gravity_b * (float(movement["jump_height"]) + 0.4))
-			player_vy = -jump_v * stomp_bounce
+			# BOUNCE V2 (combat arc): jump HELD at the stomp = a full jump
+			# off the head; not held = the damped hop. Dedicated jump_held
+			# signal (real held poll OR the scripted "jumphold" action)
+			# feeding ONLY this bounce — platformer_play.py mirrors.
+			var jump_held := (
+				Input.is_key_pressed(KEY_SPACE)
+				or Input.is_key_pressed(KEY_UP)
+				or Input.is_key_pressed(KEY_W)
+				or script_act == "jumphold"
+			)
+			player_vy = -jump_v * (1.0 if jump_held else stomp_bounce)
 		else:
 			_hurt(int(enemy["damage_hearts"]))
 
@@ -2134,25 +3037,76 @@ func _process(delta: float) -> void:
 		_traj_frame += 1
 
 	player_node.position = player_pos * CELL + player_vis_off
+	if player_light_node != null:
+		# player_light follows the body center (visual only — the light
+		# reads the position, physics never reads the light).
+		player_light_node.position = player_pos * CELL + Vector2(
+			CELL / 2.0, CELL / 2.0
+		)
 	if dx != 0.0:
 		player_facing = dx  # face the direction of travel
 	player_anim_t += delta
 	if player_node is Sprite2D:
+		# Squash & stretch (godot-only, VISUAL only): node-scale around the
+		# bottom-center anchor — a fast rise stretches, the land window
+		# squashes and relaxes. Physics and the pygame surface untouched.
+		var sx := 1.0
+		var sy := 1.0
+		if not on_ground and player_vy < -6.0:
+			sx = 0.92
+			sy = 1.08
+		elif land_t > 0.0:
+			var lu := land_t / LAND_ANIM_S
+			sx = lerpf(1.0, 1.18, lu)
+			sy = lerpf(1.0, 0.84, lu)
+		player_node.scale = Vector2(
+			player_base_scale.x * sx, player_base_scale.y * sy
+		)
+		player_node.position.x += (
+			player_tex_size.x * player_base_scale.x * (1.0 - sx) / 2.0
+		)
+		player_node.position.y += (
+			player_tex_size.y * player_base_scale.y * (1.0 - sy)
+		)
 		player_node.flip_h = player_facing < 0.0
-		# Per-state playback (B4): airborne → jump, moving on ground → walk,
-		# else idle. Empty anim → the static base sprite stays (loud fallback).
+		# Per-state playback (B4/G4): fall past the peak / jump on the rise
+		# airborne; skid (braking against carried momentum) > land (the
+		# one-shot window) > walk grounded; idle/walk tail. Frames report
+		# the untrimmed sprite_size square (strips are base.png-sized;
+		# atlas frames re-inflate via margin) so the node scale stays
+		# valid. Empty anim → the static base sprite stays (loud fallback).
 		if not player_anim.is_empty():
 			var pst: Dictionary = player_anim["states"]
 			var pcand: Array = []
 			if not on_ground:
+				if player_vy > 0.0:
+					pcand.append("fall")
 				pcand.append("jump")
-			if dx != 0.0:
-				pcand.append("walk")
+			else:
+				if dx != 0.0 and signf(player_vx) == -dx and absf(player_vx) > 0.5:
+					pcand.append("skid")
+				if land_t > 0.0:
+					pcand.append("land")
+				if dx != 0.0:
+					pcand.append("walk")
 			pcand.append_array(["idle", "walk"])
 			var pstate := _anim_pick(pcand, pst)
+			if pstate != player_anim_state:
+				# State-change latch: restart the clock so "once" states
+				# (jump/land) play from frame 0. pygame mirrors inline.
+				player_anim_state = pstate
+				player_anim_t = 0.0
 			var ptexs: Array = pst[pstate]
-			var pdur: float = player_anim["durs"][pstate]
-			player_node.texture = ptexs[int(player_anim_t / pdur) % ptexs.size()]
+			var pleft: Dictionary = player_anim["states_left"]
+			if player_facing < 0.0 and pleft.has(pstate):
+				# Authored left-facing frames play UNFLIPPED (asymmetric art).
+				ptexs = pleft[pstate]
+				player_node.flip_h = false
+			player_node.texture = ptexs[_anim_index(
+				player_anim_t,
+				player_anim["durs"][pstate],
+				str(player_anim["loops"][pstate]),
+			)]
 	# Spawn grace / shield / i-frames: the player BLINKS (intermittently
 	# invisible) the whole time they are untouchable.
 	player_node.visible = not (
@@ -2171,6 +3125,11 @@ func _process(delta: float) -> void:
 		if layout_axis == "vertical"
 		else int(player_pos.x) == int(exit_cell.x)
 	)
+	# WIN SUPPRESSION inside a secret room: its exit cell is the return
+	# PORTAL, not a goal — without this gate, nearing the portal would
+	# mark the PARENT level beaten and jump to the world map.
+	if _in_room:
+		reached_exit = false
 	if not won and reached_exit:
 		won = true
 		_play_sfx("win")
@@ -2185,3 +3144,9 @@ func _process(delta: float) -> void:
 		)
 		game_state = GameState.END
 		input_armed = false
+	# A death-in-room eject switches maps BETWEEN frames — this frame
+	# already traj'd the dead pose (platformer_play.py defers the same
+	# way at its loop bottom).
+	if _pending_eject:
+		_pending_eject = false
+		_eject_to_parent()

@@ -133,16 +133,18 @@ class TestDiffusionSheetEndToEnd:
         )
         ctx = _run(tmp_path / "out", DiffusionSheetProducer(backend))
 
-        # One generation per registry tile, prompts built from data.
-        # (The same producer also serves sprites/backdrops — filter.)
+        # One generation per unique tile NAME (autotile variants share
+        # their base tile's art), prompts built from data. (The same
+        # producer also serves sprites/backdrops — filter.)
         tileset = ctx.bible.tilesets[STAGE]
         tile_calls = [
             c for c in backend.calls if "platformer tile:" in c["prompt"]
         ]
-        assert len(tile_calls) == len(tileset.slots)
+        names = list(dict.fromkeys(s.name for s in tileset.slots))
+        assert len(tile_calls) == len(names)
         theme = ctx.bible.stages[STAGE].theme
-        for call, slot in zip(tile_calls, tileset.slots):
-            assert slot.name in call["prompt"]
+        for call, name in zip(tile_calls, names):
+            assert name in call["prompt"]
             assert theme in call["prompt"]
 
         # Sheet geometry follows TILE_PX; slots carry the regions.
@@ -163,6 +165,48 @@ class TestDiffusionSheetEndToEnd:
             for got, want in zip(mean, expected):
                 assert abs(got - want) < 6, (slot.name, mean, tile_hex)
 
+    def test_water_deep_slot_repaints_liplessly(self, tmp_path: Path) -> None:
+        """Water-striping fix: on TEXTURED art the submerged-interior
+        sibling gets derive_water_deep'd pixels (different bytes than
+        the surface slot) while resolving to the same palette mean —
+        the region-average contract both consumers and QA sample."""
+        # A dedicated placeholder with a BRIGHT TOP BAND (the painted
+        # surface lip): the shared _textured_png is y-periodic with
+        # period 16 at 32px, so its halves coincide and the derive
+        # would be an (arithmetically legitimate) no-op on it.
+        lip = Image.new("RGB", (64, 64))
+        lip.putdata(
+            [
+                (230, 235, 240) if y < 16 else (40 + (x * 3 + y * 7) % 120,) * 3
+                for y in range(64)
+                for x in range(64)
+            ]
+        )
+        lip_path = tmp_path / "lip_tile.png"
+        lip.save(lip_path)
+        ctx = _run(
+            tmp_path / "out",
+            DiffusionSheetProducer(FakeImageBackend(placeholder=lip_path)),
+        )
+        tileset = ctx.bible.tilesets[STAGE]
+        surface = next(
+            s for s in tileset.slots
+            if s.collision == "volume" and not s.params.get("water_deep")
+        )
+        deep = next(
+            s for s in tileset.slots if s.params.get("water_deep")
+        )
+        sheet = Image.open(tmp_path / "out" / tileset.tilesheet_path)
+        x, y, w, h = surface.px_region
+        surf_px = sheet.crop((x, y, x + w, y + h))
+        x, y, w, h = deep.px_region
+        deep_px = sheet.crop((x, y, x + w, y + h))
+        assert list(surf_px.get_flattened_data()) != list(
+            deep_px.get_flattened_data()
+        ), "deep slot kept the surface pixels — derive never ran"
+        for got, want in zip(_mean_rgb(deep_px), _mean_rgb(surf_px)):
+            assert abs(got - want) < 3, "deep variant drifted the mean"
+
     def test_two_fake_image_runs_are_byte_identical(self, tmp_path: Path) -> None:
         placeholder = self._placeholder(tmp_path)
         a = _run(
@@ -177,6 +221,37 @@ class TestDiffusionSheetEndToEnd:
         assert (tmp_path / "a" / rel).read_bytes() == (
             tmp_path / "b" / rel
         ).read_bytes()
+
+    def test_repaint_carries_text_provenance_placeholder_does_not(
+        self, tmp_path: Path
+    ) -> None:
+        """G6 readable provenance: the producer-GENERATED repaint carries
+        the canon:* tEXt stamp; the code-drawn placeholder sheet (same
+        path, no producer) stays unstamped."""
+        plain = _run(tmp_path / "plain")
+        placeholder = Image.open(
+            tmp_path / "plain" / plain.bible.tilesets[STAGE].tilesheet_path
+        )
+        assert "canon:generator" not in getattr(placeholder, "text", {})
+
+        art = _run(
+            tmp_path / "art",
+            DiffusionSheetProducer(
+                FakeImageBackend(placeholder=self._placeholder(tmp_path))
+            ),
+        )
+        sheet = Image.open(
+            tmp_path / "art" / art.bible.tilesets[STAGE].tilesheet_path
+        )
+        assert sheet.text["canon:generator"] == "canon-ai harness"
+        assert sheet.text["canon:asset"] == f"tilesheet:{STAGE}"
+        assert sheet.text["canon:backend-model"] == "FakeImageBackend"
+        assert sheet.text["canon:image-request-id"] == ""  # fake reports none
+        assert sheet.text["canon:image-seed"] == ""  # fake declares no seed
+        assert sheet.text["canon:seed"] == SEED
+        assert sheet.text["canon:gfx"] == DEFAULT_GRAPHICS.digest()
+        assert sheet.text["canon:prompt-version"] == "slice-1"
+        assert sheet.text["canon:provenance"] == "readable-v1"
 
     def test_image_model_folds_into_provenance(self, tmp_path: Path) -> None:
         plain = _run(tmp_path / "plain")
@@ -197,6 +272,39 @@ class TestDiffusionSheetEndToEnd:
         if not path.exists():
             path.write_bytes(_textured_png())
         return path
+
+
+class TestPngProvenance:
+    """png_bytes + art_provenance — the G6 readable layer's encode seam."""
+
+    def test_same_write_twice_is_byte_identical(self) -> None:
+        from examples.platformer_pack.tileset_art import (
+            art_provenance,
+            png_bytes,
+        )
+
+        img = Image.open(io.BytesIO(_textured_png()))
+        provenance = art_provenance(
+            asset="sprite:enemy/x",
+            graphics=DEFAULT_GRAPHICS,
+            pipeline_seed="s",
+        )
+        first = png_bytes(img, provenance)
+        assert first == png_bytes(img, provenance)
+        decoded = Image.open(io.BytesIO(first))
+        assert decoded.text["canon:asset"] == "sprite:enemy/x"
+        assert decoded.text["canon:generator"] == "canon-ai harness"
+        assert decoded.text["canon:backend-model"] == ""  # no producer
+
+    def test_empty_provenance_encodes_bare(self) -> None:
+        from examples.platformer_pack.tileset_art import png_bytes
+
+        img = Image.open(io.BytesIO(_textured_png()))
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        # Placeholder/derived writes keep their old bytes exactly.
+        assert png_bytes(img) == buffer.getvalue()
+        assert png_bytes(img, {}) == buffer.getvalue()
 
 
 class TestContentPolicyRetry:
@@ -267,19 +375,29 @@ class TestLoudFallback:
             for w in ctx.artifacts.get("slice_warnings", [])
             if w.startswith("tileset art:")
         ]
-        assert len(warnings) == len(tileset.slots)
-        for slot, message in zip(tileset.slots, warnings):
-            assert slot.name in message
+        # One warn per unique tile NAME — generation (and so failure) is
+        # once-per-name; autotile variants share the base tile's outcome.
+        names = list(dict.fromkeys(s.name for s in tileset.slots))
+        assert len(warnings) == len(names)
+        for name, message in zip(names, warnings):
+            assert name in message
             assert "placeholder" in message
 
-        # The fallback sheet IS the placeholder sheet — byte-identical to
-        # a run with no producer at all.
+        # The fallback sheet IS the placeholder sheet — PIXEL-identical
+        # to a run with no producer at all. Bytes differ by exactly the
+        # readable provenance layer: the (attempted-)producer repaint
+        # stamps canon:* tEXt, the code-drawn placeholder never does.
         plain = _run(tmp_path / "plain")
-        assert (
-            tmp_path / "broken" / tileset.tilesheet_path
-        ).read_bytes() == (
+        broken_sheet = Image.open(tmp_path / "broken" / tileset.tilesheet_path)
+        plain_sheet = Image.open(
             tmp_path / "plain" / plain.bible.tilesets[STAGE].tilesheet_path
-        ).read_bytes()
+        )
+        assert (
+            broken_sheet.convert("RGBA").tobytes()
+            == plain_sheet.convert("RGBA").tobytes()
+        )
+        assert broken_sheet.text["canon:generator"] == "canon-ai harness"
+        assert "canon:generator" not in getattr(plain_sheet, "text", {})
 
 
 class TestGraphicsSpec:
@@ -427,3 +545,314 @@ class TestBuildImageProducer:
         monkeypatch.setenv("FAL_KEY", "test-key")
         producer = build_image_producer("fal")
         assert producer.model == "fal-ai/nano-banana"
+
+
+# --- Fake-transparency gate (first-paid-run ticket 1) ---------------------
+# nano painted CHECKERBOARDS/white instead of emitting alpha: band_fg
+# 89%/71% opaque in the paid tree, hazard tiles on a baked white slab.
+# Synthetic twins of those failures below; the real paid PNGs were run
+# through the same gate during development (89.0%→22.9%, 71.2%→24.1%,
+# and the correct mossy band untouched).
+
+from examples.platformer_pack.tileset_art import (  # noqa: E402
+    ALPHA_GATE_RETRIES,
+    ALPHA_RETRY_SUFFIX,
+    alpha_gate,
+    detect_painted_backdrop,
+    key_painted_backdrop,
+)
+
+_SUBJECT_RED = (168, 40, 24)  # saturated — never in the neutral family
+
+
+def _png(img: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _checker(w: int, h: int, cell: int = 16) -> Image.Image:
+    """The literal painted 'transparency' pattern: 240/224 gray cells."""
+    img = Image.new("RGB", (w, h))
+    img.putdata(
+        [
+            ((240,) * 3 if ((x // cell) + (y // cell)) % 2 == 0 else (224,) * 3)
+            for y in range(h)
+            for x in range(w)
+        ]
+    )
+    return img
+
+
+def _noise(w: int, h: int) -> Image.Image:
+    """Saturated three-color scene stand-in: nothing neutral, nothing
+    corner-keyable — the unkeyable failure mode."""
+    colors = [(200, 30, 30), (30, 200, 30), (30, 30, 200)]
+    img = Image.new("RGB", (w, h))
+    img.putdata([colors[(x + y) % 3] for y in range(h) for x in range(w)])
+    return img
+
+
+def _blob_on_white(w: int, h: int) -> Image.Image:
+    """A correct generation: saturated subject on the prompted solid
+    white — the corner-flood cut handles this one on its own."""
+    img = Image.new("RGB", (w, h), (255, 255, 255))
+    cx, cy, r = w // 2, h // 2, min(w, h) // 4
+    for y in range(cy - r, cy + r):
+        for x in range(cx - r, cx + r):
+            if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
+                img.putpixel((x, y), _SUBJECT_RED)
+    return img
+
+
+class TestAlphaGateJudgement:
+    """alpha_gate / detect / key as pure functions on synthetic twins of
+    the paid failures."""
+
+    def test_checkerboard_band_is_detected_and_keyed(self) -> None:
+        # Fully-opaque band: checker everywhere, vines along the bottom
+        # (the fg prompt makes subjects FRAME the edges — which is what
+        # mis-aimed remove_background's corner sampling in the paid run).
+        img = _checker(256, 128).convert("RGBA")
+        for y in range(96, 128):
+            for x in range(256):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        sig = detect_painted_backdrop(img)
+        assert sig is not None
+        assert sig["mode"] == "light"
+        assert sig["pattern"] == "checkerboard"
+        out, ok, note = alpha_gate(img, "band_fg")
+        assert ok and "auto-keyed" in note
+        assert out.getpixel((128, 10))[3] == 0  # checker gone
+        assert out.getpixel((128, 110))[3] == 255  # vines kept
+        from examples.platformer_pack.tileset_art import _opaque_fraction
+
+        assert 0.2 <= _opaque_fraction(out) <= 0.3
+
+    def test_correct_alpha_band_passes_untouched(self) -> None:
+        # The mossy twin: sparse saturated occluders on REAL transparency.
+        img = Image.new("RGBA", (256, 128), (0, 0, 0, 0))
+        for y in range(108, 128):
+            for x in range(256):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        out, ok, note = alpha_gate(img, "band_fg")
+        assert ok and note == ""
+        assert out is img, "in-bounds image must not be modified"
+
+    def test_flat_white_hazard_slab_is_keyed(self) -> None:
+        # The baked-white hazard tile: spikes on a solid white field that
+        # survived the corner cut (fed here as the fully-opaque revert).
+        img = Image.new("RGBA", (128, 128), (236, 236, 236, 255))
+        for y in range(64, 128):
+            for x in range(128):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        sig = detect_painted_backdrop(img)
+        assert sig == {"mode": "light", "pattern": "flat", "fraction": 0.5}
+        out, ok, note = alpha_gate(img, "tile_cutout")
+        assert ok and "flat" in note
+        assert out.getpixel((64, 10))[3] == 0
+        assert out.getpixel((64, 100))[3] == 255
+
+    def test_enclosed_light_region_survives_keying(self) -> None:
+        # Border-connectivity is the subject-protection mechanism: a
+        # white-hot core INSIDE the subject is unreachable from the
+        # border and must keep its pixels.
+        img = Image.new("RGBA", (128, 128), (236, 236, 236, 255))
+        for y in range(40, 100):
+            for x in range(40, 100):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        for y in range(60, 80):
+            for x in range(60, 80):
+                img.putpixel((x, y), (250, 250, 250, 255))
+        out = key_painted_backdrop(img, "light")
+        assert out.getpixel((5, 5))[3] == 0  # border slab keyed
+        assert out.getpixel((70, 70))[3] == 255  # enclosed core kept
+        assert out.getpixel((45, 45))[3] == 255  # subject kept
+
+    def test_painted_black_field_is_keyed(self) -> None:
+        img = Image.new("RGBA", (128, 128), (12, 12, 12, 255))
+        for y in range(80, 128):
+            for x in range(32, 96):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        out, ok, note = alpha_gate(img, "sprite")
+        assert ok and "flat" in note
+        assert out.getpixel((5, 5))[3] == 0
+        assert out.getpixel((64, 100))[3] == 255
+
+    def test_white_sprite_in_bounds_is_never_keyed(self) -> None:
+        # The player is #f0f0f0: a properly-cut near-white subject sits
+        # inside its bounds and must come through IDENTICAL — the gate
+        # never runs global white-keying on an in-bounds image.
+        img = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        for y in range(20, 120):
+            for x in range(30, 100):
+                img.putpixel((x, y), (240, 240, 240, 255))
+        out, ok, note = alpha_gate(img, "sprite")
+        assert ok and note == ""
+        assert out is img
+
+    def test_soft_trigger_keys_checkerboard_inside_bounds(self) -> None:
+        # The cinder failure sat at 71% — a lenient cap must not let a
+        # checkerboard slip under it. In-bounds + two-tone pattern keys.
+        img = Image.new("RGBA", (256, 128), (0, 0, 0, 0))
+        checker = _checker(64, 128)
+        for y in range(128):
+            for x in range(64):
+                img.putpixel((x, y), (*checker.getpixel((x, y)), 255))
+            for x in range(64, 120):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        out, ok, note = alpha_gate(img, "band_fg")  # ~47% opaque
+        assert ok and "checkerboard" in note
+        assert out.getpixel((10, 64))[3] == 0
+        assert out.getpixel((90, 64))[3] == 255
+
+    def test_soft_trigger_spares_flat_pale_field(self) -> None:
+        # A single pale tone inside bounds could be legitimate foam/ice
+        # art — only the unambiguous checkerboard keys in the soft band.
+        img = Image.new("RGBA", (256, 128), (0, 0, 0, 0))
+        for y in range(128):
+            for x in range(64):
+                img.putpixel((x, y), (232, 232, 232, 255))
+            for x in range(64, 120):
+                img.putpixel((x, y), (*_SUBJECT_RED, 255))
+        out, ok, note = alpha_gate(img, "band_fg")
+        assert ok and note == ""
+        assert out is img
+
+    def test_eaten_subject_asks_for_retry(self) -> None:
+        img = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+        img.putpixel((64, 64), (*_SUBJECT_RED, 255))
+        out, ok, note = alpha_gate(img, "sprite")
+        assert not ok and "ate the subject" in note
+
+    def test_unkeyable_scene_asks_for_retry(self) -> None:
+        img = _noise(128, 128).convert("RGBA")
+        out, ok, note = alpha_gate(img, "sprite")
+        assert not ok and "no keyable" in note
+
+
+class TestAlphaGateProducer:
+    """The producer wiring: key-first, paid retry last, loud on failure;
+    fake twins skip the gate wholesale."""
+
+    GRAPHICS = DEFAULT_GRAPHICS
+
+    def test_checkerboard_tile_keys_without_burning_a_retry(self) -> None:
+        # Checker backdrop + subject patches ON the corners (defeating
+        # the corner-sampled cut exactly like the paid failures): one
+        # generation, keyed to alpha in code, no paid retry.
+        class CheckerBackend:
+            model = "checker"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                self.calls.append(prompt)
+                img = _checker(width, height)
+                for y in range(height * 2 // 3, height):
+                    for x in range(width):
+                        img.putpixel((x, y), _SUBJECT_RED)
+                # Dark patches on all four corners mis-aim the corner-
+                # sampled cut (it eats only these), like the paid run.
+                for cx in (0, width - 8):
+                    for cy in (0, height - 8):
+                        for dx in range(8):
+                            for dy in range(8):
+                                img.putpixel((cx + dx, cy + dy), (90, 20, 10))
+                return _png(img)
+
+        backend = CheckerBackend()
+        producer = DiffusionSheetProducer(backend)
+        tile = next(t for t in DEFAULT_TILES.tiles if t.category == "hazard")
+        out = producer.tile_image(tile, "#cc2200", "theme", "world", self.GRAPHICS)
+        assert len(backend.calls) == 1
+        assert out.getpixel((self.GRAPHICS.tile_px // 2, 2))[3] == 0
+        assert out.getpixel(
+            (self.GRAPHICS.tile_px // 2, self.GRAPHICS.tile_px - 2)
+        )[3] == 255
+
+    def test_unkeyable_sprite_retries_with_suffix_then_recovers(self) -> None:
+        class RecoveringBackend:
+            model = "recovering"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                self.calls.append(prompt)
+                if len(self.calls) == 1:
+                    return _png(_noise(width, height))
+                return _png(_blob_on_white(width, height))
+
+        backend = RecoveringBackend()
+        producer = DiffusionSheetProducer(backend)
+        out = producer.sprite_image(
+            "imp", "a small imp", "#cc2200", "theme", "world",
+            self.GRAPHICS, (32, 32),
+        )
+        assert len(backend.calls) == 2
+        assert ALPHA_RETRY_SUFFIX not in backend.calls[0]
+        assert ALPHA_RETRY_SUFFIX in backend.calls[1]
+        alpha = [a for _r, _g, _b, a in out.convert("RGBA").get_flattened_data()]
+        frac = sum(1 for a in alpha if a > 0) / len(alpha)
+        assert 0.02 <= frac <= 0.90
+
+    def test_exhausted_budget_warns_loudly_and_ships(self, caplog) -> None:
+        import logging
+
+        class HopelessBackend:
+            model = "hopeless"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                self.calls.append(prompt)
+                return _png(_noise(width, height))
+
+        backend = HopelessBackend()
+        producer = DiffusionSheetProducer(backend)
+        with caplog.at_level(logging.WARNING):
+            out = producer.sprite_image(
+                "imp", "a small imp", "#cc2200", "theme", "world",
+                self.GRAPHICS, (32, 32),
+            )
+        assert len(backend.calls) == ALPHA_GATE_RETRIES + 1
+        assert out is not None  # least-bad image still ships
+        assert any("FAILED all" in r.message for r in caplog.records)
+
+    def test_seed_pinned_backend_gets_no_futile_retries(self, caplog) -> None:
+        import logging
+
+        class SeededBackend:
+            model = "seeded"
+            capabilities = frozenset({"seeds"})
+            seed = 7
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                self.calls.append(prompt)
+                return _png(_noise(width, height))
+
+        backend = SeededBackend()
+        producer = DiffusionSheetProducer(backend)
+        with caplog.at_level(logging.WARNING):
+            producer.sprite_image(
+                "imp", "a small imp", "#cc2200", "theme", "world",
+                self.GRAPHICS, (32, 32),
+            )
+        assert len(backend.calls) == 1, "same seed, same pixels — no retry"
+
+    def test_fake_backend_skips_the_gate_byte_identically(self) -> None:
+        assert FakeImageBackend.trusted_alpha is True
+        backend = FakeImageBackend()
+        producer = DiffusionSheetProducer(backend)
+        producer.sprite_image(
+            "imp", "a small imp", "#cc2200", "theme", "world",
+            self.GRAPHICS, (32, 32),
+        )
+        assert len(backend.calls) == 1
+        assert ALPHA_RETRY_SUFFIX not in backend.calls[0]["prompt"]

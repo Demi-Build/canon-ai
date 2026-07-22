@@ -36,11 +36,15 @@ from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, w
 from examples.platformer_pack.style import background_role
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.tileset_art import (
+    apply_watermark,
+    art_provenance,
     build_sheet_reference,
     dominant_hue,
     frames_to_strip,
     hue_distance,
     normalize_frames,
+    pack_atlas,
+    png_bytes,
     segment_frames,
     tint_to_color,
 )
@@ -49,6 +53,11 @@ logger = logging.getLogger(__name__)
 
 #: Parallax scroll factors far → near (0 = pinned to camera).
 BAND_DEPTHS = (0.2, 0.5, 0.8)
+
+#: The foreground occlusion band's scroll factor — depth > 1 is the
+#: consumer contract for "draw IN FRONT of gameplay" (an extra
+#: near-field occluder band; behind the UI/hud).
+FOREGROUND_DEPTH = 1.15
 
 #: A sprite whose opaque area falls below this after background removal
 #: is a failed generation (or the fake 1×1) — consumers keep their rects.
@@ -70,13 +79,55 @@ PROP_SPECS: tuple[tuple[str, str, str], ...] = (
         "pole planted in the ground",
         "#ffd24a",
     ),
+    # No "exit" prop (postmortem ticket 3): the win zone is the whole right
+    # edge / summit, so a single-cell doorway sprite was dead art. A future
+    # finish-line (full-height marker over the exit column) is a different
+    # asset, reserved here — not this prop.
     (
-        "exit",
-        "a level exit goal: an ornate free-standing doorway with a "
-        "glowing arch, closed set piece",
-        "#40ff70",
+        "dust",
+        "a small puff of dust kicked up from the ground, a few soft "
+        "rounded clouds, mostly empty space",
+        "#c9b9a2",
+    ),
+    (
+        "splash",
+        "a small water splash burst: white foam droplets arcing up, "
+        "mostly empty space",
+        "#9fd8ff",
+    ),
+    (
+        "sparkle",
+        "a bright four-pointed pickup sparkle glint, mostly empty space",
+        "#fff2a8",
     ),
 )
+
+#: One-shot VFX props (Godot-only pool: dust on landing, splash on
+#: volume entry, sparkle on collect). Wispy by design — QA's
+#: sprite_bbox check relaxes its min-fill for these names.
+VFX_PROP_NAMES = frozenset({"dust", "splash", "sparkle"})
+
+
+def _stamped_png(
+    ctx: Any, producer: Any, graphics: GraphicsSpec, img: Any, asset: str,
+    *, watermark: bool = True,
+) -> bytes:
+    """Encode one producer-GENERATED image: the readable provenance
+    stamp (png_bytes + art_provenance) on every write, plus the visible
+    corner watermark when the spec asks. Tiles pass ``watermark=False``
+    — their region means are palette-checked, so the mark would fight
+    conformance and QA."""
+    if watermark and graphics.visible_watermark:
+        img = apply_watermark(img)
+    return png_bytes(
+        img,
+        art_provenance(
+            asset=asset,
+            producer=producer,
+            graphics=graphics,
+            pipeline_seed=str(getattr(ctx.config, "seed", "")),
+        ),
+    )
 
 
 def _hue_of(hex_color: str) -> float:
@@ -140,39 +191,79 @@ class TilesetArtPhase:
                 continue
             stage = ctx.bible.stages[stage_id]
             tile_px = self.graphics.tile_px
+            drift_log = getattr(self.producer, "last_palette_drift", None)
+            if drift_log is not None:
+                drift_log.clear()  # per-stage snapshot (ticket 6)
             sheet = Image.new("RGBA", (tile_px * len(tileset.slots), tile_px))
+            # One generation per tile NAME: the 16 autotile floor variant
+            # slots share the floor art (paid runs stay at 10 unique
+            # generations); a failed name isn't retried per slot.
+            generated: dict[str, Any] = {}
             for slot in tileset.slots:
                 tile = by_name.get(slot.name)
                 role_hex = tileset.palette.get(
                     tile.color_role if tile else "", "#ff00ff"
                 )
-                square = None
-                if tile is not None:
-                    try:
-                        square = self.producer.tile_image(
-                            tile, role_hex, stage.theme, world_title,
-                            self.graphics,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        warn(
-                            ctx,
-                            f"tileset art: generation failed for tile "
-                            f"{slot.name!r} ({type(e).__name__}: {e}); "
-                            f"placeholder square used.",
-                        )
+                if slot.name in generated:
+                    square = generated[slot.name]
+                else:
+                    square = None
+                    if tile is not None:
+                        try:
+                            square = self.producer.tile_image(
+                                tile, role_hex, stage.theme, world_title,
+                                self.graphics,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            warn(
+                                ctx,
+                                f"tileset art: generation failed for tile "
+                                f"{slot.name!r} ({type(e).__name__}: {e}); "
+                                f"placeholder square used.",
+                            )
+                    generated[slot.name] = square
                 if square is None:
                     raw = role_hex.lstrip("#")
                     color = tuple(
                         int(raw[i : i + 2], 16) for i in (0, 2, 4)
                     ) + (255,)
                     square = Image.new("RGBA", (tile_px, tile_px), color)
+                if slot.params.get("water_deep"):
+                    # Interior water: the shared generated square minus
+                    # its surface lip (code-derived, mean-preserved).
+                    from examples.platformer_pack.tileset import (
+                        derive_water_deep,
+                    )
+
+                    square = derive_water_deep(square.copy())
+                mask = slot.params.get("autotile_mask")
+                if mask is not None:
+                    # Mean-preserving edge shading distinguishes the
+                    # variants without moving any region average — the
+                    # base art is shared per name, so shade a copy.
+                    from examples.platformer_pack.tileset import (
+                        shade_floor_variant,
+                    )
+
+                    square = shade_floor_variant(square.copy(), int(mask))
                 x, y, _w, _h = slot.px_region
                 sheet.paste(square, (x, y))
 
-            buffer = io.BytesIO()
-            sheet.save(buffer, format="PNG")
+            if drift_log:
+                # Ticket 6 data path (producer → phase → QA): the pre-conform
+                # drift snapshot, read back by run_code_checks' palette_drift
+                # meter. Real backends only — the fake records nothing, so
+                # fake trees gain no file.
+                ctx.adapter.write_json_singleton(
+                    f"review/{stage_id}/palette_drift.json",
+                    {k: drift_log[k] for k in sorted(drift_log)},
+                )
             tileset.tilesheet_hash = ctx.adapter.write_binary(
-                tileset.tilesheet_path, buffer.getvalue()
+                tileset.tilesheet_path,
+                _stamped_png(
+                    ctx, self.producer, self.graphics, sheet,
+                    f"tilesheet:{stage_id}", watermark=False,
+                ),
             )
             manifest_hash = ctx.adapter.write_json_singleton(
                 f"tileset/{stage_id}/manifest.json",
@@ -206,6 +297,10 @@ ARCHETYPE_LOOK = {
     "flyer": (
         "airborne and hovering, built to drift and swoop through open air — "
         "wings optional (a weightless, floating body reads as a flyer too)"
+    ),
+    "hopper": (
+        "coiled and spring-legged, crouched low on powerful haunches — a "
+        "bouncy creature clearly built to launch itself in arcing hops"
     ),
 }
 
@@ -340,7 +435,9 @@ class SpriteArtPhase:
                 )
             rel = f"sprite/enemy/{enemy_id}/base.png"
             enemy.sprite_path = rel
-            enemy.sprite_hash = self._write(ctx, rel, sprite)
+            enemy.sprite_hash = self._write(
+                ctx, rel, sprite, f"sprite:enemy/{enemy_id}"
+            )
             ctx.adapter.write_json_singleton(
                 f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
             )
@@ -391,7 +488,9 @@ class SpriteArtPhase:
                 sprite = tint_to_color(sprite, color_hex)
             rel = f"sprite/item/{item_id}/base.png"
             item.sprite_path = rel
-            item.sprite_hash = self._write(ctx, rel, sprite)
+            item.sprite_hash = self._write(
+                ctx, rel, sprite, f"sprite:item/{item_id}"
+            )
             ctx.adapter.write_json_singleton(
                 f"item/{item_id}.json", item.model_dump(mode="json")
             )
@@ -412,7 +511,7 @@ class SpriteArtPhase:
             )
             if player is not None:
                 rel = "sprite/player/base.png"
-                sprite_hash = self._write(ctx, rel, player)
+                sprite_hash = self._write(ctx, rel, player, "sprite:player")
                 entity = ctx.bible.player
                 if entity is None:
                     entity = PlayerDefinition(
@@ -457,7 +556,9 @@ class SpriteArtPhase:
                     continue
                 rel = f"sprite/prop/{stage_id}/{prop_name}.png"
                 props.prop_paths[prop_name] = rel
-                props.prop_hashes[rel] = self._write(ctx, rel, sprite)
+                props.prop_hashes[rel] = self._write(
+                    ctx, rel, sprite, f"sprite:prop/{stage_id}/{prop_name}"
+                )
             if not props.prop_paths:
                 continue  # nothing generated — no empty artifact
             manifest_hash = ctx.adapter.write_json_singleton(
@@ -503,11 +604,13 @@ class SpriteArtPhase:
             return None
         return sprite
 
-    @staticmethod
-    def _write(ctx: Any, rel: str, sprite: Any) -> str:
-        buffer = io.BytesIO()
-        sprite.save(buffer, format="PNG")
-        return ctx.adapter.write_binary(rel, buffer.getvalue())
+    def _write(self, ctx: Any, rel: str, sprite: Any, asset: str) -> str:
+        """Encode + stamp: every generated sprite carries the readable
+        provenance chunks (and the visible watermark when the spec
+        asks) — ``asset`` is its ``canon:asset`` address."""
+        return ctx.adapter.write_binary(
+            rel, _stamped_png(ctx, self.producer, self.graphics, sprite, asset)
+        )
 
 
 #: Minimum frames a segmented sheet must yield to count as an animation —
@@ -521,17 +624,64 @@ ANIM_MIN_FRAMES = 2
 MAX_SHEET_REF_WIDTH = 2560
 
 
-def _animation_sheet_prompt(state: str, motion: str, n_frames: int) -> str:
+#: Character-drift ceiling (postmortem ticket 7): euclidean distance between
+#: the base sprite's opaque mean RGB and a state's frames. On the paid
+#: fixtures on-model states scored <= 5 and drifted states ~31, so ~18 is a
+#: wide-margin cut. Warn-only — a state over it still ships, flagged.
+SPRITE_DRIFT_MAX = 18.0
+_DRIFT_NOTE = (
+    " CRITICAL: keep the EXACT palette and colours of the attached reference "
+    "character — same hues, same shading; do not recolour it."
+)
+
+
+def _opaque_mean_rgb(images: list) -> tuple:
+    """Mean RGB over the OPAQUE pixels (alpha > 0) of one or more images — the
+    palette signature used for character-drift comparison."""
+    tot = [0.0, 0.0, 0.0]
+    count = 0
+    for img in images:
+        rgba = img.convert("RGBA")
+        pixels = list(rgba.convert("RGB").get_flattened_data())
+        alphas = list(rgba.getchannel("A").get_flattened_data())
+        for i, a in enumerate(alphas):
+            if a > 0:
+                p = pixels[i]
+                tot[0] += p[0]
+                tot[1] += p[1]
+                tot[2] += p[2]
+                count += 1
+    if not count:
+        return (0.0, 0.0, 0.0)
+    return (tot[0] / count, tot[1] / count, tot[2] / count)
+
+
+def _sprite_drift(base: Any, frames: list) -> float:
+    """Euclidean distance between the base sprite's opaque mean RGB and the
+    frames' — separates a DIFFERENT character (a palette shift) from the same
+    character in a new pose (a pose leaves the mean ~unchanged)."""
+    from math import dist
+
+    return dist(_opaque_mean_rgb([base]), _opaque_mean_rgb(frames))
+
+
+def _animation_sheet_prompt(
+    state: str, motion: str, n_frames: int, facing: str = "right"
+) -> str:
     """The img2img sheet prompt (proven template from the B0 spike): seed
-    frame 1 with the real sprite, fill the rest with the state's cycle."""
+    frame 1 with the real sprite, fill the rest with the state's cycle.
+    ``facing`` flips the declared side view for an asymmetric second pass."""
     return (
         f"This image is the FIRST frame (leftmost cell) of a horizontal sprite "
         f"sheet made of {n_frames} equal-width cells. Keep that leftmost frame "
         f"as-is and fill the cells to its right with the {state} animation of "
-        f"the SAME character: {motion}. Every frame: identical character design, "
-        f"identical size and colors, side view facing right, exactly one "
-        f"character centered per cell, evenly spaced left-to-right, on a plain "
-        f"solid white background. No text, no numbers, no borders, no gridlines."
+        f"the SAME character: {motion}. The pose must PROGRESS across the cells "
+        f"so the strip reads clearly as {state} — vary the body posture and "
+        f"SILHOUETTE frame to frame, not just small details. Every frame: "
+        f"identical character design, identical proportions and colors, side "
+        f"view facing {facing}, exactly one character centered per cell, evenly "
+        f"spaced left-to-right, on a plain solid white background. No text, no "
+        f"numbers, no borders, no gridlines."
     )
 
 
@@ -544,8 +694,10 @@ class SpriteAnimationPhase:
     generated (``ImageEditBackend.edit``), segmented by CONTENT — the edit model
     ignores exact frame counts, so a fixed grid slicer would straddle frames —
     normalized to uniform square frames, and written as a per-state frame strip
-    (``sprite/<kind>/<id>/<state>.png``) plus ``frames.json`` beside base.png.
-    The manifest is folded onto ``enemy.stats['animation']``.
+    (``sprite/<kind>/<id>/<state>.png``) plus ``frames.json`` and a packed
+    trimmed atlas (``atlas.png`` + ``atlas.json``) beside base.png. A hopper
+    adds a ``jump`` state; an ``asymmetric`` actor gets real left-facing
+    strips. The manifest is folded onto ``enemy.stats['animation']``.
 
     LOUD FALLBACK at every step: no img2img-capable backend, no judge, a pinned
     or sprite-less enemy, a failed edit, or a sheet that segments to <2 frames →
@@ -581,17 +733,20 @@ class SpriteAnimationPhase:
     def run(self, ctx: Any) -> None:
         from examples.platformer_pack.vlm_qa import (
             ANIM_FRAMES_MAX,
-            ANIMATION_STATES,
             PLAYER_ANIM_FRAMES_MAX,
             PLAYER_ANIMATION_STATES,
+            enemy_animation_states,
             enemy_animation_subject,
         )
 
-        backend = getattr(self.producer, "backend", None)
+        # The ANIMATION img2img backend may differ from the sprite backend
+        # (ticket 7): PixelLab can generate the character sheets while nano
+        # (fal) animates them. edit_backend defaults to the sprite backend.
+        backend = getattr(self.producer, "edit_backend", None)
         if not isinstance(backend, ImageEditBackend):
             logger.info(
-                "SpriteAnimationPhase: image backend has no img2img (edit) "
-                "capability — static sprites kept."
+                "SpriteAnimationPhase: no img2img (edit) backend available "
+                "— static sprites kept."
             )
             _stamp_metadata(ctx, self.name)
             return
@@ -613,7 +768,8 @@ class SpriteAnimationPhase:
                 continue
             manifest = self._animate_one(
                 ctx, f"enemy:{enemy_id}", enemy.sprite_path,
-                enemy_animation_subject(enemy), ANIMATION_STATES, ANIM_FRAMES_MAX,
+                enemy_animation_subject(enemy), enemy_animation_states(enemy),
+                ANIM_FRAMES_MAX, asymmetric=enemy.asymmetric,
             )
             if manifest:
                 enemy.stats["animation"] = manifest
@@ -632,6 +788,7 @@ class SpriteAnimationPhase:
             manifest = self._animate_one(
                 ctx, "player", player.sprite_path, subject,
                 PLAYER_ANIMATION_STATES, PLAYER_ANIM_FRAMES_MAX,
+                asymmetric=player.asymmetric,
             )
             if manifest:
                 player.animation = manifest
@@ -645,11 +802,12 @@ class SpriteAnimationPhase:
         subject: str,
         states: tuple[str, ...],
         frames_max: int,
+        asymmetric: bool = False,
     ) -> dict:
         """Author (B2) + generate + segment one actor's animation. Returns
-        ``{"spec": ..., "states": ...}`` or ``{}`` — the loud fallback: no
-        sprite, a spec that never validated, or nothing generated all leave the
-        static base.png in place."""
+        ``{"spec": ..., "states": ..., "atlas": ...}`` or ``{}`` — the loud
+        fallback: no sprite, a spec that never validated, or nothing generated
+        all leave the static base.png in place."""
         from examples.platformer_pack.vlm_qa import author_animation_spec
 
         if not sprite_path:
@@ -672,33 +830,164 @@ class SpriteAnimationPhase:
                 f"sprite kept.",
             )
             return {}
-        state_files = self._animate_actor(ctx, sprite_path, spec, actor_id)
-        if not state_files:
+        result = self._animate_actor(ctx, sprite_path, spec, actor_id, asymmetric)
+        if not result.get("states"):
             return {}
         logger.info(
             "SpriteAnimationPhase animated %s (%d state(s)) via %s.",
-            actor_id, len(state_files), self.producer.model,
+            actor_id, len(result["states"]), self.producer.model,
         )
-        return {"spec": spec, "states": state_files}
+        return {"spec": spec, **result}
+
+    def _sheet_frames(
+        self,
+        ctx: Any,
+        base: Any,
+        actor_id: str,
+        state: str,
+        motion: str,
+        n_frames: int,
+        cell_px: int,
+        facing: str = "right",
+        kept: str = "state kept static",
+    ) -> tuple[list, float] | None:
+        """One img2img sheet → ``(frames, wander_frac)`` for one state and
+        facing: content-segmented, normalized frames plus the PRE-normalize
+        baseline wander (max-min of the raw crops' content bottoms, as a
+        fraction of the sheet height — measured UPSTREAM of the normalize
+        re-anchor, the honest registration signal; postmortem ticket 6). None
+        (warned, ``kept`` naming the fallback) on a failed edit or a sheet
+        that segments below ANIM_MIN_FRAMES."""
+        from PIL import Image
+
+        label = "sheet" if facing == "right" else f"{facing} sheet"
+        prompt = _animation_sheet_prompt(state, motion, n_frames, facing=facing)
+        ref = build_sheet_reference(base, n_frames, cell_px)
+        ref_buf = io.BytesIO()
+        ref.save(ref_buf, format="PNG")
+        ref_bytes = ref_buf.getvalue()
+        # Attach the CLEAN character sprite as an identity anchor so the edit
+        # model keeps the SAME character across states (ticket 7): the sprite
+        # backend (e.g. PixelLab) made base.png, and nano edits it WITH base.png
+        # re-attached — "the animator gets the character sheet". A stock motion
+        # sheet would prepend to this list once cradle supplies one.
+        base_buf = io.BytesIO()
+        base.save(base_buf, format="PNG")
+        refs = [base_buf.getvalue()]
+        edit_backend = self.producer.edit_backend
+
+        def _edit(note: str = "") -> Any:
+            out = edit_backend.edit(
+                ref_bytes, prompt + note, ref.width, ref.height, references=refs
+            )
+            return Image.open(io.BytesIO(out)).convert("RGBA")
+
+        try:
+            sheet = _edit()
+        except Exception as e:  # noqa: BLE001
+            warn(
+                ctx,
+                f"animation: {actor_id!r} {state!r} {label} failed "
+                f"({type(e).__name__}: {e}); {kept}.",
+            )
+            return None
+        raw = segment_frames(sheet)
+        frames = normalize_frames(raw)
+        if len(frames) < ANIM_MIN_FRAMES:
+            warn(
+                ctx,
+                f"animation: {actor_id!r} {state!r} {label} segmented to "
+                f"{len(frames)} frame(s) (<{ANIM_MIN_FRAMES}); {kept}.",
+            )
+            return None
+        # Pre-normalize baseline wander (ticket 6): the raw crops share the
+        # sheet's vertical frame, so their content-bottom spread IS the
+        # backend's registration drift — normalize_frames re-anchors it away,
+        # which is exactly why the old post-normalize check couldn't fail.
+        bottoms = [
+            b[3] for c in raw if (b := c.getchannel("A").getbbox())
+        ]
+        wander_frac = (
+            round((max(bottoms) - min(bottoms)) / max(1, sheet.height), 4)
+            if len(bottoms) >= 2
+            else 0.0
+        )
+        # Character-drift check (ticket 7) — skipped on the trusted fake (its
+        # canned sheet is not a real sprite). Over threshold: retry ONCE with
+        # the base re-attached + a palette note, then SHIP either way with a
+        # durable warning (never blocks, never regenerates).
+        if not getattr(edit_backend, "trusted_alpha", False):
+            drift = _sprite_drift(base, frames)
+            if drift > SPRITE_DRIFT_MAX:
+                try:
+                    retry_sheet = _edit(_DRIFT_NOTE)
+                    retry_raw = segment_frames(retry_sheet)
+                    retry = normalize_frames(retry_raw)
+                    rdrift = (
+                        _sprite_drift(base, retry)
+                        if len(retry) >= ANIM_MIN_FRAMES
+                        else float("inf")
+                    )
+                    if rdrift < drift:
+                        frames, drift = retry, rdrift
+                        rb = [
+                            b[3]
+                            for c in retry_raw
+                            if (b := c.getchannel("A").getbbox())
+                        ]
+                        wander_frac = (
+                            round(
+                                (max(rb) - min(rb))
+                                / max(1, retry_sheet.height),
+                                4,
+                            )
+                            if len(rb) >= 2
+                            else 0.0
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                if drift > SPRITE_DRIFT_MAX:
+                    warn(
+                        ctx,
+                        f"animation: {actor_id!r} {state!r} {label} drifted "
+                        f"from the base sprite (dRGB {drift:.0f} > "
+                        f"{SPRITE_DRIFT_MAX:.0f}); shipped — flag for manual "
+                        "review.",
+                    )
+        return frames, wander_frac
 
     def _animate_actor(
-        self, ctx: Any, base_rel: str, spec: dict, actor_id: str
+        self,
+        ctx: Any,
+        base_rel: str,
+        spec: dict,
+        actor_id: str,
+        asymmetric: bool = False,
     ) -> dict:
-        """Generate + segment + write one frame strip per state. Writes
-        ``frames.json`` beside base.png and returns the states manifest
-        (``{state: {path, hash, frames, frame_width, frame_height,
-        duration_ms}}``). States that fail any step are simply absent (static
-        fallback)."""
+        """Generate + segment + write one frame strip per state (an
+        asymmetric actor gets a REAL left-facing strip too, from the mirrored
+        base), then pack every frame into one trimmed atlas (atlas.png +
+        atlas.json beside frames.json — the self-contained shipping manifest).
+        Writes ``frames.json`` beside base.png and returns ``{"states":
+        {state: {path, hash, frames, frame_width, frame_height, duration_ms,
+        loop, durations_ms[, path_left, hash_left, frames_left]}}, "atlas":
+        {path, hash}}`` (``{}`` when nothing generated). States that fail any
+        step are simply absent (static fallback); a failed left pass falls
+        back to the consumers' horizontal flip."""
         from PIL import Image
+
+        from examples.platformer_pack.vlm_qa import STATE_LOOP_MODES
 
         base = Image.open(ctx.adapter.resolve_path(base_rel)).convert("RGBA")
         sprite_dir = base_rel.rsplit("/", 1)[0]  # sprite/enemy/<id>
+        actor_slug = actor_id.replace(":", "/")  # canon:asset address leaf
         size = self.graphics.sprite_size()
         frame_ms = self.graphics.anim_frame_ms
         resample = (
             Image.NEAREST if self.graphics.render_filter == "crisp" else Image.LANCZOS
         )
         states: dict[str, dict] = {}
+        frame_lists: dict[str, list] = {}  # resized PIL frames, for the atlas
         for state, state_spec in spec.items():
             n_frames = int(state_spec.get("frames", ANIM_MIN_FRAMES))
             # Per-cell size shrinks as the frame count grows so a many-frame
@@ -706,57 +995,117 @@ class SpriteAnimationPhase:
             cell_px = min(
                 self.graphics.gen_px, max(96, MAX_SHEET_REF_WIDTH // max(1, n_frames))
             )
-            prompt = _animation_sheet_prompt(
-                state, str(state_spec.get("motion", "")), n_frames
+            motion = str(state_spec.get("motion", ""))
+            got = self._sheet_frames(
+                ctx, base, actor_id, state, motion, n_frames, cell_px
             )
-            ref = build_sheet_reference(base, n_frames, cell_px)
-            ref_buf = io.BytesIO()
-            ref.save(ref_buf, format="PNG")
-            try:
-                sheet_bytes = self.producer.backend.edit(
-                    ref_buf.getvalue(), prompt, ref.width, ref.height
-                )
-                sheet = Image.open(io.BytesIO(sheet_bytes)).convert("RGBA")
-            except Exception as e:  # noqa: BLE001
-                warn(
-                    ctx,
-                    f"animation: {actor_id!r} {state!r} sheet failed "
-                    f"({type(e).__name__}: {e}); state kept static.",
-                )
+            if got is None:
                 continue
-            frames = normalize_frames(segment_frames(sheet))
-            if len(frames) < ANIM_MIN_FRAMES:
-                warn(
-                    ctx,
-                    f"animation: {actor_id!r} {state!r} sheet segmented to "
-                    f"{len(frames)} frame(s) (<{ANIM_MIN_FRAMES}); state kept "
-                    f"static.",
-                )
-                continue
+            frames, wander_frac = got
             frames = [f.resize((size, size), resample) for f in frames]
             strip = frames_to_strip(frames)
             rel = f"{sprite_dir}/{state}.png"
-            strip_buf = io.BytesIO()
-            strip.save(strip_buf, format="PNG")
             states[state] = {
                 "path": rel,
-                "hash": ctx.adapter.write_binary(rel, strip_buf.getvalue()),
+                "hash": ctx.adapter.write_binary(
+                    rel,
+                    _stamped_png(
+                        ctx, self.producer, self.graphics, strip,
+                        f"strip:{actor_slug}/{state}",
+                    ),
+                ),
                 "frames": len(frames),
                 "frame_width": size,
                 "frame_height": size,
                 "duration_ms": frame_ms,
+                # Playback keys (G4): uniform per-frame durations v1 — the
+                # per-frame list is the user's hand-edit lever — plus the
+                # state's loop mode.
+                "loop": STATE_LOOP_MODES.get(state, "loop"),
+                "durations_ms": [frame_ms] * len(frames),
+                # Pre-normalize baseline wander (ticket 6): the upstream
+                # registration signal, carried to QA's animation_wander meter.
+                "raw_bottom_wander_frac": wander_frac,
             }
-        if states:
-            # frames.json (no hashes) is the consumers' per-actor playback
-            # manifest, loaded beside the strips; hashes stay in the Bible.
-            ctx.adapter.write_json_singleton(
-                f"{sprite_dir}/frames.json",
-                {
-                    st: {k: v for k, v in d.items() if k != "hash"}
+            frame_lists[state] = frames
+            if not asymmetric:
+                continue
+            # Asymmetric designs (USER-set art flag) get a real left-facing
+            # strip from the mirrored base; a failed or count-mismatched left
+            # pass keeps the consumers' default horizontal flip.
+            got_left = self._sheet_frames(
+                ctx, base.transpose(Image.Transpose.FLIP_LEFT_RIGHT), actor_id,
+                state, motion, n_frames, cell_px, facing="left",
+                kept="right-facing flip kept",
+            )
+            if got_left is None:
+                continue
+            left, _left_wander = got_left
+            if len(left) != len(frames):
+                warn(
+                    ctx,
+                    f"animation: {actor_id!r} {state!r} left strip segmented "
+                    f"to {len(left)} frame(s) vs {len(frames)} right; "
+                    f"right-facing flip kept.",
+                )
+                continue
+            left = [f.resize((size, size), resample) for f in left]
+            left_rel = f"{sprite_dir}/{state}_left.png"
+            states[state]["path_left"] = left_rel
+            states[state]["hash_left"] = ctx.adapter.write_binary(
+                left_rel,
+                _stamped_png(
+                    ctx, self.producer, self.graphics, frames_to_strip(left),
+                    f"strip:{actor_slug}/{state}_left",
+                ),
+            )
+            states[state]["frames_left"] = len(left)
+            frame_lists[f"{state}__left"] = left
+        if not states:
+            return {}
+        # frames.json (no hashes) is the consumers' per-actor playback
+        # manifest, loaded beside the strips; hashes stay in the Bible.
+        ctx.adapter.write_json_singleton(
+            f"{sprite_dir}/frames.json",
+            {
+                st: {k: v for k, v in d.items() if k not in ("hash", "hash_left")}
+                for st, d in states.items()
+            },
+        )
+        # One packed atlas over every generated frame (both facings): trimmed
+        # rects + each crop's (ox, oy) inside its untrimmed square, anchor =
+        # the square's bottom-center — consumers reconstitute full squares so
+        # draw math is unchanged.
+        atlas_img, rects = pack_atlas(frame_lists)
+        atlas_rel = f"{sprite_dir}/atlas.png"
+        atlas_hash = ctx.adapter.write_binary(
+            atlas_rel,
+            _stamped_png(
+                ctx, self.producer, self.graphics, atlas_img,
+                f"atlas:{actor_slug}",
+            ),
+        )
+        ctx.adapter.write_json_singleton(
+            f"{sprite_dir}/atlas.json",
+            {
+                "path": atlas_rel,
+                "frame_size": [size, size],
+                "states": {
+                    st: {
+                        "loop": d["loop"],
+                        "durations_ms": d["durations_ms"],
+                        "frames": rects[st],
+                        **(
+                            {"frames_left": rects[f"{st}__left"]}
+                            if f"{st}__left" in rects
+                            else {}
+                        ),
+                    }
                     for st, d in states.items()
                 },
-            )
-        return states
+            },
+        )
+        return {"states": states, "atlas": {"path": atlas_rel, "hash": atlas_hash}}
 
 
 class BackdropArtPhase:
@@ -825,12 +1174,42 @@ class BackdropArtPhase:
                     )
                     continue
                 rel = f"backdrop/{stage_id}/band_{band}.png"
-                buffer = io.BytesIO()
-                img.save(buffer, format="PNG")
                 backdrop.band_paths.append(rel)
                 backdrop.band_hashes[rel] = ctx.adapter.write_binary(
-                    rel, buffer.getvalue()
+                    rel,
+                    _stamped_png(
+                        ctx, self.producer, self.graphics, img,
+                        f"band:{stage_id}/{band}",
+                    ),
                 )
+            # The foreground occlusion band (RGBA occluders, depth > 1,
+            # drawn in front of gameplay) — appended LAST: band order
+            # stays far → near → foreground.
+            if self.graphics.foreground_band:
+                try:
+                    img = self.producer.backdrop_image(
+                        self.graphics.backdrop_bands, stage.theme,
+                        world_title, palette, bg_hex, self.graphics,
+                        foreground=True,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    warn(
+                        ctx,
+                        f"backdrop art: foreground band failed for stage "
+                        f"{stage_id!r} ({type(e).__name__}: {e}); no "
+                        f"occluder band.",
+                    )
+                else:
+                    rel = f"backdrop/{stage_id}/band_fg.png"
+                    backdrop.band_paths.append(rel)
+                    backdrop.band_hashes[rel] = ctx.adapter.write_binary(
+                        rel,
+                        _stamped_png(
+                            ctx, self.producer, self.graphics, img,
+                            f"band:{stage_id}/fg",
+                        ),
+                    )
+                    backdrop.depths.append(FOREGROUND_DEPTH)
             manifest_hash = ctx.adapter.write_json_singleton(
                 f"backdrop/{stage_id}/manifest.json",
                 backdrop.model_dump(mode="json"),
@@ -846,4 +1225,91 @@ class BackdropArtPhase:
                 "BackdropArtPhase wrote %d band(s) for stage %s.",
                 len(backdrop.band_paths), stage_id,
             )
+        _stamp_metadata(ctx, self.name)
+
+
+class WorldArtPhase:
+    """One key-art SPLASH per world (``splash/world.png``, 16:9): the
+    boot screen the Godot shell letterboxes under its code-drawn title
+    Label. The card is LEAF art addressed as ``splash`` (hash-tracked
+    via ``World.splash_path/splash_hash`` on the World entity, but
+    NEVER under the ``world`` id — nothing derives from splash pixels,
+    so a pin or hand edit must not touch the world's descendant set);
+    no producer or a failed generation leaves the paths empty — the
+    engine's code-drawn title card IS the fallback."""
+
+    name = "plat:world_art"
+
+    def __init__(
+        self,
+        producer: Any = None,
+        graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+    ) -> None:
+        self.producer = producer
+        self.graphics = graphics
+
+    def owns(self, ctx: Any) -> list[str]:
+        # `canon regen splash` re-rolls the card; `regen world` re-rolls
+        # the WORLD (and everything under it) — deliberately distinct.
+        return ["splash"]
+
+    def run(self, ctx: Any) -> None:
+        world = ctx.bible.world
+        if self.producer is None or world is None:
+            logger.info(
+                "WorldArtPhase: no image producer/world — title card kept."
+            )
+            _stamp_metadata(ctx, self.name)
+            return
+        if "splash" in pinned_ids(ctx.bible):
+            logger.info("WorldArtPhase: splash is pinned — card kept.")
+            _stamp_metadata(ctx, self.name)
+            return
+        # Prompt seeds, in world order (deterministic): every stage's
+        # theme, and the first painted stage's palette as the swatch.
+        themes = [
+            ctx.bible.stages[sid].theme
+            for sid in world.stage_ids
+            if sid in ctx.bible.stages
+        ]
+        palette: dict[str, str] = {}
+        for sid in world.stage_ids:
+            tileset = ctx.bible.tilesets.get(sid)
+            if tileset is not None:
+                palette = tileset.palette
+                break
+        try:
+            img = self.producer.splash_image(
+                world.title, themes, palette, self.graphics
+            )
+        except Exception as e:  # noqa: BLE001
+            warn(
+                ctx,
+                f"world art: splash generation failed "
+                f"({type(e).__name__}: {e}); title card kept.",
+            )
+            _stamp_metadata(ctx, self.name)
+            return
+        rel = "splash/world.png"
+        world.splash_path = rel
+        world.splash_hash = ctx.adapter.write_binary(
+            rel,
+            _stamped_png(ctx, self.producer, self.graphics, img, "splash:world"),
+        )
+        content_hash = ctx.adapter.write_json_singleton(
+            "world.json", world.model_dump(mode="json")
+        )
+        # label keeps the TEXT model truthful (the world plan's author);
+        # model_extra folds the art generators in, like the other art
+        # phases' re-stamps.
+        stamp_provenance(
+            ctx, world, content_hash,
+            label="plat:world",
+            model_extra=(
+                f"gfx:{self.graphics.digest()}+img:{self.producer.model}"
+            ),
+        )
+        logger.info(
+            "WorldArtPhase wrote %s via %s.", rel, self.producer.model
+        )
         _stamp_metadata(ctx, self.name)

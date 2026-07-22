@@ -1,0 +1,91 @@
+{
+  "level_id": "l8r1",
+  "stage_id": "scorched_summit",
+  "grid_width": 28,
+  "grid_height": 14,
+  "difficulty": 3,
+  "axis": "horizontal",
+  "fallback": true,
+  "whole_fallback": false,
+  "section_fallbacks": [
+    0
+  ],
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,27)\ngap(3,6)\ngap(9,12)\ngap(15,17)\ngap(20,22)\npit(3,6)\npit(9,12)\npit(15,17)\npit(20,22)\nspawn(1)\nstairs_up(0,2)\nplatform(2,9,2)\nbreakable(4,5)\nwall(7,8,12)\nwall(8,8,12)\nledge(6,8,7)\nplatform(7,5,2)\nbreakable(10,11)\nwall(13,7,12)\nledge(12,14,6)\nplatform(12,4,3)\nhazard_strip(spike,13,14)\nwall(14,7,12)\nledge(16,18,5)\nbreakable(16,17)\nplatform(19,4,2)\nhazard_strip(spike,20,21)\nwall(23,6,12)\nwall(24,6,12)\nledge(22,24,5)\nplatform(22,3,3)\ncarve(23,0,24,5)\nreward(23,2)\nbreakable(25,26)\nstairs_up(26,27)\nfloor(27,27)\ncheckpoint(18)",
+      "section": 0,
+      "archetype": "gauntlet"
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,27)\ngap(3,6)\ngap(9,12)\ngap(15,17)\ngap(20,22)\npit(3,6)\npit(9,12)\npit(15,17)\npit(20,22)\nspawn(1)\nstairs_up(0,2)\nplatform(2,9,2)\nbreakable(4,5)\nwall(7,8,12)\nwall(8,8,12)\nledge(6,8,7)\nplatform(7,5,2)\nbreakable(10,11)\nwall(13,7,12)\nledge(12,14,6)\nplatform(12,4,3)\nhazard_strip(spike,13,14)\nwall(14,7,12)\nledge(16,18,5)\nbreakable(16,17)\nplatform(19,4,2)\nhazard_strip(spike,20,21)\nwall(23,6,12)\nwall(24,6,12)\nledge(22,24,5)\nplatform(22,3,3)\ncarve(23,0,24,5)\nreward(23,2)\nbreakable(25,26)\nstairs_up(26,27)\nfloor(27,27)\ncheckpoint(18)",
+      "section": 0,
+      "archetype": "gauntlet",
+      "regen_round": 1
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,27)\ngap(3,6)\ngap(9,12)\ngap(15,17)\ngap(20,22)\npit(3,6)\npit(9,12)\npit(15,17)\npit(20,22)\nspawn(1)\nstairs_up(0,2)\nplatform(2,9,2)\nbreakable(4,5)\nwall(7,8,12)\nwall(8,8,12)\nledge(6,8,7)\nplatform(7,5,2)\nbreakable(10,11)\nwall(13,7,12)\nledge(12,14,6)\nplatform(12,4,3)\nhazard_strip(spike,13,14)\nwall(14,7,12)\nledge(16,18,5)\nbreakable(16,17)\nplatform(19,4,2)\nhazard_strip(spike,20,21)\nwall(23,6,12)\nwall(24,6,12)\nledge(22,24,5)\nplatform(22,3,3)\ncarve(23,0,24,5)\nreward(23,2)\nbreakable(25,26)\nstairs_up(26,27)\nfloor(27,27)\ncheckpoint(18)",
+      "section": 0,
+      "archetype": "gauntlet",
+      "regen_round": 2
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,27)\ngap(3,6)\ngap(9,12)\ngap(15,17)\ngap(20,22)\npit(3,6)\npit(9,12)\npit(15,17)\npit(20,22)\nspawn(1)\nstairs_up(0,2)\nplatform(2,9,2)\nbreakable(4,5)\nwall(7,8,12)\nwall(8,8,12)\nledge(6,8,7)\nplatform(7,5,2)\nbreakable(10,11)\nwall(13,7,12)\nledge(12,14,6)\nplatform(12,4,3)\nhazard_strip(spike,13,14)\nwall(14,7,12)\nledge(16,18,5)\nbreakable(16,17)\nplatform(19,4,2)\nhazard_strip(spike,20,21)\nwall(23,6,12)\nwall(24,6,12)\nledge(22,24,5)\nplatform(22,3,3)\ncarve(23,0,24,5)\nreward(23,2)\nbreakable(25,26)\nstairs_up(26,27)\nfloor(27,27)\ncheckpoint(18)",
+      "section": 0,
+      "archetype": "gauntlet",
+      "regen_round": 3
+    }
+  ],
+  "stitch_rounds": [
+    {
+      "round": 0,
+      "problems": [
+        "spawn at (1, 11) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "bridges": [],
+      "snaps": []
+    },
+    {
+      "round": 1,
+      "problems": [
+        "spawn at (1, 11) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "bridges": [],
+      "snaps": []
+    },
+    {
+      "round": 2,
+      "problems": [
+        "spawn at (1, 11) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "bridges": [],
+      "snaps": []
+    },
+    {
+      "round": 3,
+      "problems": [
+        "spawn at (1, 11) is covered by a FLOOR tile \u2014 nothing may occupy the spawn cell; move that floor or move the spawn."
+      ],
+      "bridges": [],
+      "snaps": []
+    },
+    {
+      "round": 3,
+      "terminal_local_fallback": 0,
+      "problems": [],
+      "bridges": [],
+      "snaps": []
+    }
+  ]
+}
