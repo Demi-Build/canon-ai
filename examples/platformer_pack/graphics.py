@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: The pack's default look — the template other games copy and edit.
 DEFAULT_GRAPHICS_PATH = Path(__file__).parent / "graphics.json"
@@ -45,9 +45,45 @@ DEFAULT_GRAPHICS_PATH = Path(__file__).parent / "graphics.json"
 class GraphicsSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # ---- ART LANE (Arc 6: the style guide AS SCHEMA) -----------------
+    #: The pinned art lane — a NAME that resolves the aesthetic
+    #: ambiguity up front ("SNES-quality" splits into hand-drawn vs
+    #: pre-rendered; a prompt targeting both lands in a muddy middle
+    #: that reads as NES). One lane per project; the shipped lane
+    #: templates in examples/graphics_specs/ are the editable style
+    #: guides a project copies and tunes.
+    lane: str = "hand_drawn_16bit"
+    #: Color-depth target ("16-bit/256", "24-bit") — prompt context now,
+    #: the quantization-policy hook later.
+    color_depth: str = "16-bit/256"
+    #: Reference-aesthetic TOKENS — the structured prompt fragments the
+    #: lane is made of (edit these to restyle the game). Joined by
+    #: ``effective_art_style()``; a non-empty ``art_style`` free-text
+    #: overrides them (back-compat).
+    aesthetic_tokens: list[str] = Field(default_factory=list)
+    #: The ART DENSITY root: pixels per BASE CELL (the SNES grid unit).
+    #: PHYSICS IS UNTOUCHED — 1 collision cell = 1 world tile = 32
+    #: engine units everywhere; base_cell only sets how many true
+    #: pixels of art a base cell carries. Changing it later is a cheap
+    #: schema edit but an expensive REGENERATION (pixel art can't be
+    #: upscaled without smearing) — freeze it before batch-generating.
+    base_cell: int = Field(default=16, ge=8, le=64)
+    #: How many base cells one WORLD TILE's texture spans per side.
+    #: ``tile_px`` (the sheet density) must equal
+    #: ``base_cell * cells_per_tile`` — validated, so the derivation is
+    #: real while tile_px stays the field every phase already reads.
+    cells_per_tile: int = Field(default=2, ge=1, le=8)
+    #: The player's ART CANVAS in base cells (bottom-center anchored,
+    #: drawn chunky OVER the existing tight ~1-cell physics hitbox —
+    #: canvas and collision are deliberately separate). 4x4 at a 16px
+    #: base cell = a 64px canvas.
+    player_footprint: tuple[int, int] = (4, 4)
+    # ------------------------------------------------------------------
     #: Asset pixels per grid cell — sheet density, NOT display size.
     tile_px: int = Field(default=32, ge=8, le=256)
-    #: Free-text style fragment injected into every asset prompt.
+    #: Free-text style OVERRIDE. Empty = derived from aesthetic_tokens
+    #: (the lane way); non-empty wins verbatim (pre-lane specs keep
+    #: working unchanged).
     art_style: str = "crisp 16-bit pixel art, clean dithering, hard pixel edges"
     #: Code-interpreted category: resampling + play-surface texture filter.
     render_filter: Literal["crisp", "smooth"] = "crisp"
@@ -60,6 +96,25 @@ class GraphicsSpec(BaseModel):
     sprite_px: int | None = Field(default=None, ge=8, le=512)
     #: Parallax scenery bands per stage, far → near. 0 = gradient sky only.
     backdrop_bands: int = Field(default=2, ge=0, le=3)
+    #: An extra near-field occluder band with depth > 1 that consumers
+    #: draw IN FRONT of gameplay (sparse vines/branches/rock edges
+    #: framing the play area — behind the UI, over the world).
+    #: OFF by default (first paid run): a layer drawn over gameplay is a
+    #: CURATED art call — what it's made of and where it sits wants a
+    #: human eye per level, and the generated one shipped as the same
+    #: stage-wide occluder everywhere, blocking the playfield. A game
+    #: opts in via its graphics.json when someone is directing that
+    #: layer; per-level deliberate picks are the future shape. DIRECTION
+    #: (postmortem ticket 5g): the occluder is a curated layer cradle is
+    #: expected to author POST base-generation — canon keeps the opt-in
+    #: producer, cradle owns the per-level call; canon never composites it
+    #: blind.
+    foreground_band: bool = False
+    #: Visible generated-content mark: a small deterministic corner
+    #: checker stamped on generated SPRITES/BANDS/SPLASH — never tiles,
+    #: whose region means are palette-checked (conform + QA would fight
+    #: the mark). Off by default; folds into digest() like any knob.
+    visible_watermark: bool = False
     #: Camera framing: cells visible across the screen. SNES showed ~16;
     #: chosen against frame renders of 16/22/30. This is the game-wide
     #: baseline — scale stays consistent within a game.
@@ -80,10 +135,53 @@ class GraphicsSpec(BaseModel):
     #: (uniform, feet-anchored, physics untouched) — the SNES trick of
     #: heroes taller than a tile. 1.0 = sprites stay inside their cell.
     actor_scale: float = Field(default=1.4, ge=1.0, le=2.5)
+    #: Volume (water) tile opacity on every DRAW surface — presentation
+    #: only: the tile ART stays opaque on disk and physics/collision
+    #: never read it. Consumers composite the tile at this alpha over
+    #: whatever sits behind (backdrop bands / sky gradient).
+    water_alpha: float = Field(default=0.55, ge=0.0, le=1.0)
     #: Per-frame duration (ms) for VLM-authored sprite animation. Per-game
     #: feel knob (data): lower = snappier cycles. The state frame COUNTS come
     #: from the VLM spec (clamped 2-6); this only sets playback tempo.
     anim_frame_ms: int = Field(default=120, ge=16, le=2000)
+
+    @model_validator(mode="after")
+    def _reconcile_density(self) -> GraphicsSpec:
+        """``tile_px`` is what every phase reads; ``base_cell`` is the
+        ART root. A legacy spec that declares only ``tile_px`` gets
+        ``base_cell`` back-derived (tile_px / cells_per_tile, falling
+        back to a 1:1 tile) so the lane fields are always coherent —
+        pre-lane specs load unchanged, lane specs that declare both
+        must already agree."""
+        if self.tile_px != self.base_cell * self.cells_per_tile:
+            if (
+                self.tile_px % self.cells_per_tile == 0
+                and 8 <= self.tile_px // self.cells_per_tile <= 64
+            ):
+                self.base_cell = self.tile_px // self.cells_per_tile
+            else:
+                self.cells_per_tile = 1
+                self.base_cell = max(8, min(64, self.tile_px))
+        return self
+
+    def effective_art_style(self) -> str:
+        """The style clause every asset prompt injects: the lane's
+        aesthetic tokens joined, unless the free-text ``art_style``
+        override is non-empty (back-compat — pre-lane specs declare it)."""
+        if self.art_style:
+            return self.art_style
+        return ", ".join(self.aesthetic_tokens)
+
+    def art_footprint(self, size: float) -> tuple[int, int]:
+        """An actor's ART CANVAS in base cells from its physics size
+        tier (1.0→2x2, 1.5→3x3, 2.0→4x4 at cells_per_tile=2): the
+        canvas scales in WHOLE base cells at one shared density —
+        bigger means more cells authored natively, never a runtime
+        stretch."""
+        import math
+
+        side = max(1, math.ceil(float(size) * self.cells_per_tile))
+        return (side, side)
 
     def sprite_size(self) -> int:
         return self.sprite_px if self.sprite_px is not None else self.tile_px

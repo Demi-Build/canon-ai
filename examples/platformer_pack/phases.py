@@ -24,6 +24,7 @@ from canon.pipeline.retry import retry_with_feedback
 from canon.pipeline.rng import derive_rng
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
+from examples.platformer_pack import color as color_math
 
 SCHEMAS_DIR = Path(__file__).parent / "schemas"
 PROMPT_VERSION = "slice-1"
@@ -51,21 +52,44 @@ def warn(ctx: Any, message: str) -> None:
     ctx.artifacts.setdefault("slice_warnings", []).append(message)
 
 
+def resolved_model(ctx: Any, label: str) -> str:
+    """The model id that ACTUALLY serves calls under this phase label:
+    the per-agent table's answer when the backend honors per-request
+    models (AnthropicBackend), else the backend's constructed model
+    ("fake" on $0 runs — a table never changes what fake stamps)."""
+    llm = getattr(ctx, "llm", None)
+    backend = getattr(llm, "backend", None)
+    resolver = getattr(llm, "model_resolver", None)
+    if resolver is not None and getattr(
+        backend, "supports_request_model", False
+    ):
+        model = resolver(label)
+        if model:
+            return str(model)
+    return str(getattr(backend, "model", "fake"))
+
+
 def stamp_provenance(
     ctx: Any,
     entity: Any,
     content_hash: str,
     schema_version: str = "1",
     model_extra: str = "",
+    label: str | None = None,
 ) -> None:
     """Fold the adapter's content hash + generation inputs into the entity's
     provenance hash (PRD §6.3). Stamped on the Bible entity only — the
     artifact file holds data, the Bible holds provenance.
 
-    ``model_extra`` folds a second generator into the model input (an
-    asset phase's image backend alongside the LLM) so an image-model bump
-    invalidates like an LLM-model bump does."""
-    model = str(getattr(getattr(ctx.llm, "backend", None), "model", "fake"))
+    ``label`` names the phase-label whose (table-resolved) model authored
+    this entity, so a per-task model change stamps truthfully; unlabeled
+    stamps keep the backend's global model. ``model_extra`` folds further
+    generators into the model input (an asset phase's image backend, a
+    level's other task models) so any generator bump invalidates alike."""
+    if label is not None:
+        model = resolved_model(ctx, label)
+    else:
+        model = str(getattr(getattr(ctx.llm, "backend", None), "model", "fake"))
     if model_extra:
         model = f"{model}+{model_extra}"
     entity.provenance_hash = compute_provenance_hash(
@@ -138,22 +162,76 @@ def _in_band(hue: float, band: tuple[float, float]) -> bool:
     return (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
 
 
+#: Minimum |luminance| between an actor's placeholder color and every
+#: stage background — the composite-readability floor (first paid run:
+#: a dark-navy beetle vanished against a near-black backdrop). Mirrors
+#: style.MIN_CONTRAST (not imported — cycle).
+ACTOR_BG_MIN_LUMA = 40.0
+
+
 def placeholder_color(
     index: int,
     reserved: tuple[tuple[float, float], ...] = DEFAULT_RESERVED_HUES,
+    background_lums: tuple[float, ...] = (),
 ) -> str:
     """Deterministic, well-spaced enemy colors: golden-angle hue steps
     starting at green. ``reserved`` hue bands (derived from the game's
     ACTUAL hazard/volume palette hues since the style agent — red/blue
     only as the palette-less fallback) get nudged out so enemies never
-    read as hazards or volumes."""
+    read as hazards or volumes. ``background_lums`` (each stage
+    background's luminance) enforces ``ACTOR_BG_MIN_LUMA`` via a
+    hue-preserving lightness shift — an HSV value walk can't reach the
+    floor for every hue, the closed-form lerp always can."""
     hue = (140.0 + index * 137.508) % 360.0
     for _ in range(12):  # bounded: bands can't cover the whole wheel
         if not any(_in_band(hue, band) for band in reserved):
             break
         hue = (hue + 47.0) % 360.0
     r, g, b = colorsys.hsv_to_rgb(hue / 360.0, 0.78, 0.95)
-    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    hex_color = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    if not background_lums:
+        return hex_color
+    lum = color_math.luminance(hex_color)
+    if min(abs(lum - bg) for bg in background_lums) >= ACTOR_BG_MIN_LUMA:
+        return hex_color
+    up = max(background_lums) + ACTOR_BG_MIN_LUMA + 2
+    down = min(background_lums) - ACTOR_BG_MIN_LUMA - 2
+    if up <= 255.0:
+        target = up
+    elif down >= 0.0:
+        target = down
+    else:  # backgrounds span the range: take the side with more room
+        target = up if (255.0 - max(background_lums)) >= min(
+            background_lums
+        ) else down
+        target = min(255.0, max(0.0, target))
+    return color_math.shift_luminance(hex_color, target)
+
+
+def _ctx_palettes(ctx: Any) -> dict[str, dict[str, str]]:
+    """Every stage palette in ctx (tests/legacy: the single palette)."""
+    palettes = ctx.artifacts.get("palettes", {})
+    if not palettes:
+        single = ctx.artifacts.get("palette")
+        palettes = {"": single} if single else {}
+    return palettes
+
+
+def background_luminances(
+    palettes: dict[str, dict[str, str]], tiles: Any
+) -> tuple[float, ...]:
+    """Each stage background's luminance, sorted + deduped (deterministic)
+    — the values actor placeholders must clear by ``ACTOR_BG_MIN_LUMA``.
+    Degrades to () when no palette carries the background role."""
+    empty = next((t for t in tiles.tiles if t.category == "empty"), None)
+    if empty is None or not empty.color_role:
+        return ()
+    lums = {
+        round(color_math.luminance(palette[empty.color_role]), 4)
+        for palette in palettes.values()
+        if empty.color_role in palette
+    }
+    return tuple(sorted(lums))
 
 
 def reserved_hue_bands(
@@ -268,7 +346,7 @@ class WorldPhase:
         content_hash = ctx.adapter.write_json_singleton(
             "world.json", world.model_dump(mode="json")
         )
-        stamp_provenance(ctx, world, content_hash)
+        stamp_provenance(ctx, world, content_hash, label="plat:world")
         ctx.bible.world = world
         ctx.artifacts["stage_ids"] = stage_ids
         ctx.artifacts["stage_briefs"] = briefs
@@ -309,6 +387,7 @@ class StagePhase:
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         ctx.artifacts.setdefault("level_briefs", {})
         ctx.artifacts.setdefault("level_views", {})
+        ctx.artifacts.setdefault("level_rules", {})
         ctx.artifacts.setdefault("roster_briefs", {})
         for number, stage_id in enumerate(stage_ids, start=1):
             data = llm_json(
@@ -336,6 +415,17 @@ class StagePhase:
             # standard (the game-global framing). Deliberate exceptions only.
             views = [str(v) for v in data.get("level_views") or []]
             views = (views + ["standard"] * self.num_levels)[: self.num_levels]
+            # Per-level RULE-override proposals (combat/level-picks arc):
+            # optional, one dict per level, most empty — validated
+            # FAIL-CLOSED against the pack vocabulary at stamp time (a
+            # design choice the LLM makes; the bounds are code's).
+            rule_flags = [
+                dict(r) if isinstance(r, dict) else {}
+                for r in (data.get("level_rules") or [])
+            ]
+            rule_flags = (rule_flags + [{}] * self.num_levels)[
+                : self.num_levels
+            ]
             first = (number - 1) * self.num_levels
             level_ids = [f"l{first + i + 1}" for i in range(self.num_levels)]
 
@@ -354,10 +444,14 @@ class StagePhase:
             content_hash = ctx.adapter.write_json_singleton(
                 f"stage/{stage_id}/stage.json", stage.model_dump(mode="json")
             )
-            stamp_provenance(ctx, stage, content_hash)
+            stamp_provenance(
+                ctx, stage, content_hash,
+                label=f"plat:stage:{stage.stage_id}",
+            )
             ctx.bible.stages[stage_id] = stage
             ctx.artifacts["level_briefs"].update(dict(zip(level_ids, briefs)))
             ctx.artifacts["level_views"].update(dict(zip(level_ids, views)))
+            ctx.artifacts["level_rules"].update(dict(zip(level_ids, rule_flags)))
             ctx.artifacts["roster_briefs"][stage_id] = str(data["roster_brief"])
             logger.info(
                 "StagePhase planned stage %r (%d/%d, theme %r): levels %s; "
@@ -382,6 +476,10 @@ class StagePhase:
 #: row; ``float`` drifts diagonally through the body.
 SWIM_STYLES: tuple[tuple[str, int], ...] = (
     ("within", 2), ("surface", 1), ("float", 1),
+    # Unbounded cruiser (water arc): swims a straight line across the
+    # whole body of water, flipping only at walls/water's edge — no
+    # patrol tether (the Cheep-Cheep).
+    ("cruise", 1),
 )
 
 #: Chance (out of the weights' total) that a COMMON / UNCOMMON enemy
@@ -436,12 +534,8 @@ class EnemyGeneratorPhase:
     def _reserved_bands(self, ctx: Any) -> tuple[tuple[float, float], ...]:
         """Union of every stage palette's hazard/volume hue bands (enemy
         colors must read against ALL biomes — commons travel)."""
-        palettes = ctx.artifacts.get("palettes", {})
-        if not palettes:  # tests / single-palette legacy path
-            single = ctx.artifacts.get("palette")
-            palettes = {"": single} if single else {}
         bands: list[tuple[float, float]] = []
-        for palette in palettes.values():
+        for palette in _ctx_palettes(ctx).values():
             bands.extend(reserved_hue_bands(palette, self.tiles))
         return tuple(dict.fromkeys(bands)) or DEFAULT_RESERVED_HUES
 
@@ -462,6 +556,7 @@ class EnemyGeneratorPhase:
             }
         seed = str(getattr(ctx.config, "seed", ""))
         reserved = self._reserved_bands(ctx)
+        bg_lums = background_luminances(_ctx_palettes(ctx), self.tiles)
         seen_ids: set[str] = set()
         used_names: list[str] = []
 
@@ -492,6 +587,15 @@ class EnemyGeneratorPhase:
                 swim_style = derive_rng(
                     seed, f"{self.name}:swim", i
                 ).choices(styles, weights=weights)[0]
+            # Hop tuning (combat/level-picks arc): archetype-dependent
+            # params can't live in the schema yet — rolled here like
+            # swim_style, on an independent key.
+            hop_height = 0
+            hop_period_s = 0.0
+            if skeleton["archetype"] == "hopper":
+                hop_rng = derive_rng(seed, f"{self.name}:hop", i)
+                hop_height = int(hop_rng.randint(2, 3))
+                hop_period_s = round(0.8 + 0.8 * float(hop_rng.random()), 2)
             # Home = the first habitat biome's stage (theme + fauna brief
             # context for the prompt). Worldwide creatures are named for
             # the WORLD — no single biome's fauna brief (the first run
@@ -569,6 +673,9 @@ class EnemyGeneratorPhase:
             }
             if swim_style:
                 behavior["swim_style"] = swim_style
+            if hop_height:
+                behavior["hop_height"] = hop_height
+                behavior["hop_period_s"] = hop_period_s
             enemy = EnemyDefinition(
                 artifact_id=make_artifact_id("enemy", enemy_id),
                 enemy_id=enemy_id,
@@ -585,7 +692,9 @@ class EnemyGeneratorPhase:
                     "damage": skeleton["damage"],
                     "speed": skeleton["speed"],
                     "flavor": str(data.get("flavor", "")),
-                    "placeholder_color": placeholder_color(i, reserved),
+                    "placeholder_color": placeholder_color(
+                        i, reserved, bg_lums
+                    ),
                 },
                 behavior=behavior,
                 # Ecology edges: the world, plus every habitat stage —
@@ -602,7 +711,9 @@ class EnemyGeneratorPhase:
             content_hash = ctx.adapter.write_json_singleton(
                 f"enemy/{enemy_id}.json", enemy.model_dump(mode="json")
             )
-            stamp_provenance(ctx, enemy, content_hash)
+            stamp_provenance(
+                ctx, enemy, content_hash, label=f"plat:enemies:{i}"
+            )
             ctx.bible.enemy_definitions[enemy_id] = enemy
             logger.info(
                 "Enemy %d/%d: %r (%s%s, size %.1f, %s, %s) — hp=%s dmg=%s "
@@ -642,7 +753,9 @@ class EnemyGeneratorPhase:
                         f"enemy/{enemy.enemy_id}.json",
                         enemy.model_dump(mode="json"),
                     )
-                    stamp_provenance(ctx, enemy, content_hash)
+                    stamp_provenance(
+                        ctx, enemy, content_hash, label="plat:enemies"
+                    )
                     residents.append(enemy)
                     warn(
                         ctx,
@@ -658,9 +771,132 @@ class EnemyGeneratorPhase:
                 f"stage/{stage.stage_id}/stage.json",
                 stage.model_dump(mode="json"),
             )
-            stamp_provenance(ctx, stage, content_hash)
+            stamp_provenance(
+                ctx, stage, content_hash,
+                label=f"plat:stage:{stage.stage_id}",
+            )
             logger.info(
                 "Stage %s (%s) roster: %s",
                 stage.stage_id, stage.biome or "?",
                 ", ".join(e.enemy_id for e in residents),
             )
+
+
+class ItemGeneratorPhase:
+    """The WORLD ITEM POOL (Arc 2): ``count`` ItemDefinitions rolled from
+    ``schemas/item.json`` — the mechanical KIND set (coin/heal/shield/
+    double_jump/run_boost) is closed in code, every number is a schema
+    band, and the LLM authors only name + flavor (enemy-pool pattern).
+
+    Slot GUARANTEES mirror the enemy ecology's: slot 0 is always a COIN
+    and slot 1 a HEAL — the two kinds every world needs, which the
+    weighted rolls alone can miss on a small pool. The guarantee pins the
+    ``kind`` roll's choice list; every dependent field still rolls
+    through the skeleton, so determinism per slot is untouched.
+    """
+
+    name = "plat:items"
+
+    #: Kinds pinned to the first pool slots (world-critical coverage).
+    GUARANTEED_KINDS = ("coin", "heal")
+
+    def __init__(
+        self,
+        count: int = 5,
+        schema_path: str | Path | None = None,
+        tiles: Any = None,
+    ) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        self.count = count
+        self.schema_path = Path(schema_path or SCHEMAS_DIR / "item.json")
+        self.tiles = tiles or DEFAULT_TILES
+
+    #: Rolled params that ride on the definition when non-zero.
+    _PARAM_FIELDS = ("duration_s", "heal_amount", "coin_value", "boost_mult")
+
+    def run(self, ctx: Any) -> None:
+        from canon.bible.platformer import ItemDefinition
+
+        spec_raw = json.loads(self.schema_path.read_text())
+        world_title = ctx.bible.world.title if ctx.bible.world else ""
+        seed = str(getattr(ctx.config, "seed", ""))
+        bg_lums = background_luminances(_ctx_palettes(ctx), self.tiles)
+        seen_ids: set[str] = set()
+        used_names: list[str] = []
+
+        for i in range(self.count):
+            if i < len(self.GUARANTEED_KINDS):
+                pinned = dict(spec_raw)
+                pinned["fields"] = dict(spec_raw["fields"])
+                pinned["fields"]["kind"] = {
+                    "choices": [[self.GUARANTEED_KINDS[i], 1]]
+                }
+                spec = load_skeleton_spec(pinned)
+            else:
+                spec = load_skeleton_spec(spec_raw)
+            skeleton = roll_skeleton(spec, derive_rng(seed, self.name, i))
+            kind = str(skeleton["kind"])
+            params = {
+                key: skeleton[key]
+                for key in self._PARAM_FIELDS
+                if skeleton.get(key)
+            }
+
+            data = llm_json(
+                ctx,
+                f"{self.name}:{i}",
+                lambda fb, _skel=skeleton, _i=i:
+                    ctx.prompts.item_generation(
+                        _skel, world_title, _i,
+                        used_names=list(used_names), feedback=fb,
+                    ),
+                required_keys=("name",),
+                fallback={"name": f"Item {i}", "flavor": ""},
+                validate_obj=lambda obj: (
+                    [
+                        f"Name {obj.get('name')!r} is already taken; invent "
+                        "a clearly different one."
+                    ]
+                    if str(obj.get("name", "")).strip().lower()
+                    in {n.lower() for n in used_names}
+                    else []
+                ),
+            )
+            used_names.append(str(data["name"]))
+            item_id = slugify(str(data["name"]))
+            base, counter = item_id, 2
+            while item_id in seen_ids:
+                item_id = f"{base}_{counter}"
+                counter += 1
+            seen_ids.add(item_id)
+
+            item = ItemDefinition(
+                artifact_id=make_artifact_id("item", item_id),
+                item_id=item_id,
+                name=str(data["name"]),
+                kind=kind,
+                rarity=str(skeleton.get("rarity", "common")),
+                params=params,
+                stats={
+                    "flavor": str(data.get("flavor", "")),
+                    # Offset past the enemy pool's golden-angle walk so
+                    # item swatches never collide with roster colors.
+                    "placeholder_color": placeholder_color(
+                        i + 40, DEFAULT_RESERVED_HUES, bg_lums
+                    ),
+                },
+                parents=[make_artifact_id("world")],
+            )
+            content_hash = ctx.adapter.write_json_singleton(
+                f"item/{item_id}.json", item.model_dump(mode="json")
+            )
+            stamp_provenance(ctx, item, content_hash, label=f"plat:items:{i}")
+            ctx.bible.items[item_id] = item
+            logger.info(
+                "Item %d/%d: %r (%s, %s%s): %s",
+                i + 1, self.count, item.name, kind, item.rarity,
+                f", {params}" if params else "",
+                item.stats["flavor"],
+            )
+        _stamp_metadata(ctx, self.name)

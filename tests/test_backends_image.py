@@ -112,6 +112,7 @@ class TestFakeImageBackendEdit:
             "width": 800,
             "height": 200,
             "image_bytes": 3,
+            "references": 0,  # ticket 7: reference count is recorded
         }
 
     def test_edit_is_deterministic_across_instances(self) -> None:

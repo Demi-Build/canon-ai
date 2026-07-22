@@ -1,0 +1,24 @@
+{
+  "_doc": "ART LANE: modern HD 2.5D (contemporary side-scroller). Rounded toy-like forms, soft ambient occlusion, smooth filtering — the non-pixel lane. This file IS the style guide — edit tokens/palette knobs to tune the lane; --graphics <this file> switches the whole game onto it.",
+  "lane": "modern_hd",
+  "color_depth": "24-bit",
+  "aesthetic_tokens": [
+    "modern 2.5D side-scroller in the spirit of contemporary console platformers",
+    "rounded toy-like forms",
+    "rich saturated palette",
+    "soft ambient occlusion and subtle rim light",
+    "clean silhouettes",
+    "painterly depth without photorealism"
+  ],
+  "art_style": "",
+  "base_cell": 32,
+  "cells_per_tile": 2,
+  "player_footprint": [4, 4],
+  "tile_px": 64,
+  "render_filter": "smooth",
+  "gen_px": 1024,
+  "posterize_levels": null,
+  "backdrop_bands": 3,
+  "view_cells": 22,
+  "actor_scale": 1.35
+}

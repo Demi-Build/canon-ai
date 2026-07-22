@@ -22,6 +22,7 @@ up-through-platforms, mount-from-below, and flattened arcs that fall short.
 from __future__ import annotations
 
 from collections import deque
+from typing import Any
 
 from canon.bible.platformer import SparseMaskEntry
 from examples.platformer_pack.combat import (
@@ -59,6 +60,41 @@ def standable_cells(grid, tiles: TileRegistry = DEFAULT_TILES) -> set[tuple[int,
             if int(grid[y, x]) == empty and int(grid[y + 1, x]) in support:
                 out.add((x, y))
     return out
+
+
+def seabed_cells(
+    grid, tiles: TileRegistry = DEFAULT_TILES
+) -> set[tuple[int, int]]:
+    """Wet-standable cells (water arc): a VOLUME cell with solid/one-way
+    support directly below — the underwater flats where a WADING land
+    enemy may be posted under the ``"seabed"`` enemy_water_policy (and
+    the cells the placement prompt lists as submerged ground)."""
+    height, width = grid.shape
+    volumes = tiles.ids("volume")
+    support = tiles.ids("solid", "one_way")
+    return {
+        (x, y)
+        for y in range(height - 1)
+        for x in range(width)
+        if int(grid[y, x]) in volumes and int(grid[y + 1, x]) in support
+    }
+
+
+def hazard_stand_cells(
+    grid, tiles: TileRegistry = DEFAULT_TILES
+) -> set[tuple[int, int]]:
+    """Hazard cells with solid/one-way support directly below — where a
+    HAZARD-IMMUNE variant (combat arc) may be posted: standing ON the
+    spikes. The seabed_cells mirror for the hazard band."""
+    height, width = grid.shape
+    hazards = tiles.ids("hazard")
+    support = tiles.ids("solid", "one_way")
+    return {
+        (x, y)
+        for y in range(height - 1)
+        for x in range(width)
+        if int(grid[y, x]) in hazards and int(grid[y + 1, x]) in support
+    }
 
 
 def volume_cells(
@@ -600,6 +636,73 @@ def _body_stand(
     return {
         (x, y) for (x, y) in stand if _headroom_ok(grid, x, y, solids)
     }
+
+
+def repair_capped_oneways_grid(
+    grid,
+    tiles: TileRegistry,
+    *,
+    hazards: Any = frozenset(),
+    free_volume: Any = frozenset(),
+    protected: Any = frozenset(),
+) -> list[str]:
+    """A one-way platform is a PROMISE it can be stood on, so wherever one
+    exists it must be usable (ticket 2). A one-way at row R whose standing
+    cell ``(x, R-1)`` is EMPTY but whose head cell ``(x, R-2)`` is SOLID —
+    Pattern B, a real standing pocket sealed by a fallen-in slab — gets the
+    slab CARVED so the platform tops a 2-tall pocket. If that slab is
+    LOAD-BEARING (water rests on it, its own top is a usable 2-tall foothold,
+    or it is a hazard/protected cell) the one-way is DELETED instead — its top
+    was a 1-tall pocket, so no usable foothold is lost. A one-way whose
+    standing cell is itself SOLID — Pattern A, flush against the platform top,
+    no pocket — is DECORATIVE and left alone. SOLID geometry (walls, 1-tall
+    solid corridors, traps) is NEVER touched. Mutates ``grid`` in place and
+    returns repair notes. Runs BEFORE auto_bridge so any reachability
+    consequence is caught and re-bridged."""
+    solids = tiles.ids("solid")
+    one_ways = tiles.ids("one_way")
+    empty_id = tiles.empty_id
+    height, width = grid.shape
+    notes: list[str] = []
+
+    def _carve_unsafe(x: int, slab_y: int) -> bool:
+        # Carving the cap is unsafe only when it would spill CONTAINED water
+        # resting on the slab, or the slab is a hazard / protected cell — then
+        # the dead one-way is DELETED instead. A carve that merely removes
+        # airspace above is fine: the one-way below becomes the foothold, and
+        # reachability is re-validated by auto_bridge right after.
+        if slab_y - 1 >= 0 and (x, slab_y - 1) in free_volume:
+            return True
+        return (x, slab_y) in hazards or (x, slab_y) in protected
+
+    for r in range(height):
+        for x in range(width):
+            if int(grid[r, x]) not in one_ways or (x, r) in protected:
+                continue
+            stand_y = r - 1
+            if stand_y < 0 or int(grid[stand_y, x]) in solids:
+                # top row (no pocket) OR Pattern A (standing cell itself
+                # solid — flush against the platform top): DECORATIVE, skip.
+                continue
+            head_y = r - 2
+            if head_y < 0 or int(grid[head_y, x]) not in solids:
+                continue  # already >=2 open above — usable, nothing to do
+            # Pattern B: a real standing pocket sealed by a slab.
+            if not _carve_unsafe(x, head_y):
+                grid[head_y, x] = empty_id
+                notes.append(
+                    f"capped one-way at ({x},{r}): carved the cap at "
+                    f"({x},{head_y}) so the platform tops a 2-tall pocket "
+                    "(jump-up restored)."
+                )
+            else:
+                grid[r, x] = empty_id
+                notes.append(
+                    f"capped one-way at ({x},{r}) removed — carving its cap "
+                    "would spill water or hit a hazard; the dead platform is "
+                    "dropped (its 1-tall top was unusable, no foothold lost)."
+                )
+    return notes
 
 
 def _locate_break(
@@ -1197,6 +1300,39 @@ def snap_spawn_grid(
     return (snapped, standing_row), [f"spawn({x}) -> spawn({snapped})"]
 
 
+def clear_spawn_grid(
+    grid,
+    spawn: tuple[int, int] | None,
+    tiles: TileRegistry = DEFAULT_TILES,
+    hazards: list | None = None,
+) -> list[str]:
+    """Last-resort twin of :func:`snap_spawn_grid` for the covered-spawn
+    case it cannot fix (paid l8r1: the section's own ``stairs_up`` stamped
+    floor over the spawn cell, every column within ``MAX_SPAWN_SNAP`` was
+    invalid, and the byte-identical problem burned all three regen rounds
+    — one cleared stair cell validates the whole room). Clears the
+    covering cell — and the headroom cell above when solid — as pure
+    geometry, bounded at 2 cells; an OPEN spawn cell with no ground under
+    it needs an ADDITIVE fix and is left alone. A cleared hazard cell
+    drops its sparse record (the climb-lane precedent — no invisible
+    damage cell may survive). Returns note strings for the ``snaps``
+    record; empty when nothing was cleared."""
+    if spawn is None:
+        return []
+    x, y = spawn
+    if int(grid[y, x]) == tiles.empty_id:
+        return []
+    cleared = [(x, y)]
+    grid[y, x] = tiles.empty_id
+    if y > 0 and int(grid[y - 1, x]) in tiles.ids("solid"):
+        grid[y - 1, x] = tiles.empty_id
+        cleared.append((x, y - 1))
+    if hazards is not None:
+        gone = set(cleared)
+        hazards[:] = [e for e in hazards if (e.x, e.y) not in gone]
+    return [f"spawn-clear: cleared ({cx},{cy})" for cx, cy in cleared]
+
+
 def snap_checkpoints_grid(
     grid,
     triggers: list[SparseMaskEntry],
@@ -1305,12 +1441,174 @@ def place_checkpoints_grid(
     return out
 
 
+def flood_grid(
+    grid,
+    tiles: TileRegistry = DEFAULT_TILES,
+    topology: str = "fully_submerged",
+    depth: int = 0,
+) -> tuple[object, list[str]]:
+    """The WATER-LEVEL flood pass (water arc) — deterministic CODE, not
+    LLM: returns a COPY of ``grid`` with EMPTY cells filled by the
+    ``water`` volume tile (solids/one-ways/hazards persist — the
+    ``_stamp_volume`` empty-only rule), plus repair-style notes.
+
+    - ``fully_submerged``: every empty cell floods (the whole level
+      swims).
+    - ``waterline``: empty cells in the bottom ``depth`` rows flood
+      (rows >= height - depth); islands above stay dry.
+
+    A copy so the caller's waterline-lowering escalation can re-flood
+    the pristine dry grid per attempt — flood water is otherwise
+    indistinguishable from DSL-authored pools, which must persist."""
+    out = grid.copy()
+    height, width = out.shape
+    water = tiles.by_name.get("water")
+    if water is None:
+        return out, ["flood skipped — this game's registry has no water tile"]
+    empty = tiles.empty_id
+    top = 0 if topology == "fully_submerged" else max(0, height - int(depth))
+    filled = 0
+    for y in range(top, height):
+        for x in range(width):
+            if int(out[y, x]) == empty:
+                out[y, x] = water.id
+                filled += 1
+    label = (
+        "fully submerged"
+        if topology == "fully_submerged"
+        else f"waterline at row {top} ({int(depth)} rows deep)"
+    )
+    return out, [f"water level: {label} — {filled} cells flooded"]
+
+
+def place_room_entrances(
+    grid,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    sections: list,
+    specs: list,
+    axis: str,
+    movement: PlayerMovementSpec,
+    tiles: TileRegistry = DEFAULT_TILES,
+    triggers: list[SparseMaskEntry] | None = None,
+    restrict_to: set[tuple[int, int]] | None = None,
+) -> tuple[list[SparseMaskEntry], list[str]]:
+    """STITCHER-placed secret-room entrances (multi-room arc, user-locked):
+    per rolled room, a reachable body-standable cell in the blueprint's
+    host section becomes a ``room_entrance`` trigger carrying the room id,
+    the entry verb, and the RETURN cell (where the room's portal drops the
+    player back). Placement escalates so the roll and the triggers never
+    diverge: host section → any section → a ``shortcut`` return with no
+    later-section foothold demotes to ``detour``. Returns
+    ``(entrance_triggers, notes)`` — notes record every escalation.
+
+    Entrances stand apart from spawn/exit/checkpoints/each other; the
+    consumers' verb press (Down = pipe, Up = door) happens ON the cell, so
+    body-standable (headroom-qualified) is the candidate set, like
+    :func:`place_exit`."""
+    if spawn is None or not specs:
+        return [], []
+    stand = _body_stand(grid, standable_cells(grid, tiles), tiles)
+    reached = reachable_cells(grid, spawn, movement, tiles)
+    cands = stand & reached
+    # Caller-restricted candidates (water arc: entrance AND shortcut-
+    # return cells must stay DRY above a waterline — verb presses are
+    # gated on not-swimming in both consumers).
+    if restrict_to is not None:
+        cands &= restrict_to
+    taken: set[tuple[int, int]] = {spawn}
+    if exit_ is not None:
+        taken.add(exit_)
+    taken |= {(t.x, t.y) for t in (triggers or [])}
+
+    def _coord(c: tuple[int, int]) -> int:
+        return c[0] if axis == "horizontal" else c[1]
+
+    out: list[SparseMaskEntry] = []
+    notes: list[str] = []
+    for spec in specs:
+        host = int(getattr(spec, "host_section", 0))
+        host = min(max(host, 0), len(sections) - 1) if sections else 0
+        if sections:
+            ps = sections[host]
+            lo = ps.x_off if axis == "horizontal" else ps.y_off
+            hi = lo + ps.length
+        else:
+            lo, hi = 0, grid.shape[1] if axis == "horizontal" else grid.shape[0]
+        center = (lo + hi) // 2
+        pool = [
+            c for c in cands if c not in taken and lo <= _coord(c) < hi
+        ]
+        if not pool:
+            pool = [c for c in cands if c not in taken]
+            if pool:
+                notes.append(
+                    f"room {spec.room_id}: host section {host} offers no "
+                    "reachable standing cell — entrance escalated to the "
+                    "whole level (code repair)."
+                )
+        if not pool:
+            notes.append(
+                f"room {spec.room_id}: NO reachable standing cell for an "
+                "entrance anywhere — room left without an entrance."
+            )
+            continue
+        pick = min(pool, key=lambda c: (abs(_coord(c) - center), c[0], c[1]))
+        taken.add(pick)
+
+        topology = str(getattr(spec, "return_topology", "detour"))
+        ret = pick
+        if topology == "shortcut":
+            # "Further along the main map": past the host section's far
+            # edge — larger x for a side-scroller, HIGHER (smaller y) for
+            # a climb. Farthest-along wins (the shortcut's payoff).
+            if axis == "horizontal":
+                later = [c for c in cands if c not in taken and c[0] >= hi]
+                key = lambda c: (c[0], -c[1])  # noqa: E731
+            else:
+                later = [c for c in cands if c not in taken and c[1] < lo]
+                key = lambda c: (-c[1], c[0])  # noqa: E731
+            if later:
+                ret = max(later, key=key)
+            else:
+                topology = "detour"
+                notes.append(
+                    f"room {spec.room_id}: no reachable foothold past "
+                    f"section {host} — shortcut return demoted to detour "
+                    "(code repair)."
+                )
+        out.append(
+            SparseMaskEntry(
+                x=pick[0],
+                y=pick[1],
+                type="room_entrance",
+                params={
+                    "room_id": spec.room_id,
+                    "verb": str(getattr(spec, "entry_verb", "pipe")),
+                    "room_type": str(getattr(spec, "room_type", "")),
+                    "return": topology,
+                    "return_x": int(ret[0]),
+                    "return_y": int(ret[1]),
+                },
+            )
+        )
+    return out, notes
+
+
 #: Reachability-repair escalation caps (code-not-LLM, §1b): how many solid
 #: supports may be surgically opened into one-way platforms and how many
 #: climb lanes may be carved per level before the residue goes back to the
 #: owning section as a design problem.
 MAX_MOUNT_CONVERSIONS = 4
 MAX_CLIMB_LANES = 4
+
+#: Overflow rung for a bridge suggestion that arrives AFTER the bridge
+#: budget is spent: the op is simulation-verified either way, so stamping
+#: it in code beats returning it as prose for an LLM round (the paid l8
+#: round-3 'Fix: ADD THIS ONE LINE ... platform(71,12,2)' fell to the
+#: bridge cap and burned a terminal fallback instead). The cap is tiny and
+#: separate so a deliberate design failure still goes back to its section.
+MAX_FIX_LINE_STAMPS = 3
 
 
 def _convert_support_to_one_way(
@@ -1563,9 +1861,16 @@ def auto_bridge_grid(
     height, width = grid.shape
     added: list[str] = []
     bridges = 0
+    fix_lines = 0
     conversions = 0
     lanes = 0
     seen_ops: set[str] = set()
+
+    def _stamp_op(op_str: str) -> None:
+        sub = stamp(op_str, width, height, tiles=tiles, validate_markers=False)
+        mask = sub.grid != 0
+        grid[mask] = sub.grid[mask]  # non-empty wins (bridge lands in air)
+
     # Two protection tiers: the lane may not CLEAR the spawn/exit cells or
     # the supports under them (clearing removes footing); the mount-open
     # only avoids the marker cells themselves — converting a support to
@@ -1591,14 +1896,26 @@ def auto_bridge_grid(
         if nearest is None:
             return grid, added, problems
         op = _suggest_bridge(grid, frontier, nearest, movement, tiles)
-        if op is not None and op not in seen_ops and bridges < max_bridges:
-            seen_ops.add(op)
-            sub = stamp(op, width, height, tiles=tiles, validate_markers=False)
-            mask = sub.grid != 0
-            grid[mask] = sub.grid[mask]  # non-empty wins (bridge lands in air)
-            added.append(op)
-            bridges += 1
-            continue
+        if op is not None and op not in seen_ops:
+            if bridges < max_bridges:
+                seen_ops.add(op)
+                _stamp_op(op)
+                added.append(op)
+                bridges += 1
+                continue
+            if fix_lines < MAX_FIX_LINE_STAMPS:
+                # FIX-LINE overflow rung: the bridge budget is exhausted but
+                # the suggestion is verified — stamp it under its own small
+                # cap instead of shipping it as 'Fix: ADD THIS ONE LINE'
+                # text for the LLM to transcribe.
+                seen_ops.add(op)
+                _stamp_op(op)
+                added.append(
+                    f"# repair fix-line: {op} "
+                    "(validator-verified, stamped in code)"
+                )
+                fix_lines += 1
+                continue
         rise = frontier[1] - nearest[1]
         if conversions < MAX_MOUNT_CONVERSIONS and rise <= movement.jump_height:
             # Opening the foothold's support only helps when the arc can
@@ -1636,6 +1953,10 @@ def auto_bridge_grid(
 #: column is arithmetic (the snap_checkpoints precedent).
 MAX_PLACEMENT_NUDGE = 8
 
+#: How far a wader dropped in deep water may be snapped to reach a
+#: submerged-ground flat (seabed) before it kicks back to LLM feedback.
+_WADER_SNAP_RADIUS = 8
+
 
 def check_placements(
     grid,
@@ -1671,6 +1992,8 @@ def check_placements(
     """
     stand = standable_cells(grid, tiles)
     volume = volume_cells(grid, tiles)
+    wet_stand = seabed_cells(grid, tiles)
+    hazard_stand = hazard_stand_cells(grid, tiles)
     height, width = grid.shape
     empty_id = tiles.empty_id
     support = tiles.ids("solid", "one_way")
@@ -1687,10 +2010,13 @@ def check_placements(
     def _footprint_problem(
         eid: str, x: int, y: int, archetype: str, eff: float,
         swim_style: str = "",
+        hazard_immune: bool = False,
     ) -> str | None:
         """None if a body of effective size ``eff`` fits anchored at
         (x, y) — anchor row cells per column, clearance rows above.
-        Messages name the LOCATED failing cell."""
+        Messages name the LOCATED failing cell. ``hazard_immune`` (a
+        variant behavior flag, combat arc) lets a LAND anchor sit ON a
+        supported hazard cell — standing on the spikes."""
         cols, rows = occupancy(eff)
         cell = (x, y)
         is_swimmer = archetype == "swimmer"
@@ -1708,10 +2034,19 @@ def check_placements(
                         f"{cx} is outside the {width}x{grid.shape[0]} level."
                     )
                 for cy in range(y, y - rows, -1):
-                    if cy < 0 or int(grid[cy, cx]) != empty_id:
+                    if cy < 0:
+                        # Body runs off the TOP — report that, never a clamped
+                        # row-0 cell (the old max(cy,0) produced the
+                        # self-contradictory "cell (x,0) is EMPTY, not empty").
+                        return (
+                            f"{eid} is a FLYER but its body needs {rows} row(s) "
+                            f"and column {cx} runs off the TOP of the level — "
+                            "place it lower so the whole body fits in airspace."
+                        )
+                    if int(grid[cy, cx]) != empty_id:
                         return (
                             f"{eid} is a FLYER — its body hovers in open air, but "
-                            f"cell ({cx}, {max(cy, 0)}) is {_cell_name(cx, max(cy, 0))}, "
+                            f"cell ({cx}, {cy}) is {_cell_name(cx, cy)}, "
                             "not empty. Place it in clear airspace."
                         )
                 if y + 1 >= height or int(grid[y + 1, cx]) != empty_id:
@@ -1788,7 +2123,7 @@ def check_placements(
                     f"{eid} at {cell} is in water and this game forbids "
                     "enemies in water — place it on land." + big
                 )
-            if policy == "swimmers_only" and is_swimmer:
+            if policy in ("swimmers_only", "seabed") and is_swimmer:
                 if base not in volume:
                     where = (
                         ""
@@ -1800,10 +2135,30 @@ def check_placements(
                         f"cell{where} — swimmers must be placed inside "
                         "water, with room for their whole body." + big
                     )
-            elif policy in ("swimmers_only", "forbidden"):
-                if base not in stand:
+            elif policy in ("swimmers_only", "forbidden", "seabed"):
+                # "seabed" (water arc): a land enemy may be POSTED on an
+                # underwater flat — a volume cell with solid support
+                # below. Dry standable cells stay valid everywhere.
+                # HOPPERS are exempt from wading (combat arc): a hop is a
+                # dry-land arc — underwater they'd pogo in place against
+                # the volume-blocked drift.
+                if (
+                    base not in stand
+                    and not (
+                        policy == "seabed"
+                        and base in wet_stand
+                        and archetype != "hopper"
+                    )
+                    and not (hazard_immune and base in hazard_stand)
+                ):
                     hint = (
-                        " (that's a water cell — only swimmers go in water)"
+                        (
+                            " (that water has no solid seabed below — "
+                            "wading enemies stand on submerged ground)"
+                            if policy == "seabed"
+                            else " (that's a water cell — only swimmers "
+                            "go in water)"
+                        )
                         if base in volume
                         else ""
                     )
@@ -1818,7 +2173,11 @@ def check_placements(
                         f"{where} — land enemies need solid ground below "
                         "and a free cell to occupy." + big
                     )
-            elif base not in stand and base not in volume:
+            elif (
+                base not in stand
+                and base not in volume
+                and not (hazard_immune and base in hazard_stand)
+            ):
                 return (
                     f"{eid} at {cell} is neither standable nor in water."
                     + big
@@ -1834,14 +2193,19 @@ def check_placements(
                 val = int(grid[cy, cx])
                 if policy == "amphibious":
                     clear = val == empty_id or (cx, cy) in volume
-                elif is_swimmer and policy == "swimmers_only":
+                elif is_swimmer and policy in ("swimmers_only", "seabed"):
                     clear = (cx, cy) in volume
+                elif policy == "seabed" and (cx, y) in volume:
+                    # A WADING land enemy's body rows sit in the water
+                    # above its submerged flat — water counts as clear
+                    # for it (dry placements keep the strict rule).
+                    clear = val == empty_id or (cx, cy) in volume
                 else:
                     clear = val == empty_id
                 if not clear:
                     need = (
                         "water"
-                        if is_swimmer and policy == "swimmers_only"
+                        if is_swimmer and policy in ("swimmers_only", "seabed")
                         else "open air"
                     )
                     return (
@@ -1878,10 +2242,51 @@ def check_placements(
             float(enemies[eid].get("size", 1.0) or 1.0),
             variants.by_name[variant].size if variant else 1.0,
         )
-        issue = _footprint_problem(eid, x, y, archetype, eff, swim_style)
+        hazard_immune = bool(
+            variants.by_name[variant].behavior.get("hazard_immune")
+            if variant
+            else False
+        )
+        issue = _footprint_problem(
+            eid, x, y, archetype, eff, swim_style, hazard_immune
+        )
         if issue is not None:
-            problems.append(issue)
-            continue
+            # Wader snap (water arc, code-not-LLM): a LAND enemy the model
+            # dropped into deep water under the seabed policy is relocated to
+            # the nearest submerged-ground flat that seats its whole body,
+            # rather than bounced back for a retry (mirrors the spawn-safety
+            # nudge). Tightly gated — swimmers/flyers/hoppers, dry-land
+            # misplacements, and waders with no seabed within reach all still
+            # route to LLM feedback unchanged. (postmortem ticket 5a)
+            snap = None
+            if (
+                rules.enemy_water_policy == "seabed"
+                and archetype not in ("swimmer", "flyer", "hopper")
+                and (x, y) in volume
+            ):
+                snap = min(
+                    (
+                        c
+                        for c in wet_stand
+                        if abs(c[0] - x) + abs(c[1] - y) <= _WADER_SNAP_RADIUS
+                        and _footprint_problem(
+                            eid, c[0], c[1], archetype, eff, swim_style,
+                            hazard_immune,
+                        )
+                        is None
+                    ),
+                    key=lambda c: (abs(c[0] - x) + abs(c[1] - y), c),
+                    default=None,
+                )
+            if snap is None:
+                problems.append(issue)
+                continue
+            repairs.append(
+                f"{eid}: ({x}, {y}) -> {snap} — wader snapped to the nearest "
+                "submerged-ground flat (the model posted it in deep water; "
+                "the seabed cell is arithmetic)."
+            )
+            x, y = snap
         rarity = str(enemies[eid].get("rarity", "") or "")
         rarity_cap = getattr(rules, "rarity_caps", {}).get(rarity)
         if rarity_cap is not None and rarity_counts.get(rarity, 0) >= rarity_cap:
@@ -1906,7 +2311,9 @@ def check_placements(
                     for nx in (x + direction * d, x - direction * d)
                     if 0 <= nx < width
                     and abs(nx - spawn[0]) > radius
-                    and _footprint_problem(eid, nx, y, archetype, eff, swim_style)
+                    and _footprint_problem(
+                        eid, nx, y, archetype, eff, swim_style, hazard_immune
+                    )
                     is None
                 ),
                 None,
@@ -1937,5 +2344,177 @@ def check_placements(
             variant_counts[variant] = variant_counts.get(variant, 0) + 1
         accepted.append(
             {"enemy_id": eid, "x": x, "y": y, "variant": variant}
+        )
+    return accepted, problems, repairs
+
+
+# ---------------------------------------------------------------------------
+# Item placement validation (Arc 2) — code-not-LLM: computable geometry is
+# snapped/dropped as repairs; only unknown ids/malformed records go back to
+# the model as feedback.
+# ---------------------------------------------------------------------------
+
+#: How far the snap search wanders when an item cell is occupied or
+#: uncollectible (columns/rows, nearest-first).
+_ITEM_SNAP_RADIUS = 2
+
+
+def _item_collectible(
+    cell: tuple[int, int],
+    reached: set[tuple[int, int]],
+    reached_body: set[tuple[int, int]],
+    jump_height: int,
+) -> bool:
+    """Fail-closed base-moveset collectibility: the cell IS a reached
+    stand/swim position (walked or swum through), or it hangs within the
+    vertical jump envelope directly above a reached BODY-standable
+    foothold (the anchor passes through it on a jump). Never trusts
+    reward anchors — they were layout-authored without reachability."""
+    x, y = cell
+    if cell in reached:
+        return True
+    return any(
+        (x, y + h) in reached_body for h in range(1, jump_height + 1)
+    )
+
+
+def _box_bumpable(
+    cell: tuple[int, int],
+    reached_body: set[tuple[int, int]],
+    jump_height: int,
+) -> bool:
+    """A box must be openable from BELOW with the base moveset: a reached
+    body-standable foothold in the same column, 2..jump_height+1 rows
+    beneath it (standing directly under a box is a 1-tall pocket the
+    body-stand filter already excludes)."""
+    x, y = cell
+    return any(
+        (x, y + h) in reached_body for h in range(2, jump_height + 2)
+    )
+
+
+def check_item_placements(
+    grid,
+    placements: list[dict],
+    spawn: tuple[int, int],
+    item_defs: dict[str, dict],
+    movement: PlayerMovementSpec,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+) -> tuple[list[dict], list[str], list[str]]:
+    """Validate an item-placement attempt. Returns (accepted, problems,
+    repairs): ``problems`` are retry feedback (unknown ids, malformed
+    records); everything computable — occupied cells, uncollectible
+    spots, rarity overflow — is REPAIRED (snapped to the nearest valid
+    cell or dropped, logged) per the G7 doctrine. The caller stamps BOX
+    tiles onto a grid copy afterward and re-checks beatability."""
+    height, width = grid.shape
+    empty_id = tiles.by_name["empty"].id if "empty" in tiles.by_name else 0
+    stand = standable_cells(grid, tiles)
+    reached = reachable_cells(grid, spawn, movement, tiles)
+    reached_body = reached & _body_stand(grid, stand, tiles)
+    jump_h = int(movement.jump_height)
+
+    volumes = tiles.ids("volume")
+
+    def _open(x: int, y: int) -> bool:
+        return (
+            0 <= x < width and 0 <= y < height
+            and int(grid[y, x]) == empty_id
+        )
+
+    def _in_water(x: int, y: int) -> bool:
+        return (
+            0 <= x < width and 0 <= y < height
+            and int(grid[y, x]) in volumes
+        )
+
+    def _valid(cell: tuple[int, int], source: str) -> bool:
+        if source == "box":
+            # Boxes stay in open air (a box overlays a SOLID tile — a
+            # submerged container is out of scope for water v1).
+            return _open(*cell) and _box_bumpable(
+                cell, reached_body, jump_h
+            )
+        if _open(*cell):
+            return _item_collectible(cell, reached, reached_body, jump_h)
+        # WATER (water arc): an item may FLOAT in a volume cell — the
+        # player swims through it, so collectible = swim-reached.
+        if _in_water(*cell):
+            return cell in reached
+        return False
+
+    def _snap(cell: tuple[int, int], source: str) -> tuple[int, int] | None:
+        candidates = sorted(
+            (
+                (abs(dx) + abs(dy), (cell[0] + dx, cell[1] + dy))
+                for dx in range(-_ITEM_SNAP_RADIUS, _ITEM_SNAP_RADIUS + 1)
+                for dy in range(-_ITEM_SNAP_RADIUS, _ITEM_SNAP_RADIUS + 1)
+                if dx or dy
+            ),
+        )
+        for _, cand in candidates:
+            if _valid(cand, source):
+                return cand
+        return None
+
+    accepted: list[dict] = []
+    problems: list[str] = []
+    repairs: list[str] = []
+    rarity_counts: dict[str, int] = {}
+    taken: set[tuple[int, int]] = set()
+
+    for p in placements:
+        item_id = str(p.get("item_id", ""))
+        definition = item_defs.get(item_id)
+        if definition is None:
+            problems.append(
+                f"unknown item {item_id!r} — place only ids from the pool: "
+                f"{sorted(item_defs)}"
+            )
+            continue
+        try:
+            x, y = int(p["x"]), int(p["y"])
+        except (KeyError, TypeError, ValueError):
+            problems.append(
+                f"{item_id}: x and y must be integer grid coordinates."
+            )
+            continue
+        source = str(p.get("source", "trail") or "trail")
+        if source not in ("trail", "reward", "box"):
+            source = "trail"
+
+        rarity = str(definition.get("rarity", "common"))
+        cap = rules.rarity_caps.get(rarity)
+        if cap is not None and rarity_counts.get(rarity, 0) >= cap:
+            repairs.append(
+                f"{item_id} at ({x},{y}): over the {rarity!r} cap ({cap} "
+                "per level) — dropped."
+            )
+            continue
+
+        cell = (x, y)
+        if cell in taken or not _valid(cell, source):
+            snapped = None if cell in taken else _snap(cell, source)
+            if snapped is None or snapped in taken:
+                what = (
+                    "not openable from below"
+                    if source == "box"
+                    else "not collectible with the base moveset"
+                )
+                repairs.append(
+                    f"{item_id} at ({x},{y}): occupied or {what}; no valid "
+                    "cell nearby — dropped."
+                )
+                continue
+            repairs.append(
+                f"{item_id} at ({x},{y}): snapped to {snapped} "
+                f"({'openable' if source == 'box' else 'collectible'})."
+            )
+            cell = snapped
+        taken.add(cell)
+        rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
+        accepted.append(
+            {"item_id": item_id, "x": cell[0], "y": cell[1], "source": source}
         )
     return accepted, problems, repairs

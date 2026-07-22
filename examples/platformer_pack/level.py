@@ -30,6 +30,7 @@ from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
 from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.dsl import (
+    _ARG_ROLES,
     DslError,
     StampResult,
     parse_dsl,
@@ -41,29 +42,51 @@ from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSp
 from examples.platformer_pack.phases import (
     SCHEMAS_DIR,
     _stamp_metadata,
+    resolved_model,
     stamp_provenance,
     warn,
 )
-from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.rules import (
+    DEFAULT_RULES,
+    GameRules,
+    validate_overrides,
+)
 from examples.platformer_pack.sections import (
+    DEFAULT_SECRET_ROOM_CONFIG,
     DEFAULT_VOCAB,
+    DEFAULT_WATER_LEVEL_CONFIG,
     SECTION_OVERLAP,
+    LevelPlan,
     PlannedSection,
+    SecretRoomConfig,
+    SecretRoomSpec,
     SectionArchetype,
+    WaterLevelConfig,
+    WaterSpec,
     composite,
     plan_level,
+    plan_room,
+    roll_secret_rooms,
+    roll_water_level,
     section_owner_of_cell,
 )
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.validate import (
     _body_stand,
     auto_bridge_grid,
+    check_item_placements,
     check_placements,
+    clear_spawn_grid,
+    flood_grid,
     flyer_spot_exists,
+    hazard_stand_cells,
     place_checkpoints_grid,
     place_exit,
+    place_room_entrances,
     reachable_cells,
+    repair_capped_oneways_grid,
     repair_containment_grid,
+    seabed_cells,
     snap_spawn_grid,
     standable_cells,
     swimmer_spot_exists,
@@ -77,7 +100,7 @@ logger = logging.getLogger(__name__)
 #: step (level.json) descends from every one of them in the §6.1 edge set.
 LEVEL_STEPS = (
     "collision", "hazards", "triggers", "terrain", "background",
-    "entities", "foreground",
+    "entities", "items", "foreground",
 )
 
 
@@ -105,14 +128,30 @@ def _whole_fallback(
     return stamp(_fallback_dsl(width), width, height, tiles=tiles)
 
 
+def parent_of_room_id(level_id: str) -> str | None:
+    """The parent level id a SECRET-ROOM id embeds (``l3r1`` → ``l3``), or
+    None when the id doesn't parse as a room. Rooms are deliberately NOT
+    in ``stage.level_ids``, so resolvers fall back to this convention —
+    it must work BEFORE the room's Level entity exists (the room's own
+    collision body resolves its stage first thing)."""
+    m = re.fullmatch(r"(.+\d)r\d+", level_id)
+    return m.group(1) if m else None
+
+
 def _stage_for_level(ctx: Any, level_id: str):
     """The stage that owns ``level_id`` — level ids are globally unique
     (allocated in world order by StagePhase), so the Bible is the
-    resolver; single-stage callers/tests that never planned stages fall
-    back to the lone stage."""
+    resolver; a SECRET-ROOM id (never in ``stage.level_ids``) resolves to
+    its parent's stage; single-stage callers/tests that never planned
+    stages fall back to the lone stage."""
     for stage in ctx.bible.stages.values():
         if level_id in stage.level_ids:
             return stage
+    parent = parent_of_room_id(level_id)
+    if parent is not None:
+        for stage in ctx.bible.stages.values():
+            if parent in stage.level_ids:
+                return stage
     stages = list(ctx.bible.stages.values())
     if len(stages) == 1:
         return stages[0]
@@ -129,6 +168,16 @@ def _stage_number(ctx: Any, stage_id: str) -> int:
         ctx.bible.stages
     )
     return order.index(stage_id) + 1 if stage_id in order else 1
+
+
+def level_and_rooms(ctx: Any, level_id: str) -> list[str]:
+    """A main-map level id followed by its secret-room ids — the
+    per-parent interleave every per-level phase iterates (sequential and
+    DAG alike; warning order is part of the byte contract). Rooms come
+    from the DURABLE ``Level.secret_rooms`` link the parent's collision
+    body recorded."""
+    level = ctx.bible.levels.get(level_id)
+    return [level_id, *(getattr(level, "secret_rooms", None) or [])]
 
 
 def world_stages(ctx: Any) -> list:
@@ -213,6 +262,159 @@ def _roll_level_knobs(
     return knobs, width, height, axis
 
 
+def level_water_spec(
+    ctx: Any,
+    level_id: str,
+    index: int,
+    *,
+    phase_name: str = "plat:layout",
+    default_width: int = 48,
+    default_height: int = 16,
+    config: WaterLevelConfig = DEFAULT_WATER_LEVEL_CONFIG,
+) -> WaterSpec | None:
+    """A level's rolled WATER TOPOLOGY (water arc), or None — the
+    identity-aware wrapper around :func:`roll_water_level`, keyed on an
+    independent ``"water"`` rng key with the stage-2+ and
+    HORIZONTAL-only gates (a flooded shaft trivializes a climb).
+    Recomputable anywhere; the flood OUTCOME (incl. any
+    waterline-lowering repair) is baked into collision.npz, so
+    downstream phases read the grid — only ROLL-consumers (room
+    suppression, aquatic section pools) call this."""
+    stage = _stage_for_level(ctx, level_id)
+    stage_number = _stage_number(ctx, stage.stage_id)
+    if stage_number < int(config.enabled_stage_min):
+        return None
+    _knobs, _w, _h, axis = _roll_level_knobs(
+        ctx, level_id, index, phase_name=phase_name,
+        default_width=default_width, default_height=default_height,
+    )
+    if axis != "horizontal":
+        return None
+    seed = str(getattr(ctx.config, "seed", ""))
+    return roll_water_level(
+        str(getattr(stage, "biome", "") or ""),
+        derive_rng(seed, phase_name, level_id, "water"),
+        config=config,
+    )
+
+
+def level_secret_rooms(
+    ctx: Any,
+    level_id: str,
+    index: int,
+    *,
+    phase_name: str = "plat:layout",
+    default_width: int = 48,
+    default_height: int = 16,
+    config: SecretRoomConfig = DEFAULT_SECRET_ROOM_CONFIG,
+) -> list[SecretRoomSpec]:
+    """A level's rolled SECRET ROOMS (multi-room arc) — the identity-aware
+    wrapper around :func:`roll_secret_rooms`: re-derives the parent's
+    difficulty + blueprint (the ``level_section_plan`` recompute
+    discipline) and rolls on an independent ``"secret"`` rng key, so the
+    layout body, the placement/items recompute, AND the DAG expansion all
+    agree on which rooms exist with zero persisted field.
+
+    A FULLY-SUBMERGED water level suppresses its rooms (water arc): the
+    entry verbs are dry-land interactions, so an entrance could never
+    fire — the roll still CONSUMES its rng draws first (stream
+    stability), then the result is discarded. The layout body applies
+    the identical gate to its direct :func:`roll_secret_rooms` call."""
+    knobs, width, height, axis = _roll_level_knobs(
+        ctx, level_id, index, phase_name=phase_name,
+        default_width=default_width, default_height=default_height,
+    )
+    difficulty = int(knobs.get("difficulty", 1))
+    seed = str(getattr(ctx.config, "seed", ""))
+    water = level_water_spec(
+        ctx, level_id, index, phase_name=phase_name,
+        default_width=default_width, default_height=default_height,
+    )
+    plan = plan_level(
+        width, height, difficulty,
+        derive_rng(seed, phase_name, level_id, "plan"), axis=axis,
+        water=water.topology if water is not None else None,
+    )
+    stage = _stage_for_level(ctx, level_id)
+    specs = roll_secret_rooms(
+        level_id, difficulty, len(plan.sections),
+        derive_rng(seed, phase_name, level_id, "secret"),
+        config=config, context=str(getattr(stage, "biome", "") or ""),
+    )
+    if water is not None and water.topology == "fully_submerged":
+        return []
+    return specs
+
+
+def _room_spec_for(
+    ctx: Any,
+    room_id: str,
+    parent_id: str,
+    index: int,
+    *,
+    phase_name: str = "plat:layout",
+    default_width: int = 48,
+    default_height: int = 16,
+) -> SecretRoomSpec:
+    """Resolve ONE room's rolled spec from its parent's deterministic
+    roll — the room bodies' entry point (they receive only ids)."""
+    specs = level_secret_rooms(
+        ctx, parent_id, index, phase_name=phase_name,
+        default_width=default_width, default_height=default_height,
+    )
+    spec = next((s for s in specs if s.room_id == room_id), None)
+    if spec is None:
+        raise KeyError(
+            f"level {parent_id!r} rolled no secret room {room_id!r} — "
+            f"rolled: {[s.room_id for s in specs]}"
+        )
+    return spec
+
+
+#: Room-type CONTENT directives (multi-room arc, C4) — prompt steering
+#: appended to the placement/item passes for secret rooms. Text only
+#: (I3); validators still enforce everything mechanical.
+_ROOM_ENEMY_DIRECTIVES = {
+    "lair": (
+        "This chamber is a monster LAIR (a secret room): stage ONE "
+        "dangerous, memorable encounter — prefer the champion variant on "
+        "the strongest fit (caps still apply) over a scatter of filler."
+    ),
+    "shortcut": (
+        "This is a secret SHORTCUT passage: a light skirmish en route — "
+        "one or two enemies guarding the way, never a wall of them."
+    ),
+}
+_ROOM_ITEM_DIRECTIVES = {
+    "vault": (
+        "This is a hidden TREASURE VAULT: fill every reward alcove anchor "
+        "with premium items (rares and power-ups) and lay generous coin "
+        "clusters — the room itself is the prize."
+    ),
+    "lair": (
+        "This is a monster LAIR: place one worthwhile reward (a power-up "
+        "or rare) past the encounter — the prize for winning the fight."
+    ),
+    "shortcut": (
+        "This is a secret SHORTCUT passage: lay a rich coin trail along "
+        "the route — the detour pays in coins."
+    ),
+}
+
+
+def _room_type_of(ctx: Any, level: Level) -> str | None:
+    """A secret room's rolled TYPE (shortcut/vault/lair), or None for a
+    main-map level — the deterministic recompute, so contents steering
+    needs no persisted field."""
+    parent = getattr(level, "parent_level", None)
+    if not parent:
+        return None
+    stage = _stage_for_level(ctx, parent)
+    index = stage.level_ids.index(parent) if parent in stage.level_ids else 0
+    spec = _room_spec_for(ctx, level.level_id, parent, index)
+    return spec.room_type
+
+
 def level_section_plan(
     ctx: Any,
     level: Level,
@@ -224,7 +426,21 @@ def level_section_plan(
     """Recompute the (deterministic) section plan the layout phase stitched, so
     a LATER phase (placement) can read the section map without a persisted
     field. Uses the level's stored dims + a re-derived difficulty, keyed on the
-    LAYOUT phase name so the roll matches ``_generate_sectioned_level`` exactly."""
+    LAYOUT phase name so the roll matches ``_generate_sectioned_level`` exactly.
+    A SECRET ROOM recomputes its own mini-blueprint from the parent's roll
+    (``plan_room``), never the parent's — a vault must not be steered like a
+    phantom runway."""
+    parent = getattr(level, "parent_level", None)
+    if parent:
+        stage = _stage_for_level(ctx, parent)
+        index = (
+            stage.level_ids.index(parent) if parent in stage.level_ids else 0
+        )
+        spec = _room_spec_for(
+            ctx, level.level_id, parent, index, phase_name=layout_phase,
+            default_width=default_width, default_height=default_height,
+        )
+        return plan_room(spec).sections
     stage = _stage_for_level(ctx, level.level_id)
     index = (
         stage.level_ids.index(level.level_id)
@@ -237,10 +453,15 @@ def level_section_plan(
     )
     difficulty = int(knobs.get("difficulty", 1))
     seed = str(getattr(ctx.config, "seed", ""))
+    water = level_water_spec(
+        ctx, level.level_id, index, phase_name=layout_phase,
+        default_width=default_width, default_height=default_height,
+    )
     return plan_level(
         level.grid_width, level.grid_height, difficulty,
         derive_rng(seed, layout_phase, level.level_id, "plan"),
         axis=axis,
+        water=water.topology if water is not None else None,
     ).sections
 
 
@@ -328,6 +549,7 @@ def _generate_one_section(
     tiles: TileRegistry,
     seam: str | None,
     phase_name: str,
+    difficulty: int = 1,
     initial_feedback: list[str] | None = None,
     previous: str | None = None,
     predecessor: str | None = None,
@@ -356,6 +578,7 @@ def _generate_one_section(
             level_id, brief, ps.archetype, arch.flavor, arch.feature_bias,
             index, total, local_w, local_h, movement, rules=rules, tiles=tiles,
             seam=seam, intensity=arch.intensity, water=arch.water, axis=axis,
+            difficulty=difficulty,
             previous=last_attempt["content"], feedback=eff_fb,
             predecessor=predecessor,
             predecessor_occupied=predecessor_occupied,
@@ -457,6 +680,17 @@ def _stitch_and_repair(
         )
         whole.free_volume |= spilled
         whole.repairs.extend(cont_notes)
+    # Capped one-way cleanup (ticket 2): a one-way platform sealed by a slab
+    # above is a broken promise (can't stand on it) — carve the slab or drop
+    # the dead platform. BEFORE auto_bridge so any reachability fallout is
+    # re-bridged; solid terrain (walls, traps) is never touched.
+    whole.repairs.extend(
+        repair_capped_oneways_grid(
+            whole.grid, tiles, hazards=whole.hazards,
+            free_volume=whole.free_volume,
+            protected={whole.spawn} if whole.spawn else frozenset(),
+        )
+    )
     exclude = {whole.spawn} if whole.spawn else set()
     exit_ = place_exit(whole.grid, tiles, exclude=exclude, axis=axis)
     if exit_ is None:
@@ -471,6 +705,15 @@ def _stitch_and_repair(
     whole.spawn, spawn_moves = snap_spawn_grid(
         whole.grid, whole.spawn, exit_, tiles
     )
+    # SPAWN-CLEAR (code-not-LLM): when no column within the snap bound
+    # qualifies AND the spawn cell itself is covered by a stamped tile,
+    # clearing that tile is pure geometry — the paid l8r1 room burned all
+    # three regen rounds on a byte-identical covered-spawn problem that one
+    # cleared stair cell fixes.
+    if not spawn_moves:
+        spawn_moves = clear_spawn_grid(
+            whole.grid, whole.spawn, tiles, hazards=whole.hazards
+        )
     # Checkpoints are STITCHER-owned (the blueprint decides count + which
     # sections). Strip any that slipped out of a section's DSL BEFORE the
     # bridge/validate loop — a stray unreachable checkpoint used to feed
@@ -561,11 +804,51 @@ def _owner_of_problem(
     return len(plan) - 1
 
 
+def _verbatim_repeat(stitch_rounds: list[dict]) -> bool:
+    """True when the newest stitch round reproduced the previous round's
+    problems VERBATIM (list equality on the deterministic strings) — regen
+    is buying nothing, so the terminal escalation starts NOW instead of
+    burning the remaining rounds. Paid truth: l3/l7/l8r1 each resubmitted
+    into three identical rounds; l8's break moved every round (repairs were
+    making real progress) and must keep its regens."""
+    return (
+        len(stitch_rounds) >= 2
+        and bool(stitch_rounds[-1]["problems"])
+        and stitch_rounds[-1]["problems"] == stitch_rounds[-2]["problems"]
+    )
+
+
+def _ops_near_cell(dsl: str, lx: int, ly: int) -> list[str]:
+    """The section's own DSL ops whose coordinate span covers or borders
+    (within 1 cell) the LOCAL cell ``(lx, ly)`` — pure arithmetic over the
+    ``_ARG_ROLES`` x/y roles. An op with no y-role args (the ground-anchored
+    strip ops) matches on column alone: its vertical extent depends on the
+    stamp, which this deliberately does not run."""
+    named: list[str] = []
+    for name, args in parse_dsl(dsl, skipped=[]):
+        roles = _ARG_ROLES[name]
+        ints = [a for a in args if isinstance(a, int)]
+        xs = [v for v, r in zip(ints, roles) if r == "x"]
+        ys = [v for v, r in zip(ints, roles) if r == "y"]
+        if name == "platform" and len(ints) == 3:
+            xs.append(ints[0] + ints[2] - 1)  # the len arg extends the span
+        if xs and not (min(xs) - 1 <= lx <= max(xs) + 1):
+            continue
+        if ys and not (min(ys) - 1 <= ly <= max(ys) + 1):
+            continue
+        named.append(f"{name}({','.join(str(a) for a in args)})")
+    return named
+
+
 def _section_feedback(
-    problems: list[str], ps: PlannedSection, axis: str
+    problems: list[str], ps: PlannedSection, axis: str, dsl: str
 ) -> list[str]:
     """Whole-level problems + a note translating them to the section's local
-    coordinate frame (its own origin at 0,0)."""
+    coordinate frame (its own origin at 0,0) + one code-computed line per
+    ``[break@x,y]`` problem: the break REBASED to local coordinates and the
+    section's own ops at/bordering it. The paid traces show the model
+    burning prose re-deriving exactly this subtraction ('the break is at
+    local column 73-69=4 ...') before every resubmission."""
     if axis == "vertical":
         note = (
             f"(WHOLE-LEVEL coordinates; THIS section occupies rows "
@@ -578,7 +861,22 @@ def _section_feedback(
             f"{ps.x_off}..{ps.x_off + ps.length - 1}. Subtract {ps.x_off} from "
             "the column for your local column.)"
         )
-    return list(problems) + [note]
+    located: list[str] = []
+    for p in problems:
+        m = re.search(r"\[break@(\d+),(\d+)\]", p)
+        if not m:
+            continue
+        lx = int(m.group(1)) - ps.x_off
+        ly = int(m.group(2)) - ps.y_off
+        line = (
+            f"[break@{m.group(1)},{m.group(2)}] is YOUR local cell "
+            f"({lx},{ly})."
+        )
+        ops = _ops_near_cell(dsl, lx, ly)
+        if ops:
+            line += " Your ops at/bordering it: " + "; ".join(ops) + "."
+        located.append(line)
+    return list(problems) + [note] + located
 
 
 def _section_local_dims(
@@ -604,6 +902,8 @@ def _generate_sectioned_level(
     tiles: TileRegistry,
     seed: str,
     phase_name: str,
+    plan_override: LevelPlan | None = None,
+    water: str | None = None,
 ) -> tuple[StampResult, str, bool, list[dict], list[str], list[str]]:
     """Plan sections → generate each (seam-threaded) → stitch → whole-grid
     repair → whole-level check, regenerating only the owning section on a
@@ -611,11 +911,16 @@ def _generate_sectioned_level(
     (exit at the right edge), vertical sections stack up the height (spawn at
     the bottom, exit at the summit). Returns the whole-level ``StampResult``
     plus the combined DSL record, the fallback flag, the aggregated attempt
-    log, and the bridge/snap notes for logging."""
+    log, and the bridge/snap notes for logging.
+
+    ``plan_override`` injects a pre-built blueprint (a secret room's
+    ``plan_room``) instead of rolling ``plan_level`` — everything else
+    (generation, stitch, repair escalation) is identical."""
     difficulty = int(knobs.get("difficulty", 1))
-    level_plan = plan_level(
+    level_plan = plan_override if plan_override is not None else plan_level(
         width, height, difficulty,
         derive_rng(seed, phase_name, level_id, "plan"), axis=axis,
+        water=water,
     )
     plan = level_plan.sections
     total = len(plan)
@@ -629,6 +934,7 @@ def _generate_sectioned_level(
             arch=DEFAULT_VOCAB[ps.archetype], index=idx, total=total,
             local_w=lw, local_h=lh, axis=axis, movement=movement,
             rules=rules, tiles=tiles, seam=seam, phase_name=phase_name,
+            difficulty=difficulty,
             initial_feedback=feedback, previous=previous,
             **(handoff or {}),
         )
@@ -699,8 +1005,11 @@ def _generate_sectioned_level(
         )
         if not problems:
             break
-        if attempt == max_retries:
-            # Terminal: DON'T nuke the sections that passed. Force ONLY the
+        if attempt == max_retries or _verbatim_repeat(stitch_rounds):
+            # Terminal (out of rounds, or the round reproduced the previous
+            # problems VERBATIM — the l3/l7/l8r1 paid rounds each burned
+            # three regens resubmitting into an identical residue):
+            # DON'T nuke the sections that passed. Force ONLY the
             # section that owns the residual problem to its guaranteed-valid
             # fallback (a flat floor / climbable ladder) and re-stitch once.
             # Whole-flat is the LAST resort — only if a locally-repaired
@@ -794,7 +1103,8 @@ def _generate_sectioned_level(
             )
         regen = gen(
             owner, ps, prev_seam,
-            _section_feedback(problems, ps, axis), states[owner].dsl,
+            _section_feedback(problems, ps, axis, states[owner].dsl),
+            states[owner].dsl,
             handoff,
         )
         # KEEP the replaced state's attempt log — each gen() starts a fresh
@@ -827,6 +1137,9 @@ def _generate_sectioned_level(
         "whole_fallback": whole_fallback,
         "section_fallbacks": section_fallbacks,
         "stitch_rounds": stitch_rounds,
+        # The blueprint actually used — NOT serialized into the trace;
+        # the caller reads it (entrance placement needs the section map).
+        "plan": level_plan,
     }
     return result, dsl_text, fell_back, attempts, bridges, snaps, diag
 
@@ -843,38 +1156,191 @@ def stamp_level_collision(
     default_width: int = 48,
     default_height: int = 16,
     phase_name: str = "plat:layout",
+    room_of: str | None = None,
 ) -> Level:
     """Layout Agents (one per SECTION) → stitch → collision.npz; creates the
     Level entity (registered in the Bible) carrying spawn/exit/hazards/
     triggers/brief. The level is a SEQUENCE of typed sections (sections.py):
     each is generated at its own local dims and composited into the full grid,
-    then the whole level is repaired (bridge/snap) and validated as one."""
+    then the whole level is repaired (bridge/snap) and validated as one.
+
+    ``room_of`` builds a SECRET ROOM instead (multi-room arc): ``level_id``
+    is the room id, ``index`` the PARENT's stage index; dims/plan/brief come
+    from the parent's deterministic room roll (``plan_room``), the exit cell
+    doubles as a ``room_portal`` trigger, and the Level records
+    ``parent_level``. Everything else — generation, stitch, repair
+    escalation, trace, file set — is the same machinery."""
     stage = _stage_for_level(ctx, level_id)
     stage_id = stage.stage_id
     seed = str(getattr(ctx.config, "seed", ""))
-    brief = _level_brief(ctx, level_id)
-    knobs, width, height, axis = _roll_level_knobs(
-        ctx, level_id, index, phase_name=phase_name,
-        default_width=default_width, default_height=default_height,
-    )
-    # Per-level camera framing: a deliberate stage-plan exception
-    # ("intimate"/"vista"), resolved to cells here so consumers read a
-    # number, not a vocabulary. Resume path (stage phase skipped, hints
-    # absent) keeps the prior level's framing, like the brief.
-    hint = ctx.artifacts.get("level_views", {}).get(level_id, "")
-    view_cells = graphics.view_for(hint)
-    if not hint:
-        prior = ctx.bible.levels.get(level_id)
-        view_cells = prior.view_cells if prior is not None else None
-    # A vertical level frames by HEIGHT (a tall shaft): show ~view_rows rows.
-    view_rows = graphics.view_rows if axis == "vertical" else None
+    room_spec: SecretRoomSpec | None = None
+    plan_override: LevelPlan | None = None
+    if room_of is not None:
+        room_spec = _room_spec_for(
+            ctx, level_id, room_of, index, phase_name=phase_name,
+            default_width=default_width, default_height=default_height,
+        )
+        knobs = {"difficulty": room_spec.difficulty}
+        width, height, axis = room_spec.width, room_spec.height, "horizontal"
+        plan_override = plan_room(room_spec)
+        parent_brief = _level_brief(ctx, room_of)
+        brief = (
+            f"A hidden {room_spec.room_type} secret room — a small "
+            "side-chamber off the main path, entered through a "
+            f"{room_spec.entry_verb}."
+            + (f" The level outside: {parent_brief}" if parent_brief else "")
+        )
+        # Rooms frame tight (data: secret_rooms.json framing preset) —
+        # a small chamber should feel like one.
+        view_cells = graphics.view_for(
+            str(getattr(DEFAULT_SECRET_ROOM_CONFIG, "framing", "intimate"))
+        )
+        view_rows = None
+        # A room INHERITS its parent's rule/movement overrides (one
+        # fiction, one physics — a low-gravity level's secret room must
+        # not snap back to defaults mid-trip). The parent is stamped
+        # first on both schedulers (DAG requires + sequential order).
+        parent_entity = ctx.bible.levels.get(room_of)
+        rules_overrides = (
+            dict(parent_entity.rules_overrides) if parent_entity else {}
+        )
+        movement_overrides = (
+            dict(parent_entity.movement_overrides) if parent_entity else {}
+        )
+    else:
+        brief = _level_brief(ctx, level_id)
+        knobs, width, height, axis = _roll_level_knobs(
+            ctx, level_id, index, phase_name=phase_name,
+            default_width=default_width, default_height=default_height,
+        )
+        # Per-level camera framing: a deliberate stage-plan exception
+        # ("intimate"/"vista"), resolved to cells here so consumers read a
+        # number, not a vocabulary. Resume path (stage phase skipped, hints
+        # absent) keeps the prior level's framing, like the brief.
+        hint = ctx.artifacts.get("level_views", {}).get(level_id, "")
+        view_cells = graphics.view_for(hint)
+        if not hint:
+            prior = ctx.bible.levels.get(level_id)
+            view_cells = prior.view_cells if prior is not None else None
+        # A vertical level frames by HEIGHT (a tall shaft): show ~view_rows
+        # rows.
+        view_rows = graphics.view_rows if axis == "vertical" else None
+        # Per-level RULE overrides (combat/level-picks arc): the stage
+        # plan's proposal, validated FAIL-CLOSED against the pack
+        # vocabulary (unknown key / out-of-band value → dropped + warn).
+        # Resume path (stage phase skipped, artifact absent) keeps the
+        # prior Level's persisted overrides — the view_cells pattern.
+        proposal = ctx.artifacts.get("level_rules", {}).get(level_id)
+        if proposal is None:
+            prior = ctx.bible.levels.get(level_id)
+            rules_overrides = (
+                dict(prior.rules_overrides) if prior is not None else {}
+            )
+            movement_overrides = (
+                dict(prior.movement_overrides) if prior is not None else {}
+            )
+        else:
+            rules_overrides, movement_overrides, override_notes = (
+                validate_overrides(proposal)
+            )
+            for note in override_notes:
+                warn(ctx, f"layout {level_id}: {note}")
+    # The EFFECTIVE movement spec: a level with movement overrides is
+    # generated AND validated under its own physics (movement threads
+    # through the whole chain — sections, bridges, checkpoints,
+    # entrances, flood re-check). model_validate keeps types honest.
+    if movement_overrides:
+        movement = PlayerMovementSpec.model_validate(
+            {**movement.model_dump(), **movement_overrides}
+        )
+    # WATER TOPOLOGY (water arc): rolled BEFORE generation — the
+    # blueprint's archetype pool is water-steered (aquatic sections on a
+    # flooded level), entrances restrict to dry land on a waterline, and
+    # a fully-submerged level suppresses rooms. The gates here mirror
+    # level_water_spec exactly (the recompute the DAG/placement share);
+    # the flood OUTCOME below is baked into collision.npz.
+    water_spec: WaterSpec | None = None
+    if (
+        room_of is None
+        and _stage_number(ctx, stage_id)
+        >= int(DEFAULT_WATER_LEVEL_CONFIG.enabled_stage_min)
+        and axis == "horizontal"
+    ):
+        water_spec = roll_water_level(
+            str(getattr(stage, "biome", "") or ""),
+            derive_rng(seed, phase_name, level_id, "water"),
+        )
     result, dsl_text, fell_back, attempts, bridges, snaps, diag = (
         _generate_sectioned_level(
             ctx, level_id=level_id, brief=brief, knobs=knobs,
             width=width, height=height, axis=axis, movement=movement,
             rules=rules, tiles=tiles, seed=seed, phase_name=phase_name,
+            plan_override=plan_override,
+            water=water_spec.topology if water_spec is not None else None,
         )
     )
+    secret_room_ids: list[str] = []
+    if room_spec is not None:
+        # A room's exit is a RETURN PORTAL, not a win: record it as a
+        # trigger the consumers key the exit verb on. Level.exit stays set
+        # (validation + both consumers index it unconditionally).
+        if result.exit is not None:
+            result.triggers = list(result.triggers) + [
+                SparseMaskEntry(
+                    x=result.exit[0], y=result.exit[1], type="room_portal",
+                    params={
+                        "verb": room_spec.entry_verb,
+                        "parent_level": room_of,
+                    },
+                )
+            ]
+    if room_spec is None:
+        # STITCHER-placed secret-room entrances (user-locked): rolled
+        # per level, placed on reachable footholds in the host section,
+        # escalation makes placement effectively total. The link is
+        # durable on Level.secret_rooms; a room whose entrance still
+        # failed ships unreachable-but-warned (never player-visible).
+        # The roll always CONSUMES its rng draws (stream stability);
+        # a fully-submerged water level then discards it — entry verbs
+        # are dry-land interactions (level_secret_rooms mirrors this).
+        specs = roll_secret_rooms(
+            level_id, int(knobs.get("difficulty", 1)),
+            len(diag["plan"].sections),
+            derive_rng(seed, phase_name, level_id, "secret"),
+            context=str(getattr(stage, "biome", "") or ""),
+        )
+        if water_spec is not None and water_spec.topology == "fully_submerged":
+            specs = []
+        # A waterline entrance (and its shortcut return) must sit on DRY
+        # land — the consumers' verb press is gated on not-swimming.
+        dry_cells: set[tuple[int, int]] | None = None
+        if water_spec is not None and water_spec.topology == "waterline":
+            water_row = max(0, height - int(water_spec.depth))
+            dry_cells = {
+                (x, y)
+                for y in range(min(water_row, height))
+                for x in range(width)
+            }
+        if specs:
+            entrances, entrance_notes = place_room_entrances(
+                result.grid, result.spawn, result.exit,
+                diag["plan"].sections, specs, axis, movement, tiles=tiles,
+                triggers=result.triggers, restrict_to=dry_cells,
+            )
+            result.triggers = list(result.triggers) + entrances
+            result.repairs.extend(entrance_notes)
+            secret_room_ids = [s.room_id for s in specs]
+            placed = {
+                str(t.params.get("room_id", "")) for t in entrances
+            }
+            for spec in specs:
+                if spec.room_id not in placed:
+                    warn(
+                        ctx,
+                        f"layout {level_id}: secret room {spec.room_id} "
+                        "got NO entrance (no reachable standing cell) — "
+                        "the room builds but is unreachable in play.",
+                    )
     if fell_back:
         scope = (
             "the WHOLE level is"
@@ -888,7 +1354,14 @@ def stamp_level_collision(
             f"{level_id}_layout_attempts.json",
         )
     trace_rel = f"review/{stage_id}/{level_id}_layout_attempts.json"
-    if fell_back or any(a["outcome"] != "passed" for a in attempts):
+    # A SELF-HEAL (round-0 whole-level problems → regen → later round clean)
+    # ships a clean level with all-"passed" attempts and no fallback, so the
+    # old predicate skipped its trace AND the else-branch unlinked any earlier
+    # one — discarding exactly the stitch_rounds that show HOW it healed
+    # (postmortem ticket 5d: "write when calls>1"; a round recording problems
+    # means a regen round followed).
+    self_healed = any(r.get("problems") for r in diag["stitch_rounds"])
+    if fell_back or any(a["outcome"] != "passed" for a in attempts) or self_healed:
         # Post-mortem evidence beside the skinned renders. Content is
         # attempt-derived only (no timestamps) — the byte-identical
         # fake-run verification bar covers this file too. Written whenever
@@ -914,9 +1387,9 @@ def stamp_level_collision(
             },
         )
     else:
-        # A clean re-roll invalidates any earlier failure trace — a
-        # leftover "fallback": true would contradict the level it sits
-        # beside.
+        # Only a genuinely clean level (no fallback, no failed attempt, no
+        # round with problems) reaches here — a stale trace would contradict
+        # the level it sits beside, so drop it.
         ctx.adapter.resolve_path(trace_rel).unlink(missing_ok=True)
     if bridges:
         logger.info(
@@ -936,6 +1409,71 @@ def stamp_level_collision(
             "was arithmetic).",
             level_id, note,
         )
+
+    # THE FLOOD (water arc): a deterministic code pass on the FINAL grid,
+    # after every dry-grid validation/marker placement (flooding earlier
+    # trips the standability gates), before the npz bake — downstream
+    # phases and consumers read the water from collision.npz. Membership
+    # safety check: flooding only ADDS traversal EXCEPT a waterline
+    # demoting a dry run-jump takeoff to a low-speed surface exit — so
+    # every target must stay swim/walk-reachable, else the line lowers a
+    # row (re-flooding the pristine dry grid; flood_grid copies) until
+    # it fits; depth 0 = ship dry, loudly.
+    if room_spec is None and water_spec is not None and result.spawn is not None:
+        targets = [tuple(result.exit)] if result.exit is not None else []
+        targets += [
+            (t.x, t.y)
+            for t in result.triggers
+            if t.type in ("checkpoint", "room_entrance")
+        ]
+        targets += [
+            (int(t.params["return_x"]), int(t.params["return_y"]))
+            for t in result.triggers
+            if t.type == "room_entrance"
+        ]
+        depth = int(water_spec.depth)
+        topology = water_spec.topology
+        flooded, flood_notes = flood_grid(result.grid, tiles, topology, depth)
+
+        def _all_reached(grid_w) -> bool:
+            reached = reachable_cells(grid_w, result.spawn, movement, tiles)
+            return all(c in reached for c in targets)
+
+        if topology == "waterline":
+            while depth > 0 and not _all_reached(flooded):
+                depth -= 1
+                flooded, flood_notes = flood_grid(
+                    result.grid, tiles, topology, depth
+                )
+                flood_notes.append(
+                    f"waterline lowered to {depth} row(s) — the flood "
+                    "stranded a reachability target (code repair)"
+                )
+            if depth == 0:
+                flooded = None
+                warn(
+                    ctx,
+                    f"layout {level_id}: waterline flood stranded targets "
+                    "at every depth — the level ships DRY (water roll "
+                    "dropped).",
+                )
+        elif not _all_reached(flooded):
+            # Provably unreachable-under-flood should be impossible for
+            # fully_submerged (free swim ⊇ the validated dry traversal)
+            # — belt-and-braces: ship dry and say so loudly.
+            flooded = None
+            warn(
+                ctx,
+                f"layout {level_id}: fully-submerged flood stranded a "
+                "target (unexpected) — the level ships DRY.",
+            )
+        if flooded is not None:
+            result.grid = flooded
+            for note in flood_notes:
+                logger.info(
+                    "Layout %s: %s (water topology is a code roll).",
+                    level_id, note,
+                )
 
     level_dir = f"level/{stage_id}/{level_id}"
     collision_hash = ctx.adapter.write_numpy(
@@ -959,6 +1497,10 @@ def stamp_level_collision(
         hazards=result.hazards,
         triggers=result.triggers,
         layout_fallback=fell_back,
+        secret_rooms=secret_room_ids,
+        parent_level=room_of,
+        rules_overrides=rules_overrides,
+        movement_overrides=movement_overrides,
         parents=[layout_aid, stage.tileset_ref],
         step_parents={
             "collision": [layout_aid],
@@ -1014,9 +1556,33 @@ def place_level_entities(
     variants: VariantSet = DEFAULT_VARIANTS,
     combat: CombatSpec = DEFAULT_COMBAT,
     phase_name: str = "plat:placement",
+    room_type: str | None = None,
 ) -> None:
-    """Entity Agent → validated placements → entities.json + Level.entities."""
+    """Entity Agent → validated placements → entities.json + Level.entities.
+
+    ``room_type`` overrides the secret-room type detection (tests); by
+    default a room's rolled type steers contents: a VAULT gets NO
+    enemies (deterministic fast path — the room is the prize, and the
+    no-enemies warn stays quiet), a LAIR/SHORTCUT gets a prompt
+    directive (validators unchanged)."""
     import numpy as np
+
+    room_kind = room_type if room_type is not None else _room_type_of(ctx, level)
+    level_dir = f"level/{level.stage_id}/{level.level_id}"
+    if room_kind == "vault":
+        level.entities = []
+        level.entities_hash = ctx.adapter.write_json_singleton(
+            f"{level_dir}/entities.json", []
+        )
+        level.step_parents["entities"] = [
+            make_artifact_id("level", level.stage_id, level.level_id, "collision"),
+            make_artifact_id("level", level.stage_id, level.level_id, "hazards"),
+        ]
+        logger.info(
+            "Placement %s: treasure VAULT — no enemies by design.",
+            level.level_id,
+        )
+        return
 
     # The level's roster is its STAGE's (ecology: the world pool filtered
     # by biome — Stage.enemy_refs); an empty refs list (pre-ecology
@@ -1046,6 +1612,17 @@ def place_level_entities(
     # 1.5-body swimmer in 1-deep puddles), and a flyer needs open airspace
     # over ground (rejects fully-solid/ceilinged levels). Land archetypes
     # always have standable ground in a valid level.
+    # Land archetypes need somewhere to stand: a dry standable cell, or —
+    # under the "seabed" enemy_water_policy — a submerged flat (a wading
+    # enemy posted on underwater ground). A level offering neither (e.g.
+    # fully flooded with no seabed) never burns placement retries
+    # offering un-seatable patrollers.
+    dry_ok = bool(standable_cells(grid, tiles))
+    land_ok = dry_ok or (
+        str(getattr(rules, "enemy_water_policy", "")) == "seabed"
+        and bool(seabed_cells(grid, tiles))
+    )
+
     def _terrain_sustains(e: dict) -> bool:
         if e["archetype"] == "swimmer":
             return swimmer_spot_exists(
@@ -1054,7 +1631,11 @@ def place_level_entities(
             )
         if e["archetype"] == "flyer":
             return flyer_spot_exists(grid, e["size"], tiles)
-        return True
+        if e["archetype"] == "hopper":
+            # Hops are dry-land arcs — no wading (a fully-submerged
+            # level never offers a hopper).
+            return dry_ok
+        return land_ok
 
     infeasible = [e for e in roster if not _terrain_sustains(e)]
     if infeasible:
@@ -1099,6 +1680,19 @@ def place_level_entities(
             spawn=spawn, volume_summary=volume_summary,
             air_summary=air_summary, encounter_summary=encounter_summary,
             variants=variants, rules=rules, combat=combat,
+            directive=_ROOM_ENEMY_DIRECTIVES.get(room_kind or "", ""),
+            seabed_summary=_cells_summary(sorted(seabed_cells(grid, tiles))),
+            # DRY hazard posts only: a submerged urchin can't host a
+            # wading emberborn (its body rows need open air — the
+            # clearance rule), so the offer lists only hazard cells
+            # with air above.
+            hazard_summary=_cells_summary(
+                sorted(
+                    (x, y)
+                    for (x, y) in hazard_stand_cells(grid, tiles)
+                    if y == 0 or int(grid[y - 1, x]) not in tiles.ids("volume")
+                )
+            ),
             previous=last_attempt["content"], feedback=feedback,
         )
         if max_tokens is not None:
@@ -1198,6 +1792,232 @@ def place_level_entities(
     )
 
 
+def place_level_items(
+    ctx: Any,
+    level: Level,
+    max_items: int = 24,
+    rules: GameRules = DEFAULT_RULES,
+    tiles: TileRegistry = DEFAULT_TILES,
+    movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    phase_name: str = "plat:item_placement",
+    room_type: str | None = None,
+) -> None:
+    """The whole-map ITEM pass (Arc 2), AFTER enemy placement: the agent
+    sees the finished stitched level + the enemy roster and places the
+    world item pool — coins FREQUENT along the route and marking side
+    areas (doctrine), power-ups staged around enemies, premium items at
+    the layout's reward() alcove anchors, and BOX containers in open air.
+
+    Boxes never rewrite collision.npz (a parent step): accepted box cells
+    ride in items.json and every consumer OVERLAYS the solid box tile
+    onto the grid at load. The beatability re-check here does the same
+    overlay in memory, dropping any box that walls off the exit or a
+    checkpoint (code repair, never an LLM loop)."""
+    import numpy as np
+
+    level_id = level.level_id
+    # A level generated under movement overrides validates its ITEM
+    # collectibility under the same effective physics (the persisted
+    # fields are the carrier — no re-roll).
+    if getattr(level, "movement_overrides", None):
+        movement = PlayerMovementSpec.model_validate(
+            {**movement.model_dump(), **level.movement_overrides}
+        )
+    pool = list(ctx.bible.items.values())
+    if not pool:
+        level.items = []
+        level.step_parents["items"] = [
+            make_artifact_id("level", level.stage_id, level_id, step)
+            for step in ("collision", "hazards", "triggers", "entities")
+        ]
+        return
+    with np.load(ctx.adapter.resolve_path(level.collision)) as data:
+        grid = data["collision"]
+    offer = [
+        {
+            "id": item.item_id,
+            "kind": item.kind,
+            "rarity": item.rarity,
+            "params": item.params,
+        }
+        for item in pool
+    ]
+    item_defs = {
+        item.item_id: {"kind": item.kind, "rarity": item.rarity}
+        for item in pool
+    }
+    reward_anchors = [
+        (t.x, t.y) for t in level.triggers if t.type == "reward"
+    ]
+    enemy_spots = [
+        {"id": p.ref.split(":", 1)[1], "at": list(p.pos)}
+        for p in level.entities
+    ]
+    standable_summary = _cells_summary(sorted(standable_cells(grid, tiles)))
+    brief = _level_brief(ctx, level_id)
+    # Secret-room contents steering (C4): the room TYPE biases the item
+    # pass — a vault stacks its anchors with premium loot, a shortcut
+    # pays in coins (text only; the validators are unchanged).
+    room_kind = room_type if room_type is not None else _room_type_of(ctx, level)
+
+    last_attempt = {"content": ""}
+    holders: dict[str, list] = {"accepted": [], "repairs": []}
+
+    def generate(
+        feedback: list[str] | None = None, max_tokens: int | None = None
+    ) -> str:
+        request = ctx.prompts.item_placement(
+            level_id, brief, offer,
+            standable_summary=standable_summary,
+            spawn=level.spawn, exit_=level.exit,
+            grid_width=level.grid_width, grid_height=level.grid_height,
+            enemies=enemy_spots, reward_anchors=reward_anchors,
+            rules=rules, max_items=max_items,
+            has_box="box" in tiles.by_name,
+            directive=_ROOM_ITEM_DIRECTIVES.get(room_kind or "", ""),
+            water_summary=_volume_summary(grid, tiles),
+            previous=last_attempt["content"], feedback=feedback,
+        )
+        if max_tokens is not None:
+            request.max_tokens = max_tokens
+        content = ctx.llm.generate(request, phase=f"{phase_name}:{level_id}")
+        last_attempt["content"] = content
+        return content
+
+    def validate(content: str) -> tuple[bool, list[str]]:
+        obj = extract_json_object(content)
+        if obj is None or not isinstance(obj.get("placements"), list):
+            return False, ['Return {"placements": [...]} as bare JSON.']
+        accepted, problems, repairs = check_item_placements(
+            grid, obj["placements"], level.spawn, item_defs, movement,
+            rules=rules, tiles=tiles,
+        )
+        holders["accepted"], holders["repairs"] = accepted, repairs
+        return not problems, problems
+
+    retry_with_feedback(
+        generate_fn=generate,
+        validate_fn=validate,
+        fallback="",
+        max_retries=getattr(ctx.config, "max_retries", 3),
+        label=f"{phase_name}:{level_id}",
+    )
+    accepted = holders["accepted"][:max_items]
+    for note in holders["repairs"]:
+        logger.info("Item placement %s repair: %s", level_id, note)
+
+    # BOX beatability re-check (code-not-LLM): overlay each accepted box
+    # tile onto a grid COPY, keep it only while the exit and every
+    # checkpoint stay sim-reachable (a box is SOLID — it can seal a
+    # corridor or block a jump arc mid-flight).
+    box_id = tiles.by_name["box"].id if "box" in tiles.by_name else None
+    boxes = [p for p in accepted if p["source"] == "box"]
+    if boxes and box_id is not None and level.spawn and level.exit:
+        overlay = grid.copy()
+        checkpoints = [
+            (t.x, t.y) for t in level.triggers if t.type == "checkpoint"
+        ]
+        for box in list(boxes):
+            overlay[box["y"], box["x"]] = box_id
+            reached = reachable_cells(overlay, level.spawn, movement, tiles)
+            if level.exit not in reached or any(
+                c not in reached for c in checkpoints
+            ):
+                overlay[box["y"], box["x"]] = grid[box["y"], box["x"]]
+                accepted.remove(box)
+                warn(
+                    ctx,
+                    f"items {level_id}: box at ({box['x']},{box['y']}) "
+                    "would wall off the path — dropped (code repair).",
+                )
+    elif boxes and box_id is None:
+        accepted = [p for p in accepted if p["source"] != "box"]
+        warn(
+            ctx,
+            f"items {level_id}: this game's registry has no 'box' tile — "
+            f"{len(boxes)} box placement(s) dropped.",
+        )
+
+    if not accepted:
+        warn(
+            ctx,
+            f"items {level_id}: no valid item placements survived — the "
+            "level ships without items.",
+        )
+
+    level.items = [
+        Placement(
+            ref=make_artifact_id("item", p["item_id"]),
+            pos=(p["x"], p["y"]),
+            overrides={"source": p["source"]},
+        )
+        for p in accepted
+    ]
+    level_dir = f"level/{level.stage_id}/{level_id}"
+    level.items_hash = ctx.adapter.write_json_singleton(
+        f"{level_dir}/items.json",
+        [
+            {
+                "item_id": p["item_id"],
+                "x": p["x"],
+                "y": p["y"],
+                "source": p["source"],
+            }
+            for p in accepted
+        ],
+    )
+    # Rarity caps read each definition's rarity — an item re-roll must
+    # cascade here (whole-pool edges, the enemy-roster precedent).
+    level.step_parents["items"] = [
+        make_artifact_id("level", level.stage_id, level_id, "collision"),
+        make_artifact_id("level", level.stage_id, level_id, "hazards"),
+        make_artifact_id("level", level.stage_id, level_id, "triggers"),
+        make_artifact_id("level", level.stage_id, level_id, "entities"),
+        *sorted(make_artifact_id("item", i.item_id) for i in pool),
+    ]
+    logger.info(
+        "Items %s: %d placed — %s",
+        level_id, len(accepted),
+        ", ".join(
+            f"{p['item_id']}@({p['x']},{p['y']})"
+            + (f"[{p['source']}]" if p["source"] != "trail" else "")
+            for p in accepted
+        )
+        or "none",
+    )
+
+
+class ItemsPlacementPhase:
+    """Sequential twin of the DAG items step: place the world item pool
+    into every level, after enemies."""
+
+    name = "plat:item_placement"
+
+    def __init__(
+        self,
+        max_items_per_level: int = 24,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        movement: PlayerMovementSpec = DEFAULT_MOVEMENT,
+    ) -> None:
+        self.max_items = max_items_per_level
+        self.rules = rules
+        self.tiles = tiles
+        self.movement = movement
+
+    def run(self, ctx: Any) -> None:
+        for stage in world_stages(ctx):
+            for level_id in stage.level_ids:
+                for lid in level_and_rooms(ctx, level_id):
+                    place_level_items(
+                        ctx, ctx.bible.levels[lid],
+                        max_items=self.max_items, rules=self.rules,
+                        tiles=self.tiles, movement=self.movement,
+                        phase_name=self.name,
+                    )
+        _stamp_metadata(ctx, self.name)
+
+
 DECOR_TYPES = ("stalactite", "crystal", "vine", "moss")
 
 
@@ -1292,7 +2112,18 @@ def write_level_manifest(ctx: Any, level: Level) -> None:
     content_hash = ctx.adapter.write_json_singleton(
         f"{level_dir}/level.json", level.model_dump(mode="json")
     )
-    stamp_provenance(ctx, level, content_hash)
+    # One Level stamp covers three generation tasks — fold all three
+    # (table-resolved) models, at the SAME per-level labels the calls
+    # resolved under (deep per-level tier keys stamp truthfully). On
+    # unwired/fake backends every part is the global model.
+    stamp_provenance(
+        ctx, level, content_hash,
+        label=f"plat:layout:{level.level_id}",
+        model_extra="+".join(
+            resolved_model(ctx, f"{task}:{level.level_id}")
+            for task in ("plat:placement", "plat:decorator")
+        ),
+    )
 
 
 def _level_brief(ctx: Any, level_id: str) -> str:
@@ -1508,6 +2339,19 @@ class LayoutStampPhase:
                 )
                 write_level_hazards(ctx, level)
                 write_level_triggers(ctx, level)
+                # Secret rooms build right after their parent (the same
+                # per-parent interleave the DAG nodes use — warning order
+                # is part of the orch==seq byte contract).
+                for room_id in level.secret_rooms:
+                    room = stamp_level_collision(
+                        ctx, room_id, index, room_of=level_id,
+                        movement=self.movement, rules=self.rules,
+                        tiles=self.tiles, graphics=self.graphics,
+                        default_width=self.width, default_height=self.height,
+                        phase_name=self.name,
+                    )
+                    write_level_hazards(ctx, room)
+                    write_level_triggers(ctx, room)
         _stamp_metadata(ctx, self.name)
 
 
@@ -1531,12 +2375,13 @@ class PlacementPhase:
     def run(self, ctx: Any) -> None:
         for stage in world_stages(ctx):
             for level_id in stage.level_ids:
-                place_level_entities(
-                    ctx, ctx.bible.levels[level_id],
-                    max_enemies=self.max_enemies, rules=self.rules,
-                    tiles=self.tiles, variants=self.variants,
-                    combat=self.combat, phase_name=self.name,
-                )
+                for lid in level_and_rooms(ctx, level_id):
+                    place_level_entities(
+                        ctx, ctx.bible.levels[lid],
+                        max_enemies=self.max_enemies, rules=self.rules,
+                        tiles=self.tiles, variants=self.variants,
+                        combat=self.combat, phase_name=self.name,
+                    )
         _stamp_metadata(ctx, self.name)
 
 
@@ -1552,9 +2397,11 @@ class DecoratorPhase:
     def run(self, ctx: Any) -> None:
         for stage in world_stages(ctx):
             for level_id in stage.level_ids:
-                level = ctx.bible.levels[level_id]
-                decorate_level(
-                    ctx, level, max_decor=self.max_decor, phase_name=self.name
-                )
-                write_level_manifest(ctx, level)
+                for lid in level_and_rooms(ctx, level_id):
+                    level = ctx.bible.levels[lid]
+                    decorate_level(
+                        ctx, level, max_decor=self.max_decor,
+                        phase_name=self.name,
+                    )
+                    write_level_manifest(ctx, level)
         _stamp_metadata(ctx, self.name)

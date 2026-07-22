@@ -24,6 +24,7 @@ Example::
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,8 @@ from canon.llm.request import LLMRequest
 
 if TYPE_CHECKING:
     from anthropic import Anthropic  # type: ignore[import]
+
+logger = logging.getLogger(__name__)
 
 
 # Default model: latest Sonnet for cost/quality balance.
@@ -67,6 +70,10 @@ class AnthropicBackend:
     """
 
     prefers_serial: bool = False
+    #: Honors ``LLMRequest.model`` — the per-agent model table
+    #: (canon.llm.client model_resolver) only applies to backends that
+    #: declare this, so fake/test backends stay untouched.
+    supports_request_model: bool = True
 
     def __init__(
         self,
@@ -87,6 +94,7 @@ class AnthropicBackend:
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
         self.last_cost: float = 0.0
+        self._unpriced_models: set[str] = set()
 
     def generate(self, request: LLMRequest) -> str:
         """Send a request to Claude and return the text response.
@@ -113,17 +121,31 @@ class AnthropicBackend:
             messages.append({"role": "assistant", "content": assistant_msg})
         messages.append({"role": "user", "content": request.user_message})
 
+        # Per-request model (the per-agent model table sets this via
+        # LLMClient's resolver); None falls back to the constructed model.
+        model = getattr(request, "model", None) or self.model
         response = self._client.messages.create(
-            model=self.model,
+            model=model,
             max_tokens=request.max_tokens,
             system=request.system,
             messages=messages,
         )
 
-        # Cost tracking
+        # Cost tracking — priced on the model that actually served the
+        # call. An unpriced model must be LOUD (once): a silent $0 makes
+        # cost reports lie.
         self.last_input_tokens = response.usage.input_tokens
         self.last_output_tokens = response.usage.output_tokens
-        pricing = PRICING.get(self.model, {"input": 0.0, "output": 0.0})
+        pricing = PRICING.get(model)
+        if pricing is None:
+            if model not in self._unpriced_models:
+                self._unpriced_models.add(model)
+                logger.warning(
+                    "No PRICING entry for model %r — its calls report as "
+                    "$0. Add it to canon.backends.anthropic.PRICING.",
+                    model,
+                )
+            pricing = {"input": 0.0, "output": 0.0}
         self.last_cost = (
             self.last_input_tokens * pricing["input"]
             + self.last_output_tokens * pricing["output"]

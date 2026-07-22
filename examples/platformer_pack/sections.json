@@ -72,6 +72,82 @@
     "framing": "vista",
     "flavor": "scattered islands over a pit or water \u2014 hop from platform to platform, the ground below is a fall or a swim, with floating water clouds to swim up through or drift across"
   },
+  "vault": {
+    "axis": "horizontal",
+    "rooms_only": true,
+    "min_len": 12,
+    "max_len": 40,
+    "intensity": "low",
+    "water": "dry",
+    "encounter": "traversal",
+    "feature_bias": {
+      "floor": 3,
+      "platform": 2,
+      "wall": 1,
+      "secret": 5,
+      "gap": 0,
+      "hazard": 0
+    },
+    "framing": "intimate",
+    "flavor": "a hidden treasure vault — a small sealed chamber stacked with riches; shelves and ledges holding secret rewards, gentle terrain with no danger; the prize is the point, make it feel like a discovery"
+  },
+  "lair": {
+    "axis": "horizontal",
+    "rooms_only": true,
+    "min_len": 12,
+    "max_len": 40,
+    "intensity": "high",
+    "water": "dry",
+    "encounter": "combat",
+    "feature_bias": {
+      "floor": 4,
+      "platform": 2,
+      "wall": 1,
+      "hazard": 1,
+      "gap": 0
+    },
+    "framing": "intimate",
+    "flavor": "a monster's den — an open arena chamber with room to fight; mostly clear floor with a few flanking platforms to jump between, built for one dangerous encounter"
+  },
+  "reef": {
+    "axis": "horizontal",
+    "water_levels_only": true,
+    "min_len": 14,
+    "max_len": 34,
+    "intensity": "medium",
+    "water": "submerged",
+    "encounter": "mixed",
+    "feature_bias": {
+      "platform": 3,
+      "ledge": 2,
+      "floor": 2,
+      "hazard": 2,
+      "wall": 1,
+      "secret": 1,
+      "gap": 0
+    },
+    "framing": "vista",
+    "flavor": "a submerged reef — coral shelves and staggered ledges to weave through, urchin thickets guarding the narrow passes; built to be SWUM, with generous open water between features"
+  },
+  "trench": {
+    "axis": "horizontal",
+    "water_levels_only": true,
+    "min_len": 14,
+    "max_len": 34,
+    "intensity": "medium",
+    "water": "submerged",
+    "encounter": "traversal",
+    "feature_bias": {
+      "wall": 4,
+      "carve": 2,
+      "floor": 2,
+      "platform": 1,
+      "hazard": 1,
+      "gap": 0
+    },
+    "framing": "intimate",
+    "flavor": "a deep ocean trench — sheer rock walls and carved channels, a drowned canyon the player swims down into and threads through; mines drift near the seabed"
+  },
   "climb": {
     "axis": "vertical",
     "min_len": 14,

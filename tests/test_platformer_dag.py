@@ -30,6 +30,7 @@ from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
 from examples.platformer_pack.dag import run_orchestrated  # noqa: E402
 from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from tests.treediff import tree_files  # noqa: E402
 
 CANON = [sys.executable, "-m", "canon.cli.main"]
 SEED = "emberfall_001"
@@ -62,12 +63,11 @@ def _resume(output_dir: Path, responder=None):
     return ctx, edits, report
 
 
-def _tree(root: Path, exclude: tuple[str, ...] = ("bible.json",)) -> list[Path]:
-    return sorted(
-        p.relative_to(root)
-        for p in root.rglob("*")
-        if p.is_file() and p.name not in exclude
-    )
+def _tree(root: Path) -> list[Path]:
+    # Shared exemptions (bible.json + the observability artifacts) live
+    # in tests.treediff — the single place the determinism contract's
+    # exclusion list is defined.
+    return tree_files(root)
 
 
 class TestOrchestratedGeneration:
@@ -99,6 +99,7 @@ class TestOrchestratedGeneration:
                 assert f"level:ashen_depths/{lid}/{step}" in done
             assert f"review:ashen_depths/{lid}" in done
         assert "review:legend" in done
+        assert "phase:plat:world_art" in done  # world splash art node
         assert "plat:manifest" in done
         assert not report.escalated and not report.blocked
 
@@ -112,14 +113,19 @@ class TestOrchestratedGeneration:
         # Only the cheap always-fresh derivations re-ran (vlm_qa is an
         # always node so the explicit flag alone decides whether it
         # judges — a no-op stamp on flagless runs like this one).
-        assert sorted(report.done) == [
-            "plat:manifest",
-            "plat:vlm_qa",
-            "review:ashen_depths/l1",
-            "review:ashen_depths/l2",
-            "review:ashen_depths/l3",
-            "review:legend",
-        ]
+        # One review render per level AND per rolled secret room — all
+        # always nodes, so a no-op resume re-derives exactly them.
+        assert sorted(report.done) == sorted(
+            [
+                "plat:manifest",
+                "plat:vlm_qa",
+                "review:legend",
+                *(
+                    f"review:ashen_depths/{lid}"
+                    for lid in _ctx2.bible.levels
+                ),
+            ]
+        )
         assert not report.escalated
 
     def test_bible_round_trips_node_state(self, tmp_path: Path) -> None:
@@ -161,7 +167,7 @@ class TestPerStepRegen:
             f"{prefix}/{step}"
             for step in (
                 "hazards", "triggers", "terrain", "background",
-                "entities", "foreground", "level",
+                "entities", "items", "foreground", "level",
             )
         }
         # The edited artifact itself is authoritative: skipped, not re-run.
@@ -250,7 +256,8 @@ class TestRegenVerb:
         assert {nid for nid in plan.marked if nid.startswith("level:")} == {
             f"level:ashen_depths/l2/{step}"
             for step in ("collision", "hazards", "triggers", "terrain",
-                         "background", "entities", "foreground", "level")
+                         "background", "entities", "items", "foreground",
+                         "level")
         }
 
     def test_mark_stale_unknown_target_names_levels(
@@ -338,11 +345,13 @@ class TestRegenVerb:
         assert any("FALLBACK" in w for w in manifest["warnings"])
 
         # A clean no-op resume (good responder, nothing marked) rebuilds
-        # the manifest; the fallback notice must still be there.
-        _resume(run)
+        # the manifest; the fallback notice must still be there — one per
+        # fallback level (secret rooms fell back too under the broken
+        # responder), no dupes.
+        ctx2, _edits, _report = _resume(run)
         manifest = json.loads((run / "manifest.json").read_text())
         fallback_notes = [w for w in manifest["warnings"] if "FALLBACK" in w]
-        assert len(fallback_notes) == 3  # one per fallback level, no dupes
+        assert len(fallback_notes) == len(ctx2.bible.levels)
         assert all("_layout_attempts.json" in w for w in fallback_notes)
 
     def test_regen_step_reruns_exactly_that_chain(self, tmp_path: Path) -> None:
@@ -356,8 +365,11 @@ class TestRegenVerb:
 
         _ctx, _edits, report = _resume(run)
         level_nodes = {n for n in report.done if n.startswith("level:")}
+        # entities → items (power-ups stage around enemies, so a placement
+        # re-roll re-places items) → the level manifest.
         assert level_nodes == {
             "level:ashen_depths/l2/entities",
+            "level:ashen_depths/l2/items",
             "level:ashen_depths/l2/level",
         }
 

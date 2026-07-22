@@ -1,0 +1,187 @@
+{
+  "level_id": "l7",
+  "stage_id": "scorched_summit",
+  "grid_width": 128,
+  "grid_height": 24,
+  "difficulty": 3,
+  "axis": "horizontal",
+  "fallback": true,
+  "whole_fallback": false,
+  "section_fallbacks": [
+    3
+  ],
+  "attempts": [
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,19)\nspawn(2)\nstairs_up(4,7)\nplatform(9,18,4)\nledge(12,15,17)\nbreakable(5,7)\npyramid(10,13)\nstairs_down(16,19)\ncarve(9,15,12,17)\nreward(14,16)",
+      "section": 0,
+      "archetype": "runway"
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,33)\ncarve(6,0,33,21)\npit(8,11)\npit(14,17)\npit(20,24)\npit(27,31)\nledge(0,3,16)\nplatform(6,18,3)\nbreakable(9,11)\nledge(12,14,15)\nplatform(15,17,3)\nplatform(18,13,3)\nledge(19,22,18)\nbreakable(20,22)\nplatform(23,16,3)\nledge(25,28,14)\nbreakable(25,26)\nplatform(29,11,3)\nledge(30,33,16)\nbreakable(30,31)\nstairs_up(6,8)\npyramid(23,26)\nwall(12,19,22)\nwall(18,19,22)\nwall(25,17,22)\nwall(29,14,22)\nhazard_strip(spike,8,11)\nhazard_strip(spike,14,17)\nhazard_strip(mine,20,24)\nhazard_strip(spike,27,31)\nplatform(9,15,2)\nplatform(21,10,2)\ncarve(0,17,5,21)\nledge(0,1,21)\nreward(26,13)\ncarve(26,10,28,13)",
+      "section": 1,
+      "archetype": "gauntlet"
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,32)\ncarve(0,0,32,21)\nwall(0,0,23)\nwall(32,0,23)\nwall(6,10,22)\nwall(7,10,22)\ncarve(6,10,8,22)\nwall(14,12,22)\nwall(15,12,22)\ncarve(14,12,16,22)\nwall(22,8,22)\nwall(23,8,22)\ncarve(22,8,24,22)\nwall(29,6,22)\nwall(30,6,22)\ncarve(29,6,31,22)\nledge(0,5,10)\nledge(8,13,13)\nledge(16,21,11)\nledge(24,31,9)\nbreakable(3,5)\nbreakable(11,13)\nbreakable(17,19)\nbreakable(25,27)\npit(6,7)\npit(14,15)\npit(22,23)\npit(29,30)\nhazard_strip(spike,6,7)\nhazard_strip(mine,14,15)\nhazard_strip(spike,22,23)\nhazard_strip(spike,29,30)\nplatform(9,16,3)\nplatform(20,14,3)\nplatform(28,12,3)\nstairs_up(0,3)\nstairs_down(30,32)\npyramid(19,23)\nwater_cloud(8,6,12,9)\nwater_cloud(20,4,24,7)\nreward(10,12)\ncarve(9,12,12,15)\nwall(9,13,22)\nwall(12,13,22)",
+      "section": 2,
+      "archetype": "cave"
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,31)\ncarve(6,0,31,21)\nwall(6,0,23)\nwall(31,0,23)\nledge(5,10,9)\nledge(11,15,9)\nledge(17,21,12)\nledge(22,27,15)\nledge(27,31,9)\nbreakable(6,9)\nbreakable(12,14)\nbreakable(18,20)\nbreakable(23,26)\npit(6,9)\npit(12,14)\npit(18,20)\npit(24,26)\nhazard_strip(spike,6,9)\nhazard_strip(mine,12,14)\nhazard_strip(spike,18,20)\nhazard_strip(spike,24,26)\nwall(10,10,22)\nwall(11,10,22)\ncarve(10,10,12,22)\nwall(16,12,22)\nwall(17,12,22)\ncarve(16,12,18,22)\nwall(21,15,22)\nwall(22,15,22)\ncarve(21,15,23,22)\nwall(27,9,22)\nwall(28,9,22)\ncarve(27,9,29,22)\nplatform(8,12,3)\nplatform(15,11,3)\nplatform(20,14,3)\nplatform(25,8,3)\nwater_cloud(7,5,11,8)\nwater_cloud(19,8,23,11)\nstairs_up(5,6)\npyramid(29,31)\ncarve(29,6,31,9)\nreward(30,5)",
+      "section": 3,
+      "archetype": "islands"
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,31)\ncarve(6,0,31,21)\nwall(6,0,23)\nwall(31,0,23)\nledge(5,10,9)\nledge(11,16,9)\nledge(17,21,12)\nledge(22,27,15)\nledge(27,31,9)\nbreakable(6,9)\nbreakable(12,14)\nbreakable(18,20)\nbreakable(23,26)\npit(6,9)\npit(12,14)\npit(18,20)\npit(24,26)\nhazard_strip(spike,6,9)\nhazard_strip(mine,12,14)\nhazard_strip(spike,18,20)\nhazard_strip(spike,24,26)\nwall(10,10,22)\nwall(11,10,22)\ncarve(10,10,12,22)\nwall(16,12,22)\nwall(17,12,22)\ncarve(16,12,18,22)\nwall(21,15,22)\nwall(22,15,22)\ncarve(21,15,23,22)\nwall(27,9,22)\nwall(28,9,22)\ncarve(27,9,29,22)\nplatform(8,12,3)\nplatform(14,11,3)\nplatform(19,11,3)\nplatform(25,8,3)\nwater_cloud(7,5,11,8)\nwater_cloud(19,8,23,11)\nstairs_up(5,6)\npyramid(29,31)\ncarve(29,6,31,9)\nreward(30,5)",
+      "section": 3,
+      "archetype": "islands",
+      "regen_round": 1
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "Looking at the error: the break is at local column 73-69=4, y=19 trying to reach local column 79-69=10, y=21. The gap between x=4 and x=10 is too wide (6 columns). I need to add a stepping platform between them.\n\nThe previous layout had ledge(5,10,9) starting at x=5. The player enters at y=8 (x 0-4) and y=21 (x 0-1). The issue is getting from the entry footing to the first island. I need to bridge the gap more carefully around x=4-10 area.\n\nLet me add a platform around x=6-8 at y=12 or so to bridge the gap, and adjust the overall layout to maintain connectivity.\n\nfloor(0,31)\ncarve(6,0,31,21)\nwall(6,0,23)\nwall(31,0,23)\nledge(5,10,9)\nledge(11,16,9)\nledge(17,21,12)\nledge(22,27,15)\nledge(27,31,9)\nbreakable(6,8)\nbreakable(12,14)\nbreakable(18,20)\nbreakable(23,26)\npit(6,9)\npit(12,14)\npit(18,20)\npit(24,26)\nhazard_strip(spike,6,9)\nhazard_strip(mine,12,14)\nhazard_strip(spike,18,20)\nhazard_strip(spike,24,26)\nwall(10,10,22)\nwall(11,10,22)\ncarve(10,10,12,22)\nwall(16,12,22)\nwall(17,12,22)\ncarve(16,12,18,22)\nwall(21,15,22)\nwall(22,15,22)\ncarve(21,15,23,22)\nwall(27,9,22)\nwall(28,9,22)\ncarve(27,9,29,22)\nplatform(7,14,3)\nplatform(14,11,3)\nplatform(19,11,3)\nplatform(25,8,3)\nwater_cloud(7,5,11,8)\nwater_cloud(19,8,23,11)\nstairs_up(5,6)\npyramid(29,31)\ncarve(29,6,31,9)\nreward(30,5)",
+      "section": 3,
+      "archetype": "islands",
+      "regen_round": 2
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,31)\ncarve(6,0,31,21)\nwall(6,0,23)\nwall(31,0,23)\nledge(5,10,9)\nledge(11,16,9)\nledge(17,21,12)\nledge(22,27,15)\nledge(27,31,9)\nbreakable(6,8)\nbreakable(12,14)\nbreakable(18,20)\nbreakable(23,26)\npit(6,9)\npit(12,14)\npit(18,20)\npit(24,26)\nhazard_strip(spike,6,9)\nhazard_strip(mine,12,14)\nhazard_strip(spike,18,20)\nhazard_strip(spike,24,26)\nwall(10,10,22)\nwall(11,10,22)\ncarve(10,10,12,22)\nwall(16,12,22)\nwall(17,12,22)\ncarve(16,12,18,22)\nwall(21,15,22)\nwall(22,15,22)\ncarve(21,15,23,22)\nwall(27,9,22)\nwall(28,9,22)\ncarve(27,9,29,22)\nplatform(7,14,3)\nplatform(13,12,3)\nplatform(14,11,3)\nplatform(19,11,3)\nplatform(25,8,3)\nwater_cloud(7,5,11,8)\nwater_cloud(19,8,23,11)\nstairs_up(5,6)\npyramid(29,31)\ncarve(29,6,31,9)\nreward(30,5)",
+      "section": 3,
+      "archetype": "islands",
+      "regen_round": 3
+    },
+    {
+      "attempt": 1,
+      "outcome": "passed",
+      "reasons": [],
+      "content": "floor(0,32)\ncarve(1,0,32,21)\nledge(0,4,9)\nledge(6,10,12)\nledge(11,15,9)\nledge(16,20,12)\nledge(21,25,8)\nledge(26,29,11)\nledge(28,32,14)\nplatform(2,15,3)\nplatform(7,18,3)\nplatform(12,14,3)\nplatform(17,16,3)\nplatform(22,12,3)\nplatform(27,17,3)\nbreakable(5,7)\nbreakable(13,15)\nbreakable(23,25)\nbreakable(29,31)\npit(5,7)\npit(13,15)\npit(23,25)\npit(29,31)\nhazard_strip(spike,5,7)\nhazard_strip(mine,13,15)\nhazard_strip(spike,23,25)\nhazard_strip(spike,29,31)\ngap(8,10)\ngap(18,21)\nstairs_up(0,2)\nstairs_down(30,32)\npyramid(10,12)\nwall(6,13,21)\nwall(16,10,21)\nwall(22,7,21)\ncarve(7,14,9,21)\ncarve(17,11,19,21)\ncarve(23,8,25,21)\nwater_cloud(8,6,12,9)\nwater_cloud(18,9,22,12)\nreward(11,13)",
+      "section": 4,
+      "archetype": "gauntlet"
+    }
+  ],
+  "stitch_rounds": [
+    {
+      "round": 0,
+      "problems": [
+        "exit at (127, 20) is not reachable from spawn (2, 21). The player gets as far as (73, 19) but cannot reach the next foothold at (79, 21): horizontal distance 6 exceeds max jump distance 4. No stepping platform fits here \u2014 open up the terrain between (73, 19) and (79, 21) (widen the passage or lower the ledge) so a path can exist. [break@73,19]"
+      ],
+      "bridges": [
+        "platform(40,19,2)",
+        "platform(40,17,2)",
+        "platform(37,18,2)",
+        "# repair climb-lane: cols 41-42 rows 16..19 (cleared 4 cell(s), 1 rung row(s)) from (41,16) toward foothold (41,18)",
+        "# repair mount-open: solid support (43..45,19) under foothold (44,18) -> one-way platform (jump up through it)",
+        "# repair doorway: cols 43..43 rows 16..18 (cleared 3 cell(s)) between (42,18) and (44,18)",
+        "# repair mount-open: solid support (44..45,16) under foothold (44,15) -> one-way platform (jump up through it)",
+        "platform(72,18,2)",
+        "platform(70,20,2)",
+        "platform(70,19,2)",
+        "platform(72,17,2)"
+      ],
+      "snaps": []
+    },
+    {
+      "round": 1,
+      "problems": [
+        "exit at (127, 20) is not reachable from spawn (2, 21). The player gets as far as (73, 19) but cannot reach the next foothold at (79, 21): horizontal distance 6 exceeds max jump distance 4. No stepping platform fits here \u2014 open up the terrain between (73, 19) and (79, 21) (widen the passage or lower the ledge) so a path can exist. [break@73,19]"
+      ],
+      "bridges": [
+        "platform(40,19,2)",
+        "platform(40,17,2)",
+        "platform(37,18,2)",
+        "# repair climb-lane: cols 41-42 rows 16..19 (cleared 4 cell(s), 1 rung row(s)) from (41,16) toward foothold (41,18)",
+        "# repair mount-open: solid support (43..45,19) under foothold (44,18) -> one-way platform (jump up through it)",
+        "# repair doorway: cols 43..43 rows 16..18 (cleared 3 cell(s)) between (42,18) and (44,18)",
+        "# repair mount-open: solid support (44..45,16) under foothold (44,15) -> one-way platform (jump up through it)",
+        "platform(72,18,2)",
+        "platform(70,20,2)",
+        "platform(70,19,2)",
+        "platform(72,17,2)"
+      ],
+      "snaps": []
+    },
+    {
+      "round": 2,
+      "problems": [
+        "exit at (127, 20) is not reachable from spawn (2, 21). The player gets as far as (73, 19) but cannot reach the next foothold at (79, 21): horizontal distance 6 exceeds max jump distance 4. No stepping platform fits here \u2014 open up the terrain between (73, 19) and (79, 21) (widen the passage or lower the ledge) so a path can exist. [break@73,19]"
+      ],
+      "bridges": [
+        "platform(40,19,2)",
+        "platform(40,17,2)",
+        "platform(37,18,2)",
+        "# repair climb-lane: cols 41-42 rows 16..19 (cleared 4 cell(s), 1 rung row(s)) from (41,16) toward foothold (41,18)",
+        "# repair mount-open: solid support (43..45,19) under foothold (44,18) -> one-way platform (jump up through it)",
+        "# repair doorway: cols 43..43 rows 16..18 (cleared 3 cell(s)) between (42,18) and (44,18)",
+        "# repair mount-open: solid support (44..45,16) under foothold (44,15) -> one-way platform (jump up through it)",
+        "platform(72,18,2)",
+        "platform(70,20,2)",
+        "platform(70,19,2)",
+        "platform(72,17,2)"
+      ],
+      "snaps": []
+    },
+    {
+      "round": 3,
+      "problems": [
+        "exit at (127, 20) is not reachable from spawn (2, 21). The player gets as far as (73, 19) but cannot reach the next foothold at (79, 21): horizontal distance 6 exceeds max jump distance 4. No stepping platform fits here \u2014 open up the terrain between (73, 19) and (79, 21) (widen the passage or lower the ledge) so a path can exist. [break@73,19]"
+      ],
+      "bridges": [
+        "platform(40,19,2)",
+        "platform(40,17,2)",
+        "platform(37,18,2)",
+        "# repair climb-lane: cols 41-42 rows 16..19 (cleared 4 cell(s), 1 rung row(s)) from (41,16) toward foothold (41,18)",
+        "# repair mount-open: solid support (43..45,19) under foothold (44,18) -> one-way platform (jump up through it)",
+        "# repair doorway: cols 43..43 rows 16..18 (cleared 3 cell(s)) between (42,18) and (44,18)",
+        "# repair mount-open: solid support (44..45,16) under foothold (44,15) -> one-way platform (jump up through it)",
+        "platform(72,18,2)",
+        "platform(70,20,2)",
+        "platform(70,19,2)",
+        "platform(72,17,2)"
+      ],
+      "snaps": []
+    },
+    {
+      "round": 3,
+      "terminal_local_fallback": 3,
+      "problems": [],
+      "bridges": [
+        "platform(40,19,2)",
+        "platform(40,17,2)",
+        "platform(37,18,2)",
+        "# repair climb-lane: cols 41-42 rows 16..19 (cleared 4 cell(s), 1 rung row(s)) from (41,16) toward foothold (41,18)",
+        "# repair mount-open: solid support (43..45,19) under foothold (44,18) -> one-way platform (jump up through it)",
+        "# repair doorway: cols 43..43 rows 16..18 (cleared 3 cell(s)) between (42,18) and (44,18)",
+        "# repair mount-open: solid support (44..45,16) under foothold (44,15) -> one-way platform (jump up through it)",
+        "platform(72,18,2)",
+        "platform(70,20,2)",
+        "platform(70,19,2)",
+        "platform(72,17,2)",
+        "# repair climb-lane: cols 73-75-76 rows 19..21 (cleared 2 cell(s), 0 rung row(s)) from (73,19) toward foothold (75,21)",
+        "# repair doorway: cols 74..74 rows 19..21 (cleared 3 cell(s)) between (73,21) and (75,21)",
+        "platform(99,20,2)",
+        "# repair mount-open: solid support (105..106,21) under foothold (105,20) -> one-way platform (jump up through it)"
+      ],
+      "snaps": []
+    }
+  ]
+}

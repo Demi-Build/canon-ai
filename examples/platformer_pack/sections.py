@@ -34,6 +34,14 @@ from pydantic import BaseModel, ConfigDict
 #: The pack's default section vocabulary — the template other games copy.
 DEFAULT_SECTIONS_PATH = Path(__file__).parent / "sections.json"
 
+#: The pack's default secret-room roll numbers (multi-room arc) — data,
+#: like sections.json: presence odds, type/verb/topology weights, dims.
+DEFAULT_SECRET_ROOMS_PATH = Path(__file__).parent / "secret_rooms.json"
+
+#: The pack's default water-level roll numbers (water arc) — per-biome
+#: odds, topology weights, waterline depth band.
+DEFAULT_WATER_LEVELS_PATH = Path(__file__).parent / "water_levels.json"
+
 #: Columns/rows two adjacent sections share so the seam is continuous (the
 #: overlap the seam summary describes; matches the handoff §1 ~6-col overlap).
 SECTION_OVERLAP = 6
@@ -123,6 +131,235 @@ class LevelPlan:
         return section_owner_of_cell(self.sections, x, y, self.axis)
 
 
+class SecretRoomConfig(BaseModel):
+    """The secret-room ROLL numbers — data (``secret_rooms.json``), so a
+    different game reshapes its secrets without code. Unknown keys ride
+    through inert (open carriage, like the archetypes)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    #: Per-difficulty presence odds: ``count_odds[str(difficulty)]`` is a
+    #: list of probabilities — entry k is the chance of rolling room k+1
+    #: GIVEN k rooms already rolled (the roll stops at the first miss).
+    count_odds: dict[str, list[float]] = {}
+    room_types: dict[str, float] = {"shortcut": 1.0, "vault": 1.0, "lair": 1.0}
+    #: Entry-verb weights. The vocabulary is pipe/door/vine; vine ships at
+    #: weight 0.0 until its climb mechanic lands (a data flip, not code).
+    entry_verbs: dict[str, float] = {"pipe": 1.0, "door": 1.0, "vine": 0.0}
+    return_topology: dict[str, float] = {"detour": 1.0, "shortcut": 1.0}
+    #: Chance a room is TWO stitched sections instead of one.
+    two_section_odds: float = 0.3
+    width_band: tuple[int, int] = (16, 28)
+    two_section_width_band: tuple[int, int] = (30, 40)
+    height_band: tuple[int, int] = (12, 14)
+    #: Per-width difficulty CAP (postmortem ticket 3): a room inherits its
+    #: parent's difficulty, but a cramped room can't carry a diff-3 challenge
+    #: — so a room whose rolled WIDTH is ≤ the entry's threshold caps its
+    #: content difficulty at the entry's value (first matching band wins,
+    #: sorted ascending; a room wider than every band is uncapped). Empty =
+    #: no cap (back-compat). Wider two-section rooms keep more bite.
+    difficulty_cap_by_width: list[tuple[int, int]] = []
+    #: Which section archetypes each room TYPE draws from.
+    archetype_pools: dict[str, list[str]] = {}
+    #: Camera hint for rooms (GraphicsSpec view preset name).
+    framing: str = "intimate"
+
+
+def load_secret_room_config(
+    path: str | Path = DEFAULT_SECRET_ROOMS_PATH,
+) -> SecretRoomConfig:
+    """Load a game's secret-room roll numbers."""
+    return SecretRoomConfig.model_validate(json.loads(Path(path).read_text()))
+
+
+DEFAULT_SECRET_ROOM_CONFIG = load_secret_room_config()
+
+
+@dataclass
+class SecretRoomSpec:
+    """One rolled secret room — everything the blueprint decided about it.
+    Recomputed deterministically wherever it's needed (layout, placement,
+    DAG expansion) — never persisted; the ``context`` field is the
+    world-map hook (stored, unused by the v1 random roll)."""
+
+    room_id: str
+    room_type: str  # shortcut | vault | lair
+    archetype_names: list[str]  # 1-2 section archetypes, in order
+    entry_verb: str  # pipe | door | vine
+    return_topology: str  # detour | shortcut
+    width: int
+    height: int
+    host_section: int  # parent section index hosting the entrance
+    difficulty: int  # the parent's rolled difficulty (contents steering)
+    context: str = ""  # world-map/theme hook — v1 stores, never reads
+
+
+class WaterLevelConfig(BaseModel):
+    """The water-level ROLL numbers — data (``water_levels.json``), the
+    secret_rooms.json pattern: a different game reshapes its seas
+    without code. Unknown keys ride through inert."""
+
+    model_config = ConfigDict(extra="allow")
+
+    #: Water rolls only from this stage number on (intro stages stay dry).
+    enabled_stage_min: int = 2
+    #: Per-biome water odds; "*" is the default for unlisted biomes —
+    #: the "seaside rolls more" steering hook.
+    biome_odds: dict[str, float] = {"*": 0.45}
+    #: Topology weights: fully_submerged (whole grid swims) vs waterline
+    #: (high water table, dry islands above).
+    topology: dict[str, float] = {"fully_submerged": 1.0, "waterline": 1.0}
+    #: Waterline depth in ROWS of water measured up from the bottom
+    #: (the flooded band is rows >= height - depth).
+    waterline_depth_band: tuple[int, int] = (5, 9)
+
+
+def load_water_level_config(
+    path: str | Path = DEFAULT_WATER_LEVELS_PATH,
+) -> WaterLevelConfig:
+    """Load a game's water-level roll numbers."""
+    return WaterLevelConfig.model_validate(json.loads(Path(path).read_text()))
+
+
+DEFAULT_WATER_LEVEL_CONFIG = load_water_level_config()
+
+
+@dataclass
+class WaterSpec:
+    """One rolled water topology — recomputed deterministically wherever
+    needed (layout, room suppression, DAG expansion); never persisted.
+    The flood OUTCOME (incl. any waterline-lowering repair) is baked
+    into collision.npz — downstream reads the grid, not this spec."""
+
+    topology: str  # fully_submerged | waterline
+    depth: int  # waterline rows of water up from the bottom (0 for full)
+
+
+def roll_water_level(
+    biome: str,
+    rng: Any,
+    config: WaterLevelConfig = DEFAULT_WATER_LEVEL_CONFIG,
+) -> WaterSpec | None:
+    """Roll whether a level is a WATER level and which topology — CODE,
+    not LLM (every number from data, deterministic in ``rng``). Stage
+    and axis gating is the CALLER's job (the identity wrapper knows the
+    level's stage number and rolled axis); this is the pure roll."""
+    odds = config.biome_odds.get(biome, config.biome_odds.get("*", 0.0))
+    if float(rng.random()) >= float(odds):
+        return None
+    topology = _weighted_pick(rng, config.topology, "waterline")
+    depth = 0
+    if topology == "waterline":
+        depth = _roll_band(rng, config.waterline_depth_band)
+    return WaterSpec(topology=topology, depth=depth)
+
+
+def _weighted_pick(rng: Any, weights: dict[str, float], fallback: str) -> str:
+    """Deterministic weighted pick over a data-driven weight table; zero
+    weights never win (how vine ships rolled-off)."""
+    entries = [(k, float(w)) for k, w in weights.items() if float(w) > 0]
+    if not entries:
+        return fallback
+    total = sum(w for _, w in entries)
+    r = float(rng.random()) * total
+    upto = 0.0
+    for name, w in entries:
+        upto += w
+        if r <= upto:
+            return name
+    return entries[-1][0]
+
+
+def _roll_band(rng: Any, band: Any) -> int:
+    lo, hi = int(band[0]), int(band[1])
+    return lo if hi <= lo else int(rng.randint(lo, hi))
+
+
+def roll_secret_rooms(
+    level_id: str,
+    difficulty: int,
+    n_sections: int,
+    rng: Any,
+    config: SecretRoomConfig = DEFAULT_SECRET_ROOM_CONFIG,
+    context: str = "",
+) -> list[SecretRoomSpec]:
+    """Roll a level's secret rooms — presence, type, archetype(s), entry
+    verb, return topology, dims, host section — CODE, not LLM (the
+    blueprint discipline: every number from data, deterministic in
+    ``rng``). ``n_sections`` is the parent blueprint's section count (the
+    host roll + shortcut-return space). ``context`` is stored on the spec
+    for the future world-map-informed roll; v1 ignores it."""
+    odds = [float(p) for p in config.count_odds.get(str(int(difficulty)), [])]
+    specs: list[SecretRoomSpec] = []
+    for k, p in enumerate(odds):
+        if float(rng.random()) >= p:
+            break
+        room_type = _weighted_pick(rng, config.room_types, "shortcut")
+        verb = _weighted_pick(rng, config.entry_verbs, "pipe")
+        topology = _weighted_pick(rng, config.return_topology, "detour")
+        two = float(rng.random()) < float(config.two_section_odds)
+        width = _roll_band(
+            rng, config.two_section_width_band if two else config.width_band
+        )
+        height = _roll_band(rng, config.height_band)
+        # Cap the room's CONTENT difficulty by its rolled width — a cramped
+        # room can't hold a diff-3 gauntlet (ticket 3). Adds no rng draw, so
+        # the roll stream stays aligned; only the stamped value moves. The
+        # presence odds above still key on the PARENT difficulty.
+        room_difficulty = int(difficulty)
+        for w_max, cap in sorted(config.difficulty_cap_by_width):
+            if width <= int(w_max):
+                room_difficulty = min(room_difficulty, int(cap))
+                break
+        pool = list(config.archetype_pools.get(room_type, [])) or ["cave"]
+        names = [pool[int(rng.randint(0, len(pool) - 1))] for _ in range(2 if two else 1)]
+        host = int(rng.randint(0, max(0, n_sections - 1)))
+        specs.append(
+            SecretRoomSpec(
+                room_id=f"{level_id}r{k + 1}",
+                room_type=room_type,
+                archetype_names=names,
+                entry_verb=verb,
+                return_topology=topology,
+                width=width,
+                height=height,
+                host_section=host,
+                difficulty=room_difficulty,
+                context=context,
+            )
+        )
+    return specs
+
+
+def plan_room(
+    spec: SecretRoomSpec,
+    vocab: dict[str, SectionArchetype] | None = None,
+) -> LevelPlan:
+    """A secret room's BLUEPRINT: 1-2 sections of the rolled archetype(s)
+    tiling the room's width — the mini-level twin of :func:`plan_level`,
+    minus the opener/checkpoint logic (rooms are small, horizontal, and
+    checkpoint-free; the exit cell doubles as the return portal)."""
+    names = list(spec.archetype_names) or ["cave"]
+    width = int(spec.width)
+    if len(names) == 1:
+        sections = [PlannedSection(names[0], max(2, width), x_off=0, y_off=0)]
+    else:
+        first = (width + SECTION_OVERLAP) // 2
+        second = width + SECTION_OVERLAP - first
+        sections = [
+            PlannedSection(names[0], first, x_off=0, y_off=0),
+            PlannedSection(
+                names[1], second, x_off=first - SECTION_OVERLAP, y_off=0
+            ),
+        ]
+    return LevelPlan(
+        axis="horizontal",
+        sections=sections,
+        checkpoint_sections=[],
+        exits=[ExitSpec(section_idx=len(sections) - 1)],
+    )
+
+
 def _roll_section_count(extent: int, difficulty: int, rng: Any) -> int:
     """How many sections the level has — chosen so each stays ~``_TARGET_ADVANCE``
     wide (WIDTH drives the count; ``difficulty`` is accepted for signature
@@ -204,6 +441,7 @@ def plan_sections(
     rng: Any,
     vocab: dict[str, SectionArchetype] = DEFAULT_VOCAB,
     axis: str = "horizontal",
+    water: str | None = None,
 ) -> list[PlannedSection]:
     """Deterministically compose a level into an ordered list of sections that
     TILE the axis with ``SECTION_OVERLAP`` shared cells and reach the far edge.
@@ -218,14 +456,36 @@ def plan_sections(
       last is the TOP (exit — the climb summit). ``y_off`` bottom-aligns
       section 0, the last reaches ``y=0``.
 
-    Deterministic in ``rng``. Returns at least one section."""
-    pool = [n for n, a in vocab.items() if a.axis == axis]
+    Deterministic in ``rng``. Returns at least one section.
+
+    ``water`` is the level's rolled WATER TOPOLOGY (water arc), or None
+    for a dry level: aquatic ``water_levels_only`` archetypes never roll
+    on dry levels, a ``fully_submerged`` level composes EXCLUSIVELY from
+    them (when any exist), and a ``waterline`` level mixes both pools."""
+    # rooms_only archetypes (vault/lair — secret-room vocabulary) never
+    # roll into a MAIN level's plan; plan_room draws them directly.
+    pool = [
+        n for n, a in vocab.items()
+        if a.axis == axis and not getattr(a, "rooms_only", False)
+    ]
+    if water == "fully_submerged":
+        aquatic = [
+            n for n in pool if getattr(vocab[n], "water_levels_only", False)
+        ]
+        pool = aquatic or pool
+    elif water is None:
+        pool = [
+            n for n in pool
+            if not getattr(vocab[n], "water_levels_only", False)
+        ]
+    # waterline: the mixed pool (dry + aquatic) stands as-is.
     if not pool:
         pool = list(vocab)
     extent = width if axis == "horizontal" else height
-    # A gentle opener only makes sense horizontally (the runway is a run-up);
-    # a vertical level's first section carries the spawn + ground floor instead.
-    opener = "runway" if (axis == "horizontal" and "runway" in vocab) else pool[0]
+    # A gentle opener only makes sense horizontally (the runway is a run-up)
+    # and only when the pool actually offers one — a fully-submerged level
+    # opens on an aquatic section instead.
+    opener = "runway" if (axis == "horizontal" and "runway" in pool) else pool[0]
 
     n = _roll_section_count(extent, difficulty, rng)
     names = [opener] + [
@@ -255,11 +515,14 @@ def plan_level(
     rng: Any,
     vocab: dict[str, SectionArchetype] = DEFAULT_VOCAB,
     axis: str = "horizontal",
+    water: str | None = None,
 ) -> LevelPlan:
     """Roll a level's full BLUEPRINT: the sections (``plan_sections``) plus the
     derived checkpoint assignment and the exits list. Deterministic in ``rng``
-    so the placement phase recomputes the same plan without a persisted field."""
-    sections = plan_sections(width, height, difficulty, rng, vocab, axis)
+    so the placement phase recomputes the same plan without a persisted field.
+    ``water`` steers the archetype pool (water arc) — every recompute site
+    must pass the same rolled topology."""
+    sections = plan_sections(width, height, difficulty, rng, vocab, axis, water)
     n = len(sections)
     return LevelPlan(
         axis=axis,

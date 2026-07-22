@@ -73,6 +73,11 @@ ENV/
 docs/
 docs/*
 
+# Generated platformer output trees — never source. Prefer --output-dir OUTSIDE
+# the repo; plat_slice_output is the runner default that lands here otherwise
+# (a dropped `\` on --output-dir is the foot-gun that committed one before).
+/plat_*/
+
 # OS
 .DS_Store
 Thumbs.db

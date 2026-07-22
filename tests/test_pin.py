@@ -274,6 +274,65 @@ class TestPlayerArtifact:
         assert "player" in report.user_edited
 
 
+class TestSplashArtifact:
+    """The world splash card is LEAF art addressed as ``splash`` — the
+    fields live on World, but neither pinning nor edit-adoption ever
+    routes through the ``world`` id (whose descendant set is the whole
+    game)."""
+
+    def test_splash_is_tracked_and_pinnable_as_leaf(
+        self, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "run"
+        ctx = _fresh(out, tmp_path)
+        world = ctx.bible.world
+        assert world is not None and world.splash_path == "splash/world.png"
+        import hashlib
+
+        actual = "sha256:" + hashlib.sha256(
+            (out / world.splash_path).read_bytes()
+        ).hexdigest()
+        assert world.splash_hash == actual
+        assert "splash" in pinnable_ids(ctx.bible)
+        assert "world" not in pinnable_ids(ctx.bible)
+
+    def test_pinned_splash_survives_reroll(self, tmp_path: Path) -> None:
+        out = tmp_path / "run"
+        ctx = _fresh(out, tmp_path)
+        rel = ctx.bible.world.splash_path
+        (out / rel).write_bytes(SENTINEL)
+        detect_edits(ctx.bible, out)
+        _pin(ctx.bible, "splash")
+        mark_stale(ctx.bible, ["phase:plat:world_art"])
+        ctx.bible.persist(out / "bible.json")
+
+        _ctx2, report = _resume(out, tmp_path)
+        assert "phase:plat:world_art" in report.done
+        assert (out / rel).read_bytes() == SENTINEL
+
+    def test_hand_edited_splash_is_a_leaf_edit(self, tmp_path: Path) -> None:
+        # THE cascade regression guard: a tweaked card adopts on
+        # ``splash`` alone — zero stale descendants, ``world`` untouched
+        # (a resume after a splash touch-up must regenerate nothing).
+        out = tmp_path / "run"
+        ctx = _fresh(out, tmp_path)
+        (out / ctx.bible.world.splash_path).write_bytes(SENTINEL)
+        report = detect_edits(ctx.bible, out)
+        assert report.user_edited == ["splash"]
+        assert report.stale == []
+
+    def test_splash_is_a_regen_target(self, tmp_path: Path) -> None:
+        # "splash" lives in no entity's parents and no node id — it is
+        # addressable because hash-tracked file ids join mark_stale's
+        # known set; the phase re-runs via owns() (initial_skips).
+        out = tmp_path / "run"
+        ctx = _fresh(out, tmp_path)
+        plan = mark_stale(ctx.bible, ["splash"])
+        assert plan.marked == ["splash"]
+        with pytest.raises(KeyError, match="unknown regen target"):
+            mark_stale(ctx.bible, ["splish"])
+
+
 class TestPersistence:
     def test_pins_survive_persist_and_resume(self, tmp_path: Path) -> None:
         out = tmp_path / "run"

@@ -26,11 +26,24 @@ class PlayerMovementSpec(BaseModel):
     # run_speed; a standing/walk jump clears ~jump_width, a full running jump
     # ~7. All of it is data — retune per game.
     walk_speed: float = 5.0  # cells / second — target with RUN not held
-    ground_accel: float = 6.5  # cells/s^2 toward target on the ground
+    ground_accel: float = 10.0  # cells/s^2 building toward target on the ground
     ground_friction: float = 40.0  # cells/s^2 decel to 0 when idle on ground
-    air_accel: float = 3.0  # cells/s^2 air control (weak: speed is built on ground)
+    # Separate DECEL when the held direction OPPOSES vx — a crisp turnaround
+    # instead of the mushy single-accel skid (build-up stays gentle, braking
+    # is decisive). The air-brake is 0.3x this (the only thing that sheds air
+    # speed). Old manifests without the field fall back to ground_accel.
+    brake_accel: float = 17.0  # cells/s^2 when input opposes momentum
+    air_accel: float = 6.0  # cells/s^2 air control (build-up continues in the air)
     air_friction: float = 0.0  # in-air horizontal damping (0 = pure momentum)
-    run_up_cells: float = 5.0  # runway to reach run_speed from rest (feel/doc)
+    run_up_cells: float = 3.2  # runway to reach run_speed from rest (feel/doc)
+
+    # Coyote time: a jump-forgiveness window (seconds) after running off a
+    # ledge during which the jump input still fires. Play-feel ONLY — the
+    # consumers become MORE forgiving than the reachability sim models,
+    # never less, so validation is untouched. Both surfaces arm the latch
+    # off the same deterministic foot probe (never the on_ground flag,
+    # whose sub-cell flicker diverges between them). 0 disables.
+    coyote_s: float = 0.08
 
     # In-volume modifiers (water/lava/mud) moved to the tile registry in
     # 3b — they are PER-VOLUME data (tile params on tileset slots), read
@@ -107,3 +120,17 @@ def max_dx_for_rise(movement: PlayerMovementSpec, rise: int) -> int:
     return min(
         movement.jump_width, int(movement.run_speed * t_land * COMFORT)
     )
+
+
+def run_jump_width(movement: PlayerMovementSpec) -> int:
+    """Columns a FULL running jump clears on the flat, from the same
+    ballistic model the reachability simulation integrates: airtime
+    ``t = 2·v0/g`` (up and back down to the takeoff row) at ``run_speed``,
+    shaved by ``COMFORT`` like every other promised number, then rounded
+    to the nearest column. This is the prompt vocabulary for the wide
+    run-and-jump gap — it replaces the hardcoded '~6' literal, so a
+    per-level movement override (e.g. a low-gravity finale) reshapes the
+    advertised envelope instead of lying about it. Defaults land on the
+    familiar 6."""
+    t_land = 2.0 * jump_speed(movement) / movement.gravity
+    return round(movement.run_speed * t_land * COMFORT)

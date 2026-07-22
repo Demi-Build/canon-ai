@@ -1,0 +1,24 @@
+{
+  "_doc": "ART LANE: pre-rendered / dithered 16-bit (the Donkey Kong Country look). Glossy 3D-baked-to-sprite forms with heavy dithering. This file IS the style guide — edit tokens/palette knobs to tune the lane; --graphics <this file> switches the whole game onto it.",
+  "lane": "prerendered_16bit",
+  "color_depth": "16-bit/256",
+  "aesthetic_tokens": [
+    "pre-rendered 3D baked to 16-bit sprites",
+    "glossy rounded CGI forms",
+    "heavy ordered dithering",
+    "dramatic rim lighting and specular highlights",
+    "dark moody backgrounds with vivid foreground subjects",
+    "Donkey-Kong-Country-era production feel"
+  ],
+  "art_style": "",
+  "base_cell": 16,
+  "cells_per_tile": 2,
+  "player_footprint": [4, 4],
+  "tile_px": 32,
+  "render_filter": "crisp",
+  "gen_px": 768,
+  "posterize_levels": 32,
+  "backdrop_bands": 3,
+  "view_cells": 20,
+  "actor_scale": 1.4
+}

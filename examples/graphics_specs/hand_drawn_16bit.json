@@ -1,0 +1,24 @@
+{
+  "_doc": "ART LANE: hand-drawn 16-bit (the Super Mario World look). Bold flatter shading, clean outlines, a hand-authored feel. This file IS the style guide — edit tokens/palette knobs to tune the lane; --graphics <this file> switches the whole game onto it. base_cell is the ART density root (physics untouched); freeze it before batch-generating (pixel art cannot be upscaled).",
+  "lane": "hand_drawn_16bit",
+  "color_depth": "16-bit/256",
+  "aesthetic_tokens": [
+    "hand-drawn 16-bit console pixel art",
+    "bold clean outlines",
+    "flat cel shading with simple two-step highlights",
+    "bright saturated cartoon palette",
+    "chunky readable silhouettes",
+    "hand-authored feel, no dithering"
+  ],
+  "art_style": "",
+  "base_cell": 16,
+  "cells_per_tile": 2,
+  "player_footprint": [4, 4],
+  "tile_px": 32,
+  "render_filter": "crisp",
+  "gen_px": 512,
+  "posterize_levels": 16,
+  "backdrop_bands": 2,
+  "view_cells": 20,
+  "actor_scale": 1.4
+}

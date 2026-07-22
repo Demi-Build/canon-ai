@@ -1,0 +1,12 @@
+{
+  "enabled_stage_min": 2,
+  "biome_odds": {
+    "*": 0.65,
+    "seaside": 0.85,
+    "coast": 0.85,
+    "swamp": 0.75,
+    "peaks": 0.5
+  },
+  "topology": {"fully_submerged": 1.0, "waterline": 1.0},
+  "waterline_depth_band": [5, 9]
+}

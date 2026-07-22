@@ -227,6 +227,55 @@ from containment by design; the generic spellings `volume_wall`/
 `water` tile is offered those (with its own liquid) instead. Airy
 jump-gauntlet levels are encouraged to skip water entirely.
 
+### Water LEVELS — `water_levels.json`
+
+Beyond water features, a whole level can roll a **water topology**
+(stage 2+, horizontal levels; per-biome odds are data — a seaside biome
+rolls more than peaks): **fully submerged** (every open cell floods —
+the player swims from frame 1, the level composes from aquatic
+`reef`/`trench` section archetypes, seabed `urchin`/`mine` hazard
+strips replace ground gauntlets) or **waterline** (a high water table
+floods the bottom rows; dry islands poke out and the player moves in
+and out of the water). The flood is a deterministic CODE pass after the
+level validates dry — markers stay validated, then a swim-reachability
+check confirms every exit/checkpoint/entrance survived (a waterline
+that strands an island lowers itself row by row). Items float in water
+(collected by swimming through them); item boxes stay on dry land.
+Secret rooms don't roll on fully-submerged levels (pipe/door presses
+are dry-land verbs); waterline levels keep them, entrances on dry
+ground.
+
+**Water fauna** (`enemy_water_policy: "seabed"`, the default): the same
+world roster serves wet levels — swimmers swim (styles `within` /
+`surface` / `float` / **`cruise`**, the last an unbounded Cheep-Cheep
+that crosses the whole body of water and turns only at walls), flyers
+sit water levels out, and LAND enemies **wade**: one posted on a
+submerged flat patrols its underwater beat, but a land enemy placed on
+dry ground never walks into a pool. Free swimming v1 — no breath meter;
+currents/flow are a future mechanic.
+
+### Combat picks — per-level rules, hoppers, hold-bounce
+
+**Per-level rule twists** (`rule_overrides.json`): the stage plan may
+flag one level with a rule/movement override where its brief begs for
+it — a no-drop-through cave, a faster-chase gauntlet, a **low-gravity**
+vault. The vocabulary is CLOSED data (allowed keys + numeric bands);
+code validates fail-closed (unknown keys and out-of-band values are
+dropped loudly), the winners persist on the level (`level.json`
+`rules_overrides` / `movement_overrides`), secret rooms inherit their
+parent's, and — the load-bearing part — **a level with movement
+overrides is generated and VALIDATED under its own physics** (the
+reachability sim runs with the overridden spec). Both play surfaces
+re-derive effective rules/movement per level.
+
+**Hoppers**: a jumping locomotion in the archetype roll — grounded it
+ticks a hop cadence (`hop_height`/`hop_period_s`, rolled per
+definition), then arcs ballistically over gaps and hazard strips,
+bonks on ceilings, and lands anchor-only on support. Dry land only (no
+wading). **Hold-jump bounce**: stomping with jump HELD is a full jump
+off the enemy's head (chainable by skill); tapping gives the damped
+`stomp_bounce_factor` hop.
+
 ### Enemy variants — `variants.json` (`--variants`)
 
 Named upgrades a placement opts into (`{"variant": "champion"}`):
@@ -234,7 +283,10 @@ Named upgrades a placement opts into (`{"variant": "champion"}`):
 definition's size), `visual` (`outline` / `scale` / `outline_scale`),
 `behavior` overrides. A champion guarding a chokepoint is the pack's
 mini-boss story; the `relentless` variant overrides the chase leash —
-the ONE enemy per level that never gives up.
+the ONE enemy per level that never gives up; the `emberborn` variant is
+**hazard-immune** (an occupancy exemption, not a damage stat): it may
+be POSTED standing on a spike strip and patrols across hazard tiles —
+the placement prompt lists the footed hazard cells it may take.
 
 **Behavior doctrine** (enforced in both play surfaces): every mover patrols
 its beat. **Aggro is an orthogonal behavior tier** (not an enemy type): an
@@ -261,6 +313,36 @@ contact damage looked up by size tier (small 4–6 hp / 1 heart … big 13–18 
 reshape your bestiary; sizes are real — a 2.0 body needs two supported
 columns and two rows of clearance at placement, collides at full size,
 and renders at full size everywhere.
+
+### Items — `schemas/item.json` (`--num-items`)
+
+The WORLD ITEM POOL (like the enemy pool): each definition rolls a
+mechanical **kind** from the closed set `coin` / `heal` / `shield`
+(absorbs one hit, then breaks) / `double_jump` / `run_boost` (both timed
+— `duration_s` rolls from a band you tune), plus rarity and per-kind
+params; the LLM authors only name + flavor, themed to the world. Slots
+0/1 are **guaranteed** coin + heal so every world has its currency and
+its heal; the rest roll free (`--num-items`, default 5). Definitions
+land as reviewable `item/<id>.json` artifacts (`item:<id>` regen
+targets) a developer can hand-evolve like any canon output.
+
+An LLM **item-placement pass** runs after enemy placement with the
+finished level in view: coins are FREQUENT and guide the route (trails,
+arcs over gaps, side-area markers), power-ups stage around enemy
+clusters, premium items land at the layout's secret `reward()` alcoves,
+and **item boxes** float in open air. The validator is fail-closed —
+every item must be collectible with the BASE moveset (snap/drop
+repairs), and a box that would wall off the path is dropped by a
+reachability re-check. Box cells ride in `items.json` as an overlay
+(collision files never carry them); both play surfaces open a box by
+**head-bump from below or stomp** — it flips to a spent block and its
+item pops out and auto-collects. Pickups: coins count on the HUD, heals
+restore a heart, and power-ups fill ONE held slot (a new pickup
+replaces it, death clears it): the shield absorbs one hit then breaks,
+double-jump grants one mid-air jump, run-boost raises top speed — the
+timed ones tick down on the HUD. Collected items stay collected across
+checkpoint respawns. The reachability validator never assumes a
+power-up: every level stays beatable barehanded.
 
 ### Level shapes — `schemas/level_layout.json`
 
@@ -308,15 +390,93 @@ placeholder for a future item system). Deterministic tools stamp the DSL
 to the collision grid, validate reachability with the run-up-momentum
 jump simulation, and repair computable breaks (bridge/snap) in code.
 
-### Graphics — `--graphics <spec.json>`
+### Models — `models.json` (`--models`)
 
-Target resolution and art direction as data: `tile_px`, `art_style`
-(the diffusion prompt's style clause), `render_filter`
-(`crisp`=nearest / `smooth`=linear), `view_cells` (camera framing —
-zoom at a stable window, never window resizing), `actor_scale` (sprite
-overdraw), per-level view presets (`intimate`/`vista`). Two shipped
-examples prove the swap: `examples/graphics_specs/snes_pixel.json` and
-`rendered_hd.json`.
+Which Claude serves which agent (PRD §9.1 realized as data): `model_tiers`
+maps tier names to model ids (the single place a model bump lands) and
+`agent_tiers` assigns a tier per phase-label prefix — validator-backstopped
+agents (`plat:enemies`, `plat:placement`, `plat:decorator`) ride `cheap`,
+structural ones (`plat:world/stage/style/layout`) ride `mid`, `top` is
+opt-in per node. Applies only to real text backends (`fake` ignores models
+entirely, so $0 runs are untouched); an explicit `--model` without
+`--models` overrides the default table. Each artifact's provenance stamps
+the model that actually authored it, so changing one agent's tier
+invalidates exactly that agent's artifacts on a `regen`.
+
+### Graphics — `--graphics <spec.json>`: the art-template system
+
+Art direction is DATA. A `GraphicsSpec` JSON is a **style lane** — the
+full recipe for a look: `lane` name, `aesthetic_tokens` (the prompt's
+style clauses), `color_depth`, `base_cell` (the ART density root in
+px — physics never moves), `cells_per_tile`/`tile_px`,
+`player_footprint` (art canvas in base cells over the unchanged
+hitbox — chunky canvas, tight hitbox), `render_filter`
+(`crisp`=nearest+grid-snap / `smooth`=linear), `posterize_levels`,
+`view_cells` camera framing, `actor_scale`. Three shipped lanes in
+`examples/graphics_specs/`:
+
+| lane | look | density |
+|---|---|---|
+| `hand_drawn_16bit.json` | bold flat shading, clean outlines (SMW) | 16px cells, crisp |
+| `prerendered_16bit.json` | glossy 3D-baked, dithered (DKC) | 16px cells, crisp |
+| `modern_hd.json` | smooth painterly HD | 32px cells, smooth |
+
+Swapping `--graphics` restyles every generated asset; collision bytes
+are lane-independent (tested). Editing the JSON IS restyling the game
+— no code.
+
+**Backends** (all behind one capability-declared interface, graceful
+degradation, fake twins for $0): fal/nano-banana (default — general
+models drift off-grid, so crisp lanes get a MANDATORY `grid_snap`
+post-process), Retro Diffusion (`--image-backend retro`, `RD_API_KEY`,
+native pixel grids), PixelLab (`--image-backend pixellab`,
+`PIXELLAB_SECRET`). `--image-model` / `--image-edit-model` pick models
+per leg.
+
+**Sample → lock → batch** (see `ART_SAMPLING.md` for the full
+walkthrough + costs): generate ONE exemplar through every wired
+backend (`--art-sample player|tile:<name>|palette
+--sample-backends fake,retro,...` — contact sheet + an in-context
+grid-drop check), judge with your eyes, freeze the winner as an
+approved `art_lock.json`, then batch generation consumes the lock
+(`--art-lock <path>`; refuses non-approved locks; failures land in
+`review/art_report.json` with targeted regen commands — never a
+silent loop).
+
+**Autotiling**: the floor ships 16 code-resolved variants (a 4-bit
+exposure mask over solid neighbors) with mean-preserving edge shading
+— visible even on the $0 placeholder sheet — plus a
+`tileset/<stage>/autotile.json` manifest (bitmask → sheet region), the
+input for a future Godot TileMap exporter. **Backdrops** are layered:
+far/mid scenery bands plus a foreground occluder band (depth > 1)
+drawn in front of gameplay; a seam QA check verifies horizontal
+tiling. **Animation** ships as a deterministic packed atlas
+(`atlas.json`, bottom-center registration, loop modes + per-frame
+durations — all hand-editable); player states cover
+idle/walk/jump/fall/land/skid, hoppers add jump; `asymmetric: true`
+on a definition generates true left-facing sheets. **Effects**:
+dust/splash/sparkle one-shot VFX (Godot) + `canvas_tint` /
+`player_light` / `glow` lighting kinds rollable per stage.
+
+**Readability**: palettes are clamped at birth (swimmable water never
+wears hazard hues — damaging lava keeps them; enemy/item swatches
+clear every stage background by 40 luminance), water draws as a
+translucent overlay (`water_alpha` in the graphics spec, 0.55) so
+terrain reads through volumes, and QA runs an ADVISORY
+`composite_contrast` check — it samples the skinned render behind
+every placed enemy/item and notes camouflage risks in
+`qa_report.json` + the logs. Advisory means advisory: it never blocks
+a build, never flips review status, never becomes a manifest warning.
+
+**Provenance**: every generated PNG carries deterministic `canon:*`
+tEXt chunks (asset id, backend/model, seeds, graphics digest — no
+timestamps, byte-determinism is a feature); `visible_watermark: true`
+in a graphics spec adds a small corner mark (off by default). A
+durable C2PA layer is deliberately deferred (zero-dependency posture);
+`c2pa-python` is the named upgrade path. **Splash**: a generated
+studio card (`splash/world.png`) boots the Godot build —
+card → hold → fade → world map, any key skips, and a tree without one
+boots straight to the map.
 
 ---
 
@@ -369,6 +529,37 @@ placement and in both play surfaces.
 
 ---
 
+## Secret rooms — `secret_rooms.json`
+
+A level MAY hide **secret sub-rooms**: mini-levels (own small grid, own
+full file set at `level/<stage>/<id>r<k>/`) built by the SAME section
+machinery (1–2 sections) and validated entry→exit like any level.
+Everything about them is CODE-ROLLED in the blueprint from
+`secret_rooms.json` — presence odds per difficulty, room **type**
+(`shortcut` = a light skirmish that pays in coins, `vault` = a
+no-enemies treasure chamber stacked with premium loot, `lair` = one
+dangerous champion-grade encounter with a prize), **entry verb**
+(`pipe` = press Down, `door` = press Up; `vine` ships at weight 0 until
+its climb mechanic lands), **return topology** (`detour` = come back
+where you entered, `shortcut` = re-emerge further along the level), and
+dims. The spec carries a `context` hook so the world map can inform the
+roll later; v1 rolls randomly.
+
+Entrances are **stitcher-placed** (like exits and checkpoints): a
+reachable standing cell in the blueprint's host section gets a
+`room_entrance` trigger (and a pipe/door prop on both play surfaces);
+the room's exit cell doubles as its return portal. In play, the switch
+**carries everything** — timer, hearts, coins, the held power-up mid
+countdown — and each map remembers what you did to it (collected items,
+spent boxes, crumbled floors, claimed checkpoints) for the return trip.
+Dying inside a room ejects you to the parent's last checkpoint with
+normal death semantics. Rooms are invisible on the world map, get their
+own review renders and QA rows, and regen like any level
+(`canon regen <bible> l6r1 --mark-only`). Base-moveset beatability is
+unchanged — rooms are optional secrets, never on the required path.
+
+---
+
 ## Checkpoint flags & the exit goal
 
 Every level shows its gameplay props: a **checkpoint flag** per trigger
@@ -389,9 +580,13 @@ becomes real with its draw + trigger point in both play surfaces.
 ## VLM QA — a vision judge over the review renders
 
 Every level already ships a **block render** (analytic truth) and a
-**skinned render** (what the player sees). With an explicit flag, a
-vision model judges each pair (plus the palette and roster legend) at
-the very end of the pipeline:
+**skinned render** (what the player sees). QA also crops two
+**play-scale views** from the skinned render — the camera's actual
+`view_cells x view_rows` window around the spawn and the exit
+(`review/<stage>/<lid>_play_{spawn,exit}.png`) — so readability is
+judged at the zoom the player plays at, not just zoomed out. With an
+explicit flag, a vision model judges each level's five images (plus the
+palette and roster facts) at the very end of the pipeline:
 
 ```bash
 --vlm-backend none|fake|anthropic    # default none = no QA
@@ -420,8 +615,14 @@ VLM judges only what code can't: does it *read* right.
 
 `--vlm-backend anthropic` is PAID (`ANTHROPIC_API_KEY`, fail-fast);
 `fake` exercises the entire loop deterministically at $0, including one
-canned failing verdict so the warning path stays covered. v1 judges on
-every flagged run (no staleness tracking yet).
+canned failing verdict so the warning path stays covered.
+
+**Re-judging is staleness-aware.** Each report entry records sha256
+hashes of exactly what the judge saw (`judged_inputs`); a flagged
+re-run re-judges only levels whose renders (or the judge model)
+actually changed — unchanged verdicts carry from the on-disk report
+byte-identically, at zero VLM cost. The carry is logged, never written
+into the report, so reports stay deterministic.
 
 ---
 
@@ -451,12 +652,17 @@ persisted — pass the same ones, *especially* `--image-backend fal` if
 your art is real; resuming real art without it regenerates placeholder
 tiles over your paid tilesheet).
 
-**Failure forensics.** If every layout attempt for a level fails
-validation, the level ships a guaranteed-valid flat fallback, the
-manifest carries a warning, and
-`review/<stage>/<id>_layout_attempts.json` records every attempt with
-its content and every rejection reason — a re-roll that succeeds deletes
-the trace.
+**Failure forensics.** Most geometry mistakes never fail a level at all —
+the stamp auto-repairs them (out-of-bounds coordinates clamp, hazards over
+gaps become pits, spilling water becomes a free feature, …) and the
+whole-level repair escalates (bridges, mounts, doorways, climb lanes,
+exit relocation), each fix recorded in the run log. When a section still
+exhausts its attempts, it (then, if needed, its seam neighbours) falls
+back to a guaranteed-valid stretch; a whole-level fallback is the last
+resort. Whenever anything failed or fell back,
+`review/<stage>/<id>_layout_attempts.json` records every section attempt
+with its rejection reasons AND every whole-level stitch round's residual
+problems (`stitch_rounds`) — a fully-clean re-roll deletes the trace.
 
 ---
 
@@ -488,6 +694,39 @@ produces the same bytes as the sequential path (minus `bible.json`).
 This is load-bearing: tests diff whole trees, and any nondeterminism is
 a bug.
 
+Three observability files are the documented exemptions (they carry
+wall-clock timestamps or scheduler-shaped call ordering; nothing in the
+pipeline reads them back): `bible.json` (`generated_at` + node state),
+`.canon/log.jsonl`, and `generation_stats.json`.
+
+## Observability
+
+Every run appends a structured step log to `.canon/log.jsonl` — one
+JSON event per line (`run_start`, `node_start`/`node_done`/
+`node_failed`, `node_skipped` with its reason on resumes, `run_end`
+with the rollup) — and snapshots `generation_stats.json` at manifest
+time: LLM calls, tokens, and cost per phase label (`plat:layout:l5:s2`
+granularity), plus image/audio counters. The stats feed `canon
+estimate`'s calibration; the log is Cradle's (and your) first stop for
+"what did this run actually do".
+
+**Forecast before you pay.** `canon estimate` walks the same DAG a run
+would execute — including the exact resume/skip logic — and prices the
+would-run nodes through `models.json` + `cost_model.json` (every number
+is data you can edit). It never writes: regen targets are marked on a
+copy. With no bible yet it forecasts a full run from scratch
+(`fresh_plan` in cost_model.json); on a tree carrying real
+`generation_stats.json` actuals it calibrates tokens from them instead
+of the defaults:
+
+```bash
+CANON_PLAT_OUT=~/my_real_game uv run python -m canon.cli.main \
+  estimate ~/my_real_game/bible.json l5 enemy:tide_skitter \
+  --pipeline examples.platformer_pack.dag:cli_ctx_factory \
+  --phases examples.platformer_pack.dag:cli_phases_factory \
+  --estimator examples.platformer_pack.estimate:estimate_run
+```
+
 ## Runner flags reference
 
 | Flag | Default | Purpose |
@@ -500,7 +739,7 @@ a bug.
 | `--num-enemies` | 7 | WORLD enemy pool size (ecology) |
 | `--engine json\|godot` | `json` | godot = playable project export |
 | `--orchestrate` | off | DAG scheduling, resume, per-step regen |
-| `--rules / --tiles / --variants / --combat / --graphics` | pack templates | your game's data files |
+| `--rules / --tiles / --variants / --combat / --graphics / --models` | pack templates | your game's data files |
 | `--image-backend none\|fake\|fal\|local` | `none` | tile/sprite/backdrop art |
 | `--image-model <id>` | backend default | diffusion model override |
 | `--music-backend none\|fake\|lyria` | `none` | stage theme |

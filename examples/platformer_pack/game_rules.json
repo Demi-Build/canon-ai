@@ -1,15 +1,17 @@
 {
   "_doc": "Per-game behavior policy (PRD Appendix E.7). Known keys are enforced by validators/prompts/play surfaces; unknown keys are carried into manifest.json but INERT until enforcement code exists. Copy this file to make a different game and point the runner at it with --rules.",
   "water_containment": "contained",
-  "enemy_water_policy": "swimmers_only",
+  "enemy_water_policy": "seabed",
   "platform_drop_through": true,
   "break_delay_s": 0.6,
-  "variant_caps": { "elite": 1, "champion": 1, "relentless": 1 },
+  "variant_caps": { "elite": 1, "champion": 1, "relentless": 1, "emberborn": 1 },
   "checkpoint_enemy_reset": true,
+  "death_linger_s": 0.5,
   "spawn_grace": "until_move",
   "rarity_caps": { "rare": 1, "uncommon": 2 },
   "enemy_sight": {
     "patroller": { "fov": "forward", "vband": 2 },
+    "hopper": { "fov": "forward", "vband": 3 },
     "swimmer": { "fov": "omni" },
     "flyer": { "fov": "hemisphere" },
     "sentry": { "fov": "none" }

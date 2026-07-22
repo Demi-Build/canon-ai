@@ -32,6 +32,7 @@ from canon.bible.platformer import (  # noqa: E402
     Backdrop,
     BossDefinition,
     EnemyDefinition,
+    ItemDefinition,
     Level,
     PlayerDefinition,
     Stage,
@@ -415,6 +416,7 @@ class Bible(BaseModel):
     levels: dict[str, Level] = Field(default_factory=dict)
     enemy_definitions: dict[str, EnemyDefinition] = Field(default_factory=dict)
     boss_definitions: dict[str, BossDefinition] = Field(default_factory=dict)
+    items: dict[str, ItemDefinition] = Field(default_factory=dict)
     tilesets: dict[str, Tileset] = Field(default_factory=dict)
     backdrops: dict[str, Backdrop] = Field(default_factory=dict)
     audio: dict[str, StageAudio] = Field(default_factory=dict)

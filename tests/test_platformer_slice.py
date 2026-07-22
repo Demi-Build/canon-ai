@@ -42,6 +42,7 @@ from examples.run_platformer_slice import (  # noqa: E402
     _REFERENCE_DIMS,
     make_fake_responder,
 )
+from tests.treediff import assert_trees_byte_identical, tree_files  # noqa: E402
 
 W, H = 48, 16
 #: Schema-rolled dims per level (level_layout.json lookups).
@@ -189,6 +190,27 @@ class TestValidators:
             near.grid, near.spawn, near.exit, DEFAULT_MOVEMENT
         )
 
+    def test_run_jump_width_derives_from_physics(self) -> None:
+        """Ticket 4: the running-jump clearance the prompts advertise is
+        DERIVED from the same ballistic model the simulation integrates
+        (airtime at run_speed, COMFORT-shaved) — not a hardcoded literal.
+        Default physics keeps the familiar 6; lighter gravity hangs the
+        player longer and widens it, heavier gravity shrinks it."""
+        from examples.platformer_pack.movement import (
+            PlayerMovementSpec,
+            run_jump_width,
+        )
+
+        assert run_jump_width(DEFAULT_MOVEMENT) == 6
+        low_g = PlayerMovementSpec.model_validate(
+            {**DEFAULT_MOVEMENT.model_dump(), "gravity": 20.0}
+        )
+        heavy = PlayerMovementSpec.model_validate(
+            {**DEFAULT_MOVEMENT.model_dump(), "gravity": 60.0}
+        )
+        assert run_jump_width(low_g) > 6  # the low-gravity finale case
+        assert run_jump_width(heavy) < 6
+
     def test_validator_approved_jumps_land_in_harness_physics(self) -> None:
         """Validator ↔ play-surface PARITY, proven by simulation: replay
         the pygame/Godot integration — WITH run-up momentum (the old
@@ -250,6 +272,46 @@ class TestValidators:
         # dead-stop rise-1 hop at dx 1 (the minimum the prompts rely on —
         # 'each foothold within jump height AND close horizontally').
         assert simulate(1, 1, 0.0)
+
+    def test_brake_and_air_momentum_rules(self) -> None:
+        """The reworked momentum (ticket 1), mirroring the byte-identical
+        platformer_play.py / main.gd step: a REVERSAL brakes at brake_accel
+        (a decisive turnaround, quicker than the gentle build-up); air control
+        builds toward the target but NEVER sheds same-direction overspeed
+        (momentum carries); an air reversal is the one exception — a WEAK
+        air-brake at 0.3x."""
+        m = DEFAULT_MOVEMENT
+        dt = 1.0 / 60.0
+        assert m.brake_accel > m.ground_accel  # braking is decisive
+        assert m.air_accel < m.ground_accel  # speed is built on the ground
+
+        def step(vx: float, dx: int, gmove: bool) -> float:
+            desired = dx * m.run_speed
+            if vx * dx < 0.0:
+                rate = (m.brake_accel if gmove else 0.3 * m.brake_accel) * dt
+            elif gmove:
+                rate = m.ground_accel * dt
+            elif abs(vx) < abs(desired):
+                rate = m.air_accel * dt
+            else:
+                rate = 0.0
+            if rate:
+                vx = (
+                    min(vx + rate, desired) if vx < desired
+                    else max(vx - rate, desired)
+                )
+            return vx
+
+        # ground reversal sheds MORE per frame than a same-direction build
+        shed_brake = m.run_speed - step(m.run_speed, -1, True)
+        gained_build = step(0.0, 1, True) - 0.0
+        assert shed_brake > gained_build
+        # air, same direction at/over target: momentum HELD (no shed)
+        assert step(m.run_speed, 1, False) == m.run_speed
+        # air reversal DOES shed speed (the one exception) but weaker than
+        # the ground brake
+        shed_air = m.run_speed - step(m.run_speed, -1, False)
+        assert 0.0 < shed_air < shed_brake
 
     def test_marker_error_names_floor_columns(self) -> None:
         """A real model probed spawn columns 2, 3, 4... into fallback —
@@ -532,7 +594,8 @@ class TestValidators:
         palette = {  # the real run's near-identical browns
             "background": "#1a1208", "ground": "#4b3b2b",
             "platform": "#6b4a2a", "wall": "#473b32", "breakable": "#a08050",
-            "danger": "#c43a0a", "water": "#4a3d1a",
+            "box": "#8a6a3a", "danger": "#c43a0a", "urchin": "#b9466e",
+            "mine": "#aa5537", "water": "#4a3d1a",
         }
         out, adjusted = separate_structural_roles(palette, DEFAULT_TILES)
         assert adjusted, "near-identical structural roles must be spread"
@@ -1234,18 +1297,143 @@ class TestValidators:
             spawn,
             defs,
         )
-        # Spawn safety is a CODE repair now: beetle@3 slides to the
-        # nearest standable column outside the radius (8 — the pool at
-        # 5-7 doesn't support land enemies) instead of kicking back.
-        assert [(p["enemy_id"], p["x"]) for p in accepted] == [
-            ("beetle", 20), ("beetle", 8), ("fish", 28), ("fish", 27),
+        # Two CODE repairs now: beetle@3 slides to the nearest standable
+        # column outside the spawn radius (8 — the pool at 5-7 doesn't
+        # support land enemies); and beetle@(28,12), dropped in DEEP water
+        # under the seabed policy, SNAPS to the wet flat below it at (28,13)
+        # rather than kicking back (ticket 5a).
+        assert [(p["enemy_id"], p["x"], p["y"]) for p in accepted] == [
+            ("beetle", 20, 13), ("beetle", 8, 13), ("beetle", 28, 13),
+            ("fish", 28, 12), ("fish", 27, 13),
         ]
-        assert accepted[3]["variant"] == "elite"
-        assert len(repairs) == 1 and "spawn-safety nudge" in repairs[0]
-        assert "(3, 13) -> (8, 13)" in repairs[0]
-        assert len(problems) == 5
+        assert accepted[4]["variant"] == "elite"
+        assert len(repairs) == 2
+        assert any(
+            "spawn-safety nudge" in r and "(3, 13) -> (8, 13)" in r
+            for r in repairs
+        )
+        assert any(
+            "wader snapped" in r and "(28, 12) -> (28, 13)" in r
+            for r in repairs
+        )
+        assert len(problems) == 4
         assert any("swimmers must be placed inside water" in p for p in problems)
-        assert any("only swimmers go in water" in p for p in problems)
+
+    def test_flyer_off_top_names_the_top_not_a_clamped_row_zero(self) -> None:
+        # A flyer whose body runs off the TOP of the level must SAY so — not
+        # report a clamped row-0 cell as "EMPTY, not empty" (ticket 5b).
+        import numpy as np
+
+        grid = np.zeros((6, 6), dtype=np.int8)
+        grid[5, :] = 1  # floor below, so the airspace-over-ground check is moot
+        defs = {"bat": {"archetype": "flyer", "size": 2.0}}
+        _, problems, _ = check_placements(
+            grid, [{"enemy_id": "bat", "x": 2, "y": 0}], (0, 5), defs,
+        )
+        assert problems and "runs off the TOP" in problems[0]
+        assert "not empty" not in problems[0]  # the old self-contradiction
+
+
+class TestCappedOnewayRepair:
+    """Ticket 2: a one-way platform sealed by a slab above it is a broken
+    promise (you can't jump up into it). CARVE the cap to restore it; DELETE
+    the dead platform only when carving would spill water / hit a hazard;
+    leave Pattern-A (flush) one-ways and ALL solid geometry alone."""
+
+    def _grid(self, rows: list[str]):
+        import numpy as np
+
+        # empty / floor / one-way / wall / water
+        m = {".": 0, "F": 1, "P": 2, "W": 3, "~": 20}
+        return np.array([[m[c] for c in row] for row in rows], dtype=np.int8)
+
+    def test_pattern_b_carves_the_cap_and_keeps_the_platform(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import (
+            repair_capped_oneways_grid,
+        )
+
+        grid = self._grid([
+            "......",  # 0
+            "..W...",  # 1  the capping block
+            "......",  # 2  the standing pocket (empty)
+            "..P...",  # 3  the one-way platform
+            "FFFFFF",  # 4
+        ])
+        notes = repair_capped_oneways_grid(grid, DEFAULT_TILES)
+        assert grid[1, 2] == 0  # cap carved
+        assert grid[3, 2] == 2  # one-way PRESERVED (jump-up restored)
+        assert notes and "carved the cap" in notes[0]
+
+    def test_water_on_cap_deletes_the_dead_platform(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import (
+            repair_capped_oneways_grid,
+        )
+
+        grid = self._grid([
+            "..~...",  # 0  contained water resting on the cap
+            "..W...",  # 1  the cap
+            "......",  # 2  pocket
+            "..P...",  # 3  one-way
+            "FFFFFF",  # 4
+        ])
+        notes = repair_capped_oneways_grid(
+            grid, DEFAULT_TILES, free_volume={(2, 0)},
+        )
+        assert grid[1, 2] == 3  # cap NOT carved (would spill)
+        assert grid[3, 2] == 0  # dead one-way dropped instead
+        assert notes and "spill water" in notes[0]
+
+    def test_pattern_a_flush_one_way_is_left_alone(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import (
+            repair_capped_oneways_grid,
+        )
+
+        grid = self._grid([
+            "......",  # 0
+            "..W...",  # 1
+            "..W...",  # 2  standing cell itself SOLID (flush) = decorative
+            "..P...",  # 3  one-way jammed under the solid
+            "FFFFFF",  # 4
+        ])
+        before = grid.copy()
+        assert repair_capped_oneways_grid(grid, DEFAULT_TILES) == []
+        assert (grid == before).all()
+
+    def test_solid_corridor_never_touched(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import (
+            repair_capped_oneways_grid,
+        )
+
+        # a 1-tall SOLID corridor is intentional terrain — no one-ways at all
+        grid = self._grid([
+            "WWWWWW",  # 0  ceiling
+            "......",  # 1  1-tall gap (a trap corridor)
+            "WWWWWW",  # 2  floor
+        ])
+        before = grid.copy()
+        assert repair_capped_oneways_grid(grid, DEFAULT_TILES) == []
+        assert (grid == before).all()
+
+    def test_usable_one_way_untouched(self) -> None:
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from examples.platformer_pack.validate import (
+            repair_capped_oneways_grid,
+        )
+
+        grid = self._grid([
+            "......",  # 0
+            "......",  # 1  >= 2 open cells above the pocket
+            "......",  # 2  pocket
+            "..P...",  # 3  one-way with clear headroom
+            "FFFFFF",  # 4
+        ])
+        before = grid.copy()
+        assert repair_capped_oneways_grid(grid, DEFAULT_TILES) == []
+        assert (grid == before).all()
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1474,66 @@ class TestDatabasesDriveReview:
             for lo, hi in bands:
                 inside = (lo <= hue <= hi) if lo <= hi else (hue >= lo or hue <= hi)
                 assert not inside, f"{color} sits in reserved band {lo}-{hi}"
+
+    def test_placeholder_luminance_floor(self) -> None:
+        """RB1: with stage-background luminances supplied, every
+        placeholder clears ACTOR_BG_MIN_LUMA via a hue-preserving shift;
+        without them the function is byte-identical to before."""
+        from examples.platformer_pack import color as cm
+        from examples.platformer_pack.phases import (
+            ACTOR_BG_MIN_LUMA,
+            placeholder_color,
+        )
+
+        for i in range(8):
+            base = placeholder_color(i)
+            assert placeholder_color(i, background_lums=()) == base
+            # Backgrounds bracketing the color's own luminance force the
+            # shift; distant backgrounds leave the color untouched.
+            near = (cm.luminance(base) - 5.0, cm.luminance(base) + 5.0)
+            shifted = placeholder_color(i, background_lums=near)
+            assert (
+                min(abs(cm.luminance(shifted) - b) for b in near)
+                >= ACTOR_BG_MIN_LUMA
+            )
+            base_hue, shifted_hue = cm.hue_of(base), cm.hue_of(shifted)
+            if base_hue is not None and shifted_hue is not None:
+                assert cm.hue_distance(base_hue, shifted_hue) <= 2.0
+            far = (cm.luminance(base) + 120.0 % 255,)
+            if abs(cm.luminance(base) - far[0]) >= ACTOR_BG_MIN_LUMA:
+                assert placeholder_color(i, background_lums=far) == base
+
+    def test_canned_slice_placeholders_clear_every_background(
+        self, tmp_path: Path
+    ) -> None:
+        """RB1 e2e: on the canned run, every enemy AND item placeholder
+        sits >= ACTOR_BG_MIN_LUMA from every stage background — the
+        dark-navy-beetle-on-near-black class is structurally gone."""
+        from examples.platformer_pack import color as cm
+        from examples.platformer_pack.phases import ACTOR_BG_MIN_LUMA
+
+        run = tmp_path / "run"
+        ctx = _run_slice(run)
+        manifest = json.loads((run / "manifest.json").read_text())
+        bg_lums = [
+            cm.luminance(palette["background"])
+            for palette in manifest["palettes"].values()
+        ]
+        actors = [
+            ("enemy", eid, e.stats["placeholder_color"])
+            for eid, e in ctx.bible.enemy_definitions.items()
+        ] + [
+            ("item", iid, it.stats["placeholder_color"])
+            for iid, it in ctx.bible.items.items()
+        ]
+        assert actors and bg_lums
+        for kind, ident, color in actors:
+            lum = cm.luminance(color)
+            for bg in bg_lums:
+                assert abs(lum - bg) >= ACTOR_BG_MIN_LUMA, (
+                    f"{kind} {ident} placeholder {color} (L={lum:.0f}) "
+                    f"within {ACTOR_BG_MIN_LUMA} of a background (L={bg:.0f})"
+                )
 
     def test_background_bands_derive_from_palette(self, tmp_path: Path) -> None:
         """No hardcoded sky grays: horizon bands lighten the palette's
@@ -1370,7 +1618,7 @@ class TestEndToEnd:
         _run_slice(run_a)
         _run_slice(run_b)
 
-        files_a = sorted(p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file())
+        files_a = tree_files(run_a)
         expected = {
             Path("world.json"),
             Path("manifest.json"),
@@ -1383,10 +1631,7 @@ class TestEndToEnd:
         }
         assert expected.issubset(set(files_a))
 
-        for rel in files_a:
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), (
-                f"{rel} differs between identical-seed runs"
-            )
+        assert_trees_byte_identical(run_a, run_b)
 
     def test_hash_recompute_contract(self, tmp_path: Path) -> None:
         """§6.3: stored content hashes must match a recompute from disk."""
@@ -1424,6 +1669,15 @@ class TestEndToEnd:
                     assert tuple(placement.pos) not in stand
                     assert tuple(placement.pos) not in volume
                     continue
+                if placement.overrides.get("variant") == "emberborn":
+                    # Hazard-immune: posted ON a footed hazard cell.
+                    from examples.platformer_pack.validate import (
+                        hazard_stand_cells,
+                    )
+                    assert tuple(placement.pos) in hazard_stand_cells(
+                        grid
+                    ), f"{enemy_id} at {placement.pos}"
+                    continue
                 expected = volume if archetype == "swimmer" else stand
                 assert tuple(placement.pos) in expected, (
                     f"{enemy_id} ({archetype}) at {placement.pos}"
@@ -1433,8 +1687,10 @@ class TestEndToEnd:
         """The canned fake exercises the flyer path end-to-end at $0: a
         flyer-rolling seed yields a flyer definition placed in an open-air
         cell (never a ground stand or water) — the air-summary + fake air
-        pool + validator airborne branch all on the same path."""
-        ctx = _run_slice(tmp_path / "run", seed="zephyr")
+        pool + validator airborne branch all on the same path. (Seed
+        re-anchored when the hopper archetype joined the roll table —
+        'kestrel' rolls a flyer under the v8 weights.)"""
+        ctx = _run_slice(tmp_path / "run", seed="kestrel")
         flyers = {
             eid
             for eid, e in ctx.bible.enemy_definitions.items()
@@ -1468,7 +1724,12 @@ class TestEndToEnd:
             assert tuple(level.spawn) in cells
             assert tuple(level.exit) in cells
             checkpoints = [t for t in level.triggers if t.type == "checkpoint"]
-            assert checkpoints, f"{level.level_id} has no checkpoint"
+            if level.parent_level:
+                # Secret rooms are checkpoint-free by blueprint (1-2
+                # sections → count rule 0; death ejects to the parent).
+                assert not checkpoints, f"{level.level_id} has a checkpoint"
+            else:
+                assert checkpoints, f"{level.level_id} has no checkpoint"
             for t in checkpoints:
                 assert (t.x, t.y) in cells
         # And they round-trip through level.json for the harness.
@@ -1652,9 +1913,11 @@ class TestEndToEnd:
     def test_3a_features_land_in_layers(self, tmp_path: Path) -> None:
         """Water pool, ledge tier, swimmer-in-water, variant placements,
         checkpoints, decor, and variable dims — each visible in the right
-        artifact."""
+        artifact. (Seed re-anchored when the hopper archetype joined the
+        roll table — 'emberfall_002' keeps a swimmer in the 4-pool under
+        the v8 weights.)"""
         run = tmp_path / "run"
-        ctx = _run_slice(run)
+        ctx = _run_slice(run, seed="emberfall_002")
         levels = ctx.bible.levels
 
         # Variable dims: schema-rolled RANGES, banded by difficulty —
@@ -1669,8 +1932,11 @@ class TestEndToEnd:
             assert w_lo <= level.grid_width <= w_hi, lid
             assert h_lo <= level.grid_height <= h_hi, lid
         assert levels["l1"].grid_width < levels["l3"].grid_width
-        # Water present in every canned level's collision layer.
+        # Water present in every canned MAIN level's collision layer
+        # (secret rooms are deliberately dry chambers — vault/lair).
         for level in levels.values():
+            if level.parent_level:
+                continue
             with np.load(run / level.collision) as data:
                 assert (data["collision"] == int(TileType.WATER)).any(), (
                     f"{level.level_id} has no water"
@@ -1687,13 +1953,19 @@ class TestEndToEnd:
                 for p in level.entities
                 if p.overrides.get("variant")
             ]
-            assert sorted(named) == ["champion", "elite", "relentless"]
+            # emberborn is OPTIONAL per level (the fake posts it only
+            # where a footed hazard cell exists); the mandatory trio is
+            # always stamped.
+            assert [
+                n for n in sorted(named) if n != "emberborn"
+            ] == ["champion", "elite", "relentless"]
             # entities.json carries the variant field for consumers.
             entities_doc = json.loads(
                 (run / f"level/{level.stage_id}/{level.level_id}/entities.json")
                 .read_text()
             )
-            assert [e["variant"] for e in entities_doc if e["variant"]] == [
+            doc_named = [e["variant"] for e in entities_doc if e["variant"]]
+            assert [n for n in doc_named if n != "emberborn"] == [
                 "elite", "champion", "relentless",
             ]
         # Foreground decor landed inline + in its layer file.
@@ -1713,10 +1985,11 @@ class TestEndToEnd:
         # Manifest ships the full game vocabulary for play surfaces.
         manifest = json.loads((run / "manifest.json").read_text())
         assert [t["name"] for t in manifest["tiles"]] == [
-            "empty", "floor", "platform", "wall", "breakable", "spike", "water",
+            "empty", "floor", "platform", "wall", "breakable", "box",
+            "spike", "urchin", "mine", "water",
         ]
         assert [v["name"] for v in manifest["variants"]] == [
-            "elite", "champion", "relentless",
+            "elite", "champion", "emberborn", "relentless",
         ]
 
     def test_water_reachability_model(self) -> None:
@@ -1885,6 +2158,9 @@ class TestEndToEnd:
         assert (godot_run / "godot/main.tscn").exists()
         assert (godot_run / "godot/main.gd").exists()
         assert not (json_run / "project.godot").exists()  # json engine: none
+        # 2D HDR ships statically: main.gd's "glow" effect interpreter is
+        # silently inert without it.
+        assert "viewport/hdr_2d=true" in (godot_run / "project.godot").read_text()
 
         # Grid siblings match the canonical npz content.
         for level in ctx_godot.bible.levels.values():
@@ -1903,9 +2179,7 @@ class TestEndToEnd:
         run_a, run_b = tmp_path / "a", tmp_path / "b"
         _run_slice(run_a, engine="godot")
         _run_slice(run_b, engine="godot")
-        files = sorted(p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file())
-        for rel in files:
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
+        assert_trees_byte_identical(run_a, run_b)
 
     def test_positive_generation_logging(self, tmp_path: Path, caplog) -> None:
         """Successful generations are logged at INFO (MazeWorld parity) —
@@ -1913,19 +2187,22 @@ class TestEndToEnd:
         import logging
 
         with caplog.at_level(logging.INFO):
-            _run_slice(tmp_path / "run")
+            ctx = _run_slice(tmp_path / "run")
         text = caplog.text
+        # Level counts include rolled secret rooms (multi-room arc) —
+        # dynamic, since the roll is seed-dependent data.
+        n = len(ctx.bible.levels)
         assert "WorldPhase produced world" in text
         assert "StagePhase planned stage" in text
         assert "EnemyGeneratorPhase produced a 4-creature world pool" in text
         assert re.search(r"Layout l1 \(difficulty 1, \d+x\d+\)", text)
         assert re.search(r"Layout l3 \(difficulty 3, \d+x\d+\)", text)
         assert "Placement l1: " in text
-        assert "TileAssignmentPhase mapped 3 levels" in text
-        assert "BackgroundPhase wrote 3" in text
+        assert f"TileAssignmentPhase mapped {n} levels" in text
+        assert f"BackgroundPhase wrote {n}" in text
         assert "Decor l1: " in text
         assert "PlaceholderTilesetPhase wrote" in text
-        assert "RenderPhase wrote 3 level renders" in text
+        assert f"RenderPhase wrote {n} level renders" in text
         assert "Slice complete" in text and "0 warning(s)" in text
 
     def test_provenance_stamped(self, tmp_path: Path) -> None:
@@ -2343,6 +2620,75 @@ class TestGenericOps:
             DEFAULT_MOVEMENT, axis="vertical", water="optional",
         ).user_message
         assert "Do NOT place an exit" in first
+
+    def test_physics_guidance_speaks_the_validators_vocabulary(self) -> None:
+        """Ticket 4: the paid l7 loop rejected on 'max jump distance 4' — a
+        number the prompt never stated in that vocabulary. The physics block
+        now names it foothold-to-foothold, tables max_dx_for_rise per rise,
+        and derives the running-jump figure from the movement object."""
+        from examples.platformer_pack.movement import run_jump_width
+
+        m = PlatformerPrompts().section_layout(
+            "l1", "b", "gauntlet", "f", {}, 1, 3, 24, H, DEFAULT_MOVEMENT,
+        ).user_message
+        assert "max jump distance 4 columns foothold-to-foothold" in m
+        assert "rise 1 -> 4, rise 2 -> 4, rise 3 -> 3" in m
+        rj = run_jump_width(DEFAULT_MOVEMENT)
+        assert rj == 6  # default physics: the prompt value is unchanged
+        assert f"clears up to ~{rj} columns" in m
+        # The whole-level prompt shares the same paragraph.
+        whole = PlatformerPrompts().layout_generation(
+            "l1", "b", {"difficulty": 1}, W, H, DEFAULT_MOVEMENT,
+        ).user_message
+        assert "max jump distance 4 columns foothold-to-foothold" in whole
+
+    def test_overridden_physics_reshapes_the_prompt_numbers(self) -> None:
+        """Ticket 4: a per-level movement override (the low-gravity finale,
+        gravity 20) must change the DERIVED numbers — longer hang time
+        widens the advertised running jump and lifts the full-rise reach to
+        the width cap — so no '~6' literal survives to lie about this
+        level's own physics."""
+        from examples.platformer_pack.movement import (
+            PlayerMovementSpec,
+            run_jump_width,
+        )
+
+        low_g = PlayerMovementSpec.model_validate(
+            {**DEFAULT_MOVEMENT.model_dump(), "gravity": 20.0}
+        )
+        rj = run_jump_width(low_g)
+        assert rj > 6
+        m = PlatformerPrompts().section_layout(
+            "l9", "b", "gauntlet", "f", {}, 1, 3, 24, H, low_g,
+        ).user_message
+        assert f"clears up to ~{rj} columns" in m
+        assert f"wider than ~{rj} columns" in m
+        assert f"(4-{rj} column) gap" in m
+        assert "~6 columns" not in m  # the hardcoded literal is gone
+        assert "rise 1 -> 4, rise 2 -> 4, rise 3 -> 4" in m
+        assert "max jump distance 4 columns" in m  # jump_width untouched
+
+    def test_difficulty_three_adds_the_challenge_paragraph(self) -> None:
+        """Ticket 4: difficulty >= 3 appends ONE paragraph steering the
+        model to build challenge from enemies/hazards/precision INSIDE the
+        physics envelope; lower difficulties (and the default, so the
+        level.py threading lands independently) keep the shorter prompt."""
+
+        def sec(difficulty: int) -> str:
+            return PlatformerPrompts().section_layout(
+                "l1", "b", "gauntlet", "f", {}, 1, 3, 24, H,
+                DEFAULT_MOVEMENT, difficulty=difficulty,
+            ).user_message
+
+        hard = sec(3)
+        assert "HIGH-DIFFICULTY" in hard
+        assert "the simulator rejects anything beyond them" in hard
+        for d in (1, 2):
+            assert "HIGH-DIFFICULTY" not in sec(d)
+        base = PlatformerPrompts().section_layout(
+            "l1", "b", "gauntlet", "f", {}, 1, 3, 24, H, DEFAULT_MOVEMENT,
+        ).user_message
+        assert base == sec(1)  # omitting the kwarg is difficulty 1
 
     def test_enemy_system_prompt_forbids_extra_fields(self) -> None:
         """Per-task system prompt: the enemy agent returns only the named
@@ -2899,7 +3245,8 @@ class TestStyleGuide:
         good = {
             "background": "#2b2331", "ground": "#6e5a4e",
             "platform": "#b8804a", "wall": "#5b4d5e", "breakable": "#a08050",
-            "danger": "#e0453a", "water": "#3a6ea5",
+            "box": "#b87d2d", "danger": "#e0453a", "urchin": "#b9466e",
+            "mine": "#aa5537", "water": "#3a6ea5",
         }
         assert check_palette(good, DEFAULT_TILES) == []
 
@@ -2976,7 +3323,9 @@ class TestStyleGuide:
         palette = {
             "background": "#2b1f2e", "ground": "#7a5c3a",
             "platform": "#c8843a", "wall": "#c0a882", "breakable": "#a08050",
-            "danger": "#e84210", "water": "#1a4a6b",  # distance ~32: fails
+            "box": "#b87d2d", "danger": "#e84210", "urchin": "#b9466e",
+            "mine": "#aa5537",
+            "water": "#1a4a6b",  # distance ~32: fails
         }
         repaired, adjusted = enforce_contrast(palette, DEFAULT_TILES)
         assert set(adjusted) == {"water"}
@@ -3003,8 +3352,9 @@ class TestStyleGuide:
                 return json.dumps({"palette": {
                     "background": "#2b1f2e", "ground": "#7a5c3a",
                     "platform": "#c8843a", "wall": "#c0a882",
-                    "breakable": "#a08050",
-                    "danger": "#e84210", "water": "#1a4a6b",
+                    "breakable": "#a08050", "box": "#b87d2d",
+                    "danger": "#e84210", "urchin": "#b9466e",
+                    "mine": "#aa5537", "water": "#1a4a6b",
                 }})
             return good(request)
 
@@ -3033,11 +3383,89 @@ class TestStyleGuide:
         assert len(prompts) == 1
         message = prompts[0]
         assert (
-            "### ROLES: background,ground,platform,wall,breakable,danger,water"
+            "### ROLES: background,ground,platform,wall,breakable,box,danger,"
+            "urchin,mine,water"
             in message
         )
         assert "luminance distance >= 40" in message
         assert "dangerous at a glance" in message
+
+    def test_safe_volume_hue_clamp_fires_on_lava_hued_water(self) -> None:
+        """RB1: a SWIMMABLE volume wearing a hazard-family hue snaps to
+        the safe-liquid band — luminance preserved, other roles
+        byte-identical, idempotent. (The paid fire biome shipped water
+        6 degrees from `danger`.)"""
+        from examples.platformer_pack import color as cm
+        from examples.platformer_pack.style import (
+            MIN_VOLUME_HAZARD_HUE_SEP,
+            _luminance,
+            separate_safe_volumes_from_hazards,
+        )
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        palette = {
+            "background": "#181820", "ground": "#776459",
+            "platform": "#96783c", "wall": "#464650",
+            "breakable": "#cda04b", "box": "#be7d2d",
+            "danger": "#e0453a", "urchin": "#b9466e", "mine": "#aa5537",
+            "water": "#8f2208",  # lava-hued but swimmable: must move
+        }
+        out, adjusted = separate_safe_volumes_from_hazards(
+            palette, DEFAULT_TILES
+        )
+        assert set(adjusted) == {"water"}
+        water_hue = cm.hue_of(out["water"])
+        assert water_hue is not None
+        for role in ("danger", "urchin", "mine"):
+            hazard_hue = cm.hue_of(out[role])
+            if hazard_hue is not None:
+                assert (
+                    cm.hue_distance(water_hue, hazard_hue)
+                    >= MIN_VOLUME_HAZARD_HUE_SEP
+                )
+        assert abs(_luminance(out["water"]) - _luminance(palette["water"])) <= 1.5
+        for role in palette:
+            if role != "water":
+                assert out[role] == palette[role]
+        again, adjusted2 = separate_safe_volumes_from_hazards(
+            out, DEFAULT_TILES
+        )
+        assert adjusted2 == {} and again == out
+
+    def test_safe_volume_clamp_leaves_distant_water_alone(self) -> None:
+        """The canned blue water (~211 degrees, >=128 from every hazard)
+        must pass untouched — the clamp is a repair, not a restyle."""
+        from examples.platformer_pack.style import (
+            separate_safe_volumes_from_hazards,
+        )
+        from examples.platformer_pack.tiles import DEFAULT_TILES
+
+        palette = {
+            "background": "#181820", "ground": "#776459",
+            "platform": "#96783c", "wall": "#464650",
+            "breakable": "#cda04b", "box": "#be7d2d",
+            "danger": "#e0453a", "urchin": "#b9466e", "mine": "#aa5537",
+            "water": "#3a6ea5",
+        }
+        out, adjusted = separate_safe_volumes_from_hazards(
+            palette, DEFAULT_TILES
+        )
+        assert adjusted == {} and out == palette
+
+    def test_damaging_volume_keeps_warm_hue(self) -> None:
+        """Lava (damage_per_second on the volume tile) is deliberately
+        exempt — warm hue = harmful is CORRECT for a damaging liquid."""
+        from examples.platformer_pack.style import (
+            separate_safe_volumes_from_hazards,
+        )
+        from examples.platformer_pack.tiles import load_tiles
+
+        lava_tiles = load_tiles(
+            Path(__file__).parent.parent / "examples/lava_world/tile_types.json"
+        )
+        palette = {"danger": "#e0453a", "lava": "#e8722c"}
+        out, adjusted = separate_safe_volumes_from_hazards(palette, lava_tiles)
+        assert adjusted == {} and out["lava"] == "#e8722c"
 
 
 class TestLavaWorld:
@@ -3082,6 +3510,8 @@ class TestLavaWorld:
         assert lava_slot.name == "lava"
         assert lava_slot.params["damage_per_second"] == 1.0
         for level in ctx.bible.levels.values():
+            if level.parent_level:
+                continue  # secret rooms are dry chambers (vault/lair)
             with np.load(run / level.collision) as data:
                 assert (data["collision"] == lava_slot.tile_type).any()
 
@@ -3107,10 +3537,7 @@ class TestLavaWorld:
         run_a, run_b = tmp_path / "a", tmp_path / "b"
         self._run(run_a)
         self._run(run_b)
-        for rel in sorted(
-            p.relative_to(run_a) for p in run_a.rglob("*") if p.is_file()
-        ):
-            assert (run_a / rel).read_bytes() == (run_b / rel).read_bytes(), rel
+        assert_trees_byte_identical(run_a, run_b)
 
 
 class TestCarve:
@@ -3227,13 +3654,14 @@ class TestPerLevelView:
 
 class TestAnimFramePick:
     """The pure candidate → (state, frame-index) selector, shared in spirit
-    with main.gd's GDScript mirror. The CALLER builds the candidate priority
-    list from runtime signals (enemy: hurt>walk>idle; player: jump>walk>idle)."""
+    with main.gd's GDScript mirror (_anim_pick + _anim_index). The CALLER
+    builds the candidate priority list from runtime signals and owns the
+    state-change latch; states carry per-frame durations + a loop mode."""
 
     S = {
-        "idle": {"count": 2, "dur": 0.25},
-        "walk": {"count": 4, "dur": 0.10},
-        "jump": {"count": 6, "dur": 0.09},
+        "idle": {"durs": [0.25, 0.25], "loop": "loop"},
+        "walk": {"durs": [0.10] * 4, "loop": "loop"},
+        "jump": {"durs": [0.09] * 6, "loop": "once"},
     }
 
     def test_first_present_candidate_wins(self) -> None:
@@ -3248,7 +3676,7 @@ class TestAnimFramePick:
     def test_frame_index_advances_and_wraps(self) -> None:
         from examples.platformer_play import pick_anim_frame
 
-        # walk: dur 0.10, 4 frames → idx = int(t/0.10) % 4
+        # walk: uniform 0.10 x 4 looping → idx = int(t/0.10) % 4
         assert pick_anim_frame(["walk"], 0.00, self.S)[1] == 0
         assert pick_anim_frame(["walk"], 0.15, self.S)[1] == 1
         assert pick_anim_frame(["walk"], 0.35, self.S)[1] == 3
@@ -3257,7 +3685,7 @@ class TestAnimFramePick:
     def test_falls_through_when_no_candidate_exists(self) -> None:
         from examples.platformer_play import pick_anim_frame
 
-        only_idle = {"idle": {"count": 3, "dur": 0.2}}
+        only_idle = {"idle": {"durs": [0.2] * 3, "loop": "loop"}}
         # candidates absent → first state in the dict
         assert pick_anim_frame(["jump", "walk"], 0.0, only_idle)[0] == "idle"
 
@@ -3267,6 +3695,73 @@ class TestAnimFramePick:
         a = pick_anim_frame(["walk"], 0.37, self.S)
         b = pick_anim_frame(["walk"], 0.37, self.S)
         assert a == b
+
+    def test_once_clamps_at_the_last_frame(self) -> None:
+        from examples.platformer_play import _anim_index
+
+        durs = [0.1, 0.1, 0.1]
+        assert _anim_index(0.05, durs, "once") == 0
+        assert _anim_index(0.15, durs, "once") == 1
+        assert _anim_index(0.25, durs, "once") == 2
+        assert _anim_index(0.31, durs, "once") == 2  # holds, never wraps
+        assert _anim_index(9.99, durs, "once") == 2
+
+    def test_ping_pong_walks_out_and_back(self) -> None:
+        from examples.platformer_play import _anim_index
+
+        durs = [0.1] * 4  # cycle: 0 1 2 3 2 1, then wraps to 0
+        seq = [_anim_index(0.05 + 0.1 * k, durs, "ping_pong") for k in range(7)]
+        assert seq == [0, 1, 2, 3, 2, 1, 0]
+        # a single frame ping-pongs in place
+        assert _anim_index(0.5, [0.1], "ping_pong") == 0
+
+    def test_unequal_durations_walk_cumulatively(self) -> None:
+        from examples.platformer_play import _anim_index
+
+        durs = [0.05, 0.2, 0.05]  # sum 0.3
+        assert _anim_index(0.04, durs, "loop") == 0
+        assert _anim_index(0.06, durs, "loop") == 1
+        assert _anim_index(0.24, durs, "loop") == 1
+        assert _anim_index(0.26, durs, "loop") == 2
+        assert _anim_index(0.31, durs, "loop") == 0  # wraps into frame 0
+
+    def test_old_shape_back_compat_scalar_duration(self) -> None:
+        """frames.json entries WITHOUT the new keys keep today's behavior:
+        the scalar duration_ms fans out uniformly and the state loops."""
+        from examples.platformer_play import _anim_timing
+
+        assert _anim_timing({"duration_ms": 120}, 4) == ([0.12] * 4, "loop")
+        # keyless entry → the 120ms default, still looping
+        assert _anim_timing({}, 2) == ([0.12, 0.12], "loop")
+        # new keys win when present and consistent
+        assert _anim_timing(
+            {"durations_ms": [100, 200], "loop": "once", "duration_ms": 120}, 2
+        ) == ([0.1, 0.2], "once")
+        # a desynced durations list falls back to the uniform scalar
+        assert _anim_timing(
+            {"durations_ms": [100], "duration_ms": 80}, 3
+        ) == ([0.08] * 3, "loop")
+        # durations floor at 1ms so the index math never divides by zero
+        assert _anim_timing({"durations_ms": [0, 50], "loop": "loop"}, 2) == (
+            [0.001, 0.05],
+            "loop",
+        )
+
+    def test_unknown_loop_mode_wraps_like_loop(self) -> None:
+        from examples.platformer_play import _anim_index
+
+        durs = [0.1] * 4
+        for t in (0.05, 0.15, 0.45, 1.05):
+            assert _anim_index(t, durs, "bogus") == _anim_index(t, durs, "loop")
+
+    def test_state_change_restarts_at_frame_zero(self) -> None:
+        """The consumers' latch zeroes the clock on a picked-state change;
+        index at t=0 must be frame 0 in every loop mode (both surfaces
+        reset then re-index the same tick)."""
+        from examples.platformer_play import _anim_index
+
+        for mode in ("loop", "once", "ping_pong"):
+            assert _anim_index(0.0, [0.1, 0.2, 0.1], mode) == 0
 
 
 class TestOobAndParserRepairs:

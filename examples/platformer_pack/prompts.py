@@ -17,11 +17,35 @@ import json
 from canon.llm.request import LLMRequest
 from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.effects import describe_vocabulary as _effects_vocabulary
-from examples.platformer_pack.movement import PlayerMovementSpec, max_dx_for_rise
-from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
+from examples.platformer_pack.movement import (
+    PlayerMovementSpec,
+    max_dx_for_rise,
+    run_jump_width,
+)
+from examples.platformer_pack.rules import (
+    DEFAULT_OVERRIDE_VOCABULARY,
+    DEFAULT_RULES,
+    GameRules,
+)
 from examples.platformer_pack.sections import SECTION_OVERLAP
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
+
+
+def _override_vocabulary_line() -> str:
+    """The per-level rule-override menu the stage prompt offers — derived
+    from the pack's closed vocabulary (rule_overrides.json), so a game
+    that edits the data reshapes the offer with zero prompt code."""
+    parts = []
+    for key, spec in DEFAULT_OVERRIDE_VOCABULARY.items():
+        kind = str(spec.get("type", "float"))
+        band = spec.get("band")
+        desc = f'"{key}" ({kind}'
+        if band is not None:
+            desc += f" {band[0]}..{band[1]}"
+        desc += ")"
+        parts.append(desc)
+    return ", ".join(parts) + "."
 
 # Per-task system prompts: every generator is TOLD what artifact it is
 # producing and its exact field/arg contract, so the model stops inventing
@@ -45,6 +69,16 @@ _SYSTEM_ENEMY = _SYSTEM_BASE + (
     " This task NAMES and FLAVORS one creature whose mechanics are already "
     "rolled and fixed. Return ONLY the JSON keys the task names — never change "
     "or restate the rolled stats, and add no other fields."
+)
+_SYSTEM_ITEM = _SYSTEM_BASE + (
+    " This task NAMES and FLAVORS one collectible item whose mechanics are "
+    "already rolled and fixed. Return ONLY the JSON keys the task names — "
+    "never change or restate the rolled mechanics, and add no other fields."
+)
+_SYSTEM_ITEM_PLACEMENT = _SYSTEM_BASE + (
+    " This task PLACES collectible items on a finished level. Return ONLY "
+    "the JSON shape the task names — integer grid coordinates, ids only "
+    "from the offered pool, and no other fields."
 )
 _SYSTEM_STYLE = _SYSTEM_BASE + (
     " This task chooses a color palette. Return ONLY the JSON keys the task "
@@ -83,7 +117,17 @@ def _volume_blurb(tile) -> str:
 
 def _physics_guidance(movement: PlayerMovementSpec) -> str:
     """The RUN-UP MOMENTUM physics paragraph shared by the whole-level and
-    per-section layout prompts (ends with a newline)."""
+    per-section layout prompts (ends with a newline). Every number is
+    DERIVED from ``movement`` — per-level overrides flow through — and the
+    closing sentence restates the limits in the VALIDATOR'S own vocabulary
+    (foothold-to-foothold), so a rejection reads back in the same units
+    the prompt taught (the paid l7 loop rejected on 'max jump distance 4',
+    a number the prompt had never stated)."""
+    run_jump = run_jump_width(movement)
+    rise_table = ", ".join(
+        f"rise {r} -> {max_dx_for_rise(movement, r)}"
+        for r in range(1, movement.jump_height + 1)
+    )
     return (
         f"Player physics (RUN-UP MOMENTUM): max jump rise "
         f"{movement.jump_height} cells (RISING COSTS RANGE — at full "
@@ -93,17 +137,26 @@ def _physics_guidance(movement: PlayerMovementSpec) -> str:
         f"standing/walking jump clears a gap up to "
         f"{movement.jump_width - 1} columns. A RUNNING jump (the "
         f"player builds speed over ~{int(movement.run_up_cells)} clear "
-        "flat columns) clears up to ~6 columns — but ONLY with that "
-        "runway: a wide gap right after a wall, ledge, or narrow "
-        "platform (no room to build speed) is UNBEATABLE. So keep "
-        f"MOST gaps at most {movement.jump_width - 1} columns (ordinary "
-        "jumps); you MAY sprinkle in the occasional WIDE (4-6 column) "
-        "gap as a deliberate run-and-jump challenge, but ALWAYS give "
+        f"flat columns) clears up to ~{run_jump} columns — but ONLY "
+        "with that runway: a wide gap right after a wall, ledge, or "
+        "narrow platform (no room to build speed) is UNBEATABLE. So "
+        f"keep MOST gaps at most {movement.jump_width - 1} columns "
+        "(ordinary jumps); you MAY sprinkle in the occasional WIDE "
+        f"({movement.jump_width}-{run_jump} column) gap as a deliberate "
+        "run-and-jump challenge, but ALWAYS give "
         f"~{int(movement.run_up_cells)} clear flat columns of runway "
-        "right before it. Any gap wider than ~6 columns needs a "
-        "stepping platform. Each platform step must sit within "
+        f"right before it. Any gap wider than ~{run_jump} columns needs "
+        "a stepping platform. Each platform step must sit within "
         f"{movement.jump_height} rows above the previous foothold, and "
-        "the higher the step the closer it must be.\n"
+        "the higher the step the closer it must be. The validator "
+        "measures FOOTHOLD-TO-FOOTHOLD (takeoff cell to landing cell): "
+        f"max jump distance {movement.jump_width} columns "
+        "foothold-to-foothold, and rising spends it — max columns by "
+        f"rise: {rise_table}. Leave at least 2 open cells ABOVE every "
+        "platform or ledge the player should stand on — never place a "
+        "wall, floor, or block directly on, or one cell above, a one-way "
+        "platform's top (there must be room to jump up INTO it), and keep "
+        "walkable corridors at least 2 cells tall.\n"
     )
 
 
@@ -214,6 +267,12 @@ class PlatformerPrompts:
                 'within a game. Use "vista" ONLY where zooming out is meant '
                 'to inspire (a big reveal), "intimate" ONLY for tight, '
                 "claustrophobic moments], "
+                f'"level_rules": [exactly {num_levels} objects — a per-level '
+                "RULE TWIST, almost always {{}} (empty). Use one ONLY where "
+                "the level's brief begs for it, from this closed menu: "
+                + _override_vocabulary_line()
+                + " Example: a moon-vault level might set "
+                '{"gravity": 20.0}.], '
                 f'"roster_brief": str (what kinds of creatures inhabit this '
                 "biome), "
                 '"effects": [0-2 ambient effect records '
@@ -268,6 +327,155 @@ class PlatformerPrompts:
                 '{"name": str (unique, 1-3 words), "flavor": str (one sentence)}'
             ),
             max_tokens=256,
+        )
+
+    def item_generation(
+        self, skeleton: dict, world_title: str, index: int,
+        used_names: list[str] | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        fb = f"\nPrior attempt rejected: {'; '.join(feedback)}\n" if feedback else ""
+        used = (
+            f"Names already taken (do NOT reuse or lightly vary): "
+            f"{', '.join(used_names)}\n"
+            if used_names
+            else ""
+        )
+        kind = str(skeleton.get("kind", "coin"))
+        kind_notes = {
+            "coin": "a small collectible currency the player grabs "
+            "constantly — trails of these guide the route",
+            "heal": "restores a heart on pickup",
+            "shield": "a held charm that absorbs ONE hit, then breaks",
+            "double_jump": "grants a second mid-air jump while held "
+            "(timed)",
+            "run_boost": "raises the player's top running speed while "
+            "held (timed)",
+        }
+        return LLMRequest(
+            system=_SYSTEM_ITEM,
+            user_message=(
+                "### TASK: item\n"
+                f"### INDEX: {index}\n"
+                f"World: {world_title}\n"
+                f"Mechanics (already rolled, do NOT change them): "
+                f"{json.dumps(skeleton)}\n"
+                f"Effect: {kind_notes.get(kind, kind)}\n"
+                f"{used}{fb}\n"
+                "Name and flavor this item to fit the world's theme and "
+                "its mechanical effect — the name should hint at what it "
+                "does. Return a JSON object:\n"
+                '{"name": str (unique, 1-3 words), "flavor": str (one '
+                "sentence)}"
+            ),
+            max_tokens=256,
+        )
+
+    def item_placement(
+        self,
+        level_id: str,
+        brief: str,
+        pool: list[dict],
+        standable_summary: str,
+        spawn: tuple[int, int] | None,
+        exit_: tuple[int, int] | None,
+        grid_width: int,
+        grid_height: int,
+        enemies: list[dict],
+        reward_anchors: list[tuple[int, int]],
+        rules: GameRules | None = None,
+        max_items: int = 24,
+        has_box: bool = True,
+        directive: str = "",
+        water_summary: str = "",
+        previous: str | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        fb = ""
+        if feedback:
+            prev = (
+                f"\nYour previous placements attempt:\n{previous}\n"
+                if previous
+                else "\n"
+            )
+            fb = (
+                f"{prev}It was rejected because:\n- "
+                + "\n- ".join(feedback)
+                + "\nReturn corrected placements, changing as little as "
+                "possible.\n"
+            )
+        caps = ""
+        if rules is not None and getattr(rules, "rarity_caps", None):
+            caps = "; ".join(
+                f"at most {cap} '{tier}' per level"
+                for tier, cap in sorted(rules.rarity_caps.items())
+            ) + ". "
+        anchors = (
+            f"Secret reward alcoves (premium spots the layout carved — put "
+            f"a rare or power-up item AT each): "
+            f"{[list(a) for a in reward_anchors]}\n"
+            if reward_anchors
+            else ""
+        )
+        return LLMRequest(
+            system=_SYSTEM_ITEM_PLACEMENT,
+            user_message=(
+                "### TASK: item_placement\n"
+                f"### LEVEL: {level_id}\n"
+                f"Brief: {brief}\n"
+                f"Grid {grid_width}x{grid_height} cells (x right, y down "
+                "from the top).\n"
+                f"Item pool (id, kind, rarity, params): {json.dumps(pool)}\n"
+                f"Standable cells (x, y are grid coords, y from top): "
+                f"{standable_summary}\n"
+                + (
+                    "Swimmable water cells (items may FLOAT in water — "
+                    "the player swims through them to collect): "
+                    f"{water_summary}\n"
+                    if water_summary and water_summary != "none"
+                    else ""
+                )
+                + f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
+                f"Exit: {list(exit_) if exit_ else 'unknown'}\n"
+                f"Enemies already placed (id, at): {json.dumps(enemies)}\n"
+                f"{anchors}"
+                + (f"ROOM DIRECTIVE: {directive}\n" if directive else "")
+                + "PLACEMENT DOCTRINE:\n"
+                "- COINS are FREQUENT and guide the player: lay short "
+                "trails of them along the traversal route (on or just "
+                "above standable cells), arc them over gaps the player "
+                "jumps, and use a few to mark side areas worth exploring. "
+                "Roughly one coin every 4-8 columns of level.\n"
+                "- POWER-UPS are staged AROUND ENEMIES: place a shield or "
+                "boost a few cells before an enemy cluster or gauntlet so "
+                "the player gears up for the encounter.\n"
+                "- HEALS go where the player will be hurting — after "
+                "hazard stretches or dense encounters.\n"
+                + (
+                    '- A "box" placement floats a BREAKABLE ITEM BOX in '
+                    "open air 2-3 cells above standable ground (the player "
+                    "bumps it from below); its item pops out when broken. "
+                    "Use a couple per level at natural spots.\n"
+                    if has_box
+                    else ""
+                )
+                + f"{caps}Up to {max_items} placements. Items sit in OPEN "
+                "AIR cells the player can actually reach with the base "
+                "moveset (validators drop the rest).\n"
+                f"{fb}\n"
+                "Return a JSON object:\n"
+                '{"placements": [{"item_id": str, "x": int, "y": int, '
+                + (
+                    '"source": "trail"|"reward"|"box"}]}\n'
+                    '"source" is "reward" only at a reward alcove anchor, '
+                    '"box" for boxed items, else "trail".'
+                    if has_box
+                    else '"source": "trail"|"reward"}]}\n'
+                    '"source" is "reward" only at a reward alcove anchor, '
+                    'else "trail".'
+                )
+            ),
+            max_tokens=1024,
         )
 
     def enemy_flavor(
@@ -589,6 +797,7 @@ class PlatformerPrompts:
         intensity: str = "medium",
         water: str = "optional",
         axis: str = "horizontal",
+        difficulty: int = 1,
         previous: str | None = None,
         feedback: list[str] | None = None,
         predecessor: str | None = None,
@@ -615,10 +824,24 @@ class PlatformerPrompts:
         section (cohesion — what the level has done so far);
         ``successor_occupied`` (regenerations only) describes the shared band
         with the already-built NEXT section, so a regenerated interior
-        section meshes with BOTH neighbours."""
+        section meshes with BOTH neighbours.
+
+        ``difficulty`` (the level's rolled knob) steers CHALLENGE, never the
+        physics: at 3+ one paragraph tells the model to build difficulty
+        from enemies/hazards/precision INSIDE the physics envelope — the
+        paid difficulty-3 traces burned regen rounds on gaps the simulator
+        can never approve."""
         fb = self._layout_feedback(previous, feedback)
         volumes = tiles.named("volume")
         ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
+        challenge = ""
+        if difficulty >= 3:
+            challenge = (
+                "This is a HIGH-DIFFICULTY section: build the challenge "
+                "from enemies, hazards, and precision placement INSIDE "
+                "the numbers above — never from wider gaps or higher "
+                "steps; the simulator rejects anything beyond them.\n"
+            )
         character = (
             f"Section character — {section_name}: {flavor}\n"
             + _bias_guidance(feature_bias)
@@ -798,6 +1021,7 @@ class PlatformerPrompts:
                 + seam_line
                 + handoff
                 + _physics_guidance(movement)
+                + challenge
                 + "\n".join(vocab_lines)
                 + f"\n{fb}\n"
                 "Emit the section as DSL ops, one per line, nothing else:\n"
@@ -831,6 +1055,9 @@ class PlatformerPrompts:
         variants: VariantSet = DEFAULT_VARIANTS,
         rules: GameRules = DEFAULT_RULES,
         combat: CombatSpec = DEFAULT_COMBAT,
+        directive: str = "",
+        seabed_summary: str = "none",
+        hazard_summary: str = "none",
         previous: str | None = None,
         feedback: list[str] | None = None,
     ) -> LLMRequest:
@@ -856,7 +1083,15 @@ class PlatformerPrompts:
                 )
                 cap = rules.variant_caps.get(v.name)
                 cap_note = f"at most {cap} per level" if cap else "uncapped"
-                described.append(f"{v.name} ({mults or 'cosmetic'}; {cap_note})")
+                extra = (
+                    "; HAZARD-IMMUNE — may be POSTED ON hazard tiles "
+                    "(the hazard cells listed above)"
+                    if v.behavior.get("hazard_immune")
+                    else ""
+                )
+                described.append(
+                    f"{v.name} ({mults or 'cosmetic'}; {cap_note}{extra})"
+                )
             variant_offer = (
                 'You may mark a placement with "variant": one of '
                 f"{sorted(variants.by_name)} — tougher versions of their "
@@ -873,8 +1108,40 @@ class PlatformerPrompts:
                 f"{json.dumps(roster)}\n"
                 f"Standable cells (x, y are grid coords, y from top): "
                 f"{standable_summary}\n"
-                f"Volume cells by tile (swimmers ONLY go here): {volume_summary}\n"
-                f"Open-air cells (FLYERS hover here, above the ground): "
+                "Volume cells by tile ("
+                + (
+                    "swimmers go here, EXCEPT the submerged-ground cells "
+                    "listed below where LAND enemies may wade"
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else "swimmers ONLY go here"
+                )
+                + f"): {volume_summary}\n"
+                + (
+                    "Submerged ground (underwater flats — LAND enemies "
+                    "may WADE here, posted on the seabed; ONLY these cells "
+                    "have a solid floor below — deeper water without a floor "
+                    "is swimmers-only): "
+                    f"{seabed_summary}\n"
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else ""
+                )
+                + (
+                    "Hazard cells with footing (ONLY a hazard-immune "
+                    "variant may be posted here, standing on the spikes): "
+                    f"{hazard_summary}\n"
+                    if hazard_summary
+                    and hazard_summary != "none"
+                    and any(
+                        v.behavior.get("hazard_immune")
+                        for v in variants.variants
+                    )
+                    else ""
+                )
+                + f"Open-air cells (FLYERS hover here, above the ground): "
                 f"{air_summary}\n"
                 f"Player spawn: {list(spawn) if spawn else 'unknown'}\n"
                 + (
@@ -884,6 +1151,7 @@ class PlatformerPrompts:
                     if encounter_summary
                     else ""
                 )
+                + (f"ROOM DIRECTIVE: {directive}\n" if directive else "")
                 + f"{fb}\n"
                 f"Place 1..{max_enemies} enemies to fit the brief. Spread "
                 "them out; put slower enemies on patrol routes and ranged/"
@@ -892,10 +1160,20 @@ class PlatformerPrompts:
                 'swim_style matters: "surface" riders go on the water\'s '
                 'TOP row (open air above), "float" drifters need a deep '
                 '2x2 pocket, "within" swimmers just need their body in '
-                "water. FLYER-archetype enemies MUST be placed in open-air "
-                "cells — they hover above the ground and never stand on it. "
-                "Every other archetype MUST be on standable land. "
-                "Sizes are in cells: a size-2.0 body "
+                'water, "cruise" swimmers roam UNBOUNDED straight lines — '
+                "give them long open water. FLYER-archetype enemies MUST "
+                "be placed in open-air cells — they hover above the ground "
+                "and never stand on it. "
+                + (
+                    "Every other archetype stands on land — or WADES on "
+                    "submerged ground (the seabed cells above): a wading "
+                    "enemy patrols where it was posted. "
+                    if rules.enemy_water_policy == "seabed"
+                    and seabed_summary
+                    and seabed_summary != "none"
+                    else "Every other archetype MUST be on standable land. "
+                )
+                + "Sizes are in cells: a size-2.0 body "
                 "occupies TWO columns (x and x+1 both standable) and two "
                 "rows of clearance; size 1.5 needs one column but two rows "
                 "of headroom — put big enemies on wide open ground. Keep "

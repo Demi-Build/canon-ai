@@ -128,7 +128,14 @@ class ImageEditBackend(Protocol):
             ...  # no img2img — keep the static sprite (loud fallback)
     """
 
-    def edit(self, image_bytes: bytes, prompt: str, width: int, height: int) -> bytes:
+    def edit(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
+    ) -> bytes:
         """Edit ``image_bytes`` per ``prompt`` (img2img).
 
         Args:
@@ -136,6 +143,12 @@ class ImageEditBackend(Protocol):
             prompt: Text instructions describing the desired edit.
             width: Target width in pixels.
             height: Target height in pixels.
+            references: Optional extra images (PNG-encoded) attached ALONGSIDE
+                the source to steer the edit — e.g. the clean character sprite
+                as an identity anchor, or a stock motion sheet as a layout
+                guide (postmortem ticket 7). A backend that can't take extra
+                inputs may ignore them; the default keeps every existing call
+                byte-identical.
 
         Returns:
             Raw image bytes, conformed to exactly ``width`` x ``height`` (the
@@ -144,7 +157,12 @@ class ImageEditBackend(Protocol):
         ...
 
     async def edit_async(
-        self, image_bytes: bytes, prompt: str, width: int, height: int
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        references: list[bytes] | None = None,
     ) -> bytes:
         """Async variant of ``edit``."""
         ...
@@ -241,3 +259,42 @@ class SFXBackend(Protocol):
     ) -> bool:
         """Async variant of ``generate_and_save``."""
         ...
+
+
+#: The capability vocabulary image backends may declare (graphics arc):
+#: - "static_sprite": text→image generation (every backend).
+#: - "animation_sheets": img2img editing usable for frame sheets.
+#: - "tilesets": native coherent tileset/Wang-set generation.
+#: - "remove_bg": native background removal.
+#: - "seeds": honors a pinned seed (reproducible re-runs).
+#: - "native_pixels": output is already grid-true pixel art (skips the
+#:   mandatory grid-snap post-process general models need).
+IMAGE_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "static_sprite",
+        "animation_sheets",
+        "tilesets",
+        "remove_bg",
+        "seeds",
+        "native_pixels",
+    }
+)
+
+
+def backend_capabilities(backend: object) -> frozenset[str]:
+    """A backend's declared capability set, with graceful derivation for
+    implementors that predate the vocabulary: ``static_sprite`` always;
+    ``animation_sheets`` iff the backend structurally implements
+    :class:`ImageEditBackend`. Callers DEGRADE on absence (a backend
+    without ``animation_sheets`` keeps static sprites; one without
+    ``native_pixels`` gets the grid-snap post-process) — they never
+    require a capability to proceed."""
+    declared = getattr(backend, "capabilities", None)
+    if declared:
+        return frozenset(str(c) for c in declared) & IMAGE_CAPABILITIES | (
+            frozenset({"static_sprite"})
+        )
+    caps = {"static_sprite"}
+    if isinstance(backend, ImageEditBackend):
+        caps.add("animation_sheets")
+    return frozenset(caps)

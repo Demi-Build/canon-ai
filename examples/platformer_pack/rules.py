@@ -29,7 +29,11 @@ v1 enforced policies:
 - ``enemy_water_policy``: "swimmers_only" — swimmers live in water, land
   enemies refuse to enter it (placement validation + runtime movement).
   "forbidden" — no enemies in water at all. "amphibious" — anyone
-  anywhere.
+  anywhere. "seabed" (water arc, the pack default) — swimmers stay in
+  water like swimmers_only, and a LAND enemy may occupy water ONLY when
+  its own placement/home cell is submerged over solid ground: a wading
+  patroller posted on an underwater flat paces its beat there, but land
+  enemies on dry ground still never migrate into pools.
 - ``platform_drop_through``: whether Down+jump drops the player through
   one-way platforms.
 - ``variant_caps`` (3b): per-level at-most-N caps per enemy-variant name
@@ -59,7 +63,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -71,17 +75,23 @@ class GameRules(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     water_containment: Literal["contained", "free"] = "contained"
-    enemy_water_policy: Literal["swimmers_only", "forbidden", "amphibious"] = (
-        "swimmers_only"
-    )
+    enemy_water_policy: Literal[
+        "swimmers_only", "forbidden", "amphibious", "seabed"
+    ] = "seabed"
     platform_drop_through: bool = True
     #: Seconds a BREAKABLE floor tile holds once the player stands on it,
     #: before it crumbles and drops them (both play surfaces read it; the
     #: reachability sim ignores the timing, treating breakables as permanent
     #: footholds — v1 conservative).
     break_delay_s: float = 0.6
-    variant_caps: dict[str, int] = {"elite": 1, "champion": 1, "relentless": 1}
+    variant_caps: dict[str, int] = {
+        "elite": 1, "champion": 1, "relentless": 1, "emberborn": 1,
+    }
     checkpoint_enemy_reset: bool = True
+    #: Seconds a killed enemy lingers playing its DEATH animation before
+    #: vanishing (both play surfaces; frozen in place, no collision). Old
+    #: manifests without the key keep the vanish-on-kill-frame behavior.
+    death_linger_s: float = 0.5
     spawn_grace: Literal["until_move", "off"] = "until_move"
     rarity_caps: dict[str, int] = {"rare": 1, "uncommon": 2}
     #: Enemy eyesight for aggro detection, by LOCOMOTION archetype — a data
@@ -97,6 +107,9 @@ class GameRules(BaseModel):
     #: consumers. Aggro is gated by BOTH range and this FOV.
     enemy_sight: dict[str, dict] = {
         "patroller": {"fov": "forward", "vband": 2},
+        # Hoppers scan a taller band (their own arc carries them up) —
+        # WITHOUT an entry an archetype silently defaults to omni.
+        "hopper": {"fov": "forward", "vband": 3},
         "swimmer": {"fov": "omni"},
         "flyer": {"fov": "hemisphere"},
         "sentry": {"fov": "none"},
@@ -135,3 +148,78 @@ def load_rules(path: str | Path = DEFAULT_RULES_PATH) -> GameRules:
 
 
 DEFAULT_RULES = load_rules()
+
+# ---------------------------------------------------------------------------
+# Per-level overrides (combat/level-picks arc) — the reserved cascade's
+# first real layer: the STAGE PLAN may flag a rule/movement twist per
+# level ("the deep vents: no drop-through"), but only from the CLOSED
+# vocabulary below, validated FAIL-CLOSED (design choice = LLM,
+# mechanics + bounds = code).
+# ---------------------------------------------------------------------------
+
+#: The pack's override vocabulary — data, like the rules themselves.
+DEFAULT_OVERRIDES_PATH = Path(__file__).parent / "rule_overrides.json"
+
+
+def load_override_vocabulary(
+    path: str | Path = DEFAULT_OVERRIDES_PATH,
+) -> dict[str, dict]:
+    """Load the closed per-level override vocabulary: key -> {type,
+    band?, target?}. ``target: "movement"`` keys override
+    PlayerMovementSpec; the rest override GameRules."""
+    raw = json.loads(Path(path).read_text())
+    return dict(raw.get("keys", {}))
+
+
+DEFAULT_OVERRIDE_VOCABULARY = load_override_vocabulary()
+
+
+def validate_overrides(
+    proposed: dict,
+    vocabulary: dict[str, dict] | None = None,
+) -> tuple[dict, dict, list[str]]:
+    """FAIL-CLOSED validation of a proposed per-level override dict:
+    returns ``(rules_overrides, movement_overrides, problems)`` — only
+    vocabulary keys whose value parses to the declared type AND lands
+    inside the declared band survive; everything else is dropped with a
+    note (the caller warns). Values are coerced to the declared type so
+    an LLM float never rides into an int field."""
+    vocab = DEFAULT_OVERRIDE_VOCABULARY if vocabulary is None else vocabulary
+    rules_out: dict = {}
+    movement_out: dict = {}
+    problems: list[str] = []
+    for key, value in dict(proposed or {}).items():
+        spec = vocab.get(str(key))
+        if spec is None:
+            problems.append(
+                f"override {key!r} is not in the vocabulary "
+                f"({sorted(vocab)}) — dropped."
+            )
+            continue
+        kind = str(spec.get("type", "float"))
+        try:
+            if kind == "bool":
+                if not isinstance(value, bool):
+                    raise ValueError("not a bool")
+                coerced: Any = value
+            elif kind == "int":
+                coerced = int(value)
+            else:
+                coerced = float(value)
+        except (TypeError, ValueError):
+            problems.append(
+                f"override {key!r}={value!r} is not a {kind} — dropped."
+            )
+            continue
+        band = spec.get("band")
+        if band is not None and not (band[0] <= coerced <= band[1]):
+            problems.append(
+                f"override {key!r}={coerced!r} is outside the allowed "
+                f"band {band} — dropped."
+            )
+            continue
+        if str(spec.get("target", "rules")) == "movement":
+            movement_out[str(key)] = coerced
+        else:
+            rules_out[str(key)] = coerced
+    return rules_out, movement_out, problems

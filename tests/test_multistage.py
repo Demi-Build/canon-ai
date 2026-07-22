@@ -21,6 +21,7 @@ from examples.platformer_pack.phases import roll_habitats
 from examples.platformer_pack.rules import DEFAULT_RULES
 from examples.platformer_pack.validate import check_placements
 from examples.run_platformer_slice import make_fake_responder
+from tests.treediff import assert_trees_byte_identical
 
 SEED = "emberfall_001"
 STAGES = ("ashen_depths", "bloom_terraces", "frostspire_peaks")
@@ -66,7 +67,17 @@ class TestWorldPlan:
         assert ctx.bible.stages["ashen_depths"].level_ids == ["l1", "l2", "l3"]
         assert ctx.bible.stages["bloom_terraces"].level_ids == ["l4", "l5", "l6"]
         assert ctx.bible.stages["frostspire_peaks"].level_ids == ["l7", "l8", "l9"]
-        assert sorted(ctx.bible.levels) == sorted(f"l{i}" for i in range(1, 10))
+        # bible.levels = the 9 main-map levels PLUS their secret rooms
+        # (multi-room arc) — rooms are Levels linked by parent_level,
+        # never members of any stage.level_ids.
+        mains = {
+            lid for lid, lv in ctx.bible.levels.items() if not lv.parent_level
+        }
+        assert sorted(mains) == sorted(f"l{i}" for i in range(1, 10))
+        for lid, level in ctx.bible.levels.items():
+            if level.parent_level:
+                assert level.parent_level in mains
+                assert lid.startswith(level.parent_level)
         for stage_id in STAGES:
             for lid in ctx.bible.stages[stage_id].level_ids:
                 assert ctx.bible.levels[lid].stage_id == stage_id
@@ -672,6 +683,121 @@ class TestFlyer:
         assert max_y >= 6.0 + self.FCFG["swoop_depth"] - 0.2  # it DID dive
 
 
+def _hopper_step(st, behavior, grid, gravity, player_x, speed, dt, mode="patrol"):
+    """One step of the consumers' HOPPER branch (the 4th mirror beside
+    platformer_play.py and main.gd): grounded = the hop clock ticks and
+    launches at cadence (ballistic, hop_height + landing margin);
+    airborne = gravity + X drift under the AIRBORNE occupancy mode
+    (solids/one-ways/volumes flip it, hazards pass, no footing) +
+    ANCHOR-ONLY landing on support below; off the world = dead.
+    Mutates st = {x, y, dir, vy, hop_t, grounded, alive}."""
+    h, w = grid.shape
+    block, oneway, vol = {1, 3, 4, 5}, {2}, {20}
+
+    def tile(x, y):
+        xi, yi = int(x), int(y)
+        return int(grid[yi, xi]) if 0 <= xi < w and 0 <= yi < h else 0
+
+    hop_h = float(behavior.get("hop_height", 2))
+    period = float(behavior.get("hop_period_s", 1.0))
+    if st["grounded"]:
+        st["hop_t"] += dt
+        if mode == "chase":
+            st["dir"] = 1.0 if player_x >= st["x"] else -1.0
+        if st["hop_t"] >= period:
+            st["hop_t"] = 0.0
+            st["vy"] = -math.sqrt(2.0 * gravity * (hop_h + 0.25))
+            st["grounded"] = False
+    else:
+        # 1e-3 lattice quantization (both consumers): tile-boundary
+        # decisions agree across float32/float64 surfaces.
+        nx = round(st["x"] + st["dir"] * speed * dt, 3)
+        c = tile(nx, st["y"])
+        if not (c in block or c in oneway or c in vol):
+            st["x"] = nx
+        else:
+            st["dir"] *= -1.0
+        st["vy"] += gravity * dt
+        ny = round(st["y"] + st["vy"] * dt, 3)
+        below = tile(st["x"], ny + 1.0)
+        if st["vy"] < 0 and tile(st["x"], ny) in block:
+            st["vy"] = 0.0
+        elif st["vy"] > 0 and (below in block or below in oneway):
+            target = float(int(ny + 1.0) - 1)
+            if ny >= target:
+                st["y"], st["vy"], st["grounded"] = target, 0.0, True
+            else:
+                st["y"] = ny
+        else:
+            st["y"] = ny
+        if st["y"] > h + 2:
+            st["alive"] = False
+
+
+class TestHopperBehavior:
+    """The hopper locomotion (combat/level-picks arc) via the faithful
+    stepper re-implementation — launch cadence, arc height, gap
+    crossing under the airborne occupancy mode, ceiling bonk."""
+
+    def _fresh(self, x=6.0, y=10.0):
+        return {
+            "x": x, "y": y, "dir": 1.0, "vy": 0.0, "hop_t": 0.0,
+            "grounded": True, "alive": True,
+        }
+
+    def _flat(self, width=30, height=14):
+        grid = np.zeros((height, width), dtype=np.int8)
+        grid[12, :] = 1
+        grid[13, :] = 1
+        return grid
+
+    def test_hop_cycle_launches_arcs_and_lands(self) -> None:
+        grid = self._flat()
+        behavior = {"hop_height": 2, "hop_period_s": 1.0}
+        st = self._fresh(y=11.0)
+        min_y = 11.0
+        landings = 0
+        was_grounded = True
+        for _ in range(600):  # 10s: multiple full cycles
+            _hopper_step(st, behavior, grid, 40.0, 0.0, 2.0, 1 / 60)
+            min_y = min(min_y, st["y"])
+            if st["grounded"] and not was_grounded:
+                landings += 1
+                assert st["y"] == 11.0  # anchor-only snap to the floor row
+            was_grounded = st["grounded"]
+        assert st["alive"]
+        assert landings >= 3
+        assert min_y <= 11.0 - 1.8  # the arc actually rose ~hop_height
+
+    def test_hopper_crosses_a_gap_a_walker_cannot(self) -> None:
+        grid = self._flat()
+        grid[12, 10] = 0
+        grid[13, 10] = 0  # a 1-wide bottomless gap
+        behavior = {"hop_height": 2, "hop_period_s": 0.8}
+        st = self._fresh(x=7.0, y=11.0)
+        crossed = False
+        for _ in range(2400):
+            _hopper_step(st, behavior, grid, 40.0, 0.0, 2.0, 1 / 60)
+            if not st["alive"]:
+                break
+            if st["x"] > 11.5 and st["grounded"]:
+                crossed = True
+                break
+        assert st["alive"] and crossed
+
+    def test_ceiling_bonk_stops_the_rise(self) -> None:
+        grid = self._flat()
+        grid[9, :] = 1  # a ceiling 2 rows above the standing row
+        behavior = {"hop_height": 3, "hop_period_s": 0.5}
+        st = self._fresh(y=11.0)
+        min_y = 11.0
+        for _ in range(300):
+            _hopper_step(st, behavior, grid, 40.0, 0.0, 2.0, 1 / 60)
+            min_y = min(min_y, st["y"])
+        assert st["alive"]
+        assert min_y >= 9.5  # never clipped through the ceiling row
+
+
 class TestManifestV2:
     def test_stages_levels_and_display_names(self, world) -> None:
         _, out = world
@@ -718,13 +844,7 @@ class TestManifestV2:
     def test_byte_determinism(self, tmp_path: Path, world) -> None:
         _, out = world
         _run_world(tmp_path / "b")
-        files = sorted(
-            p.relative_to(out) for p in out.rglob("*") if p.is_file()
-        )
-        for rel in files:
-            assert (out / rel).read_bytes() == (tmp_path / "b" / rel).read_bytes(), (
-                f"{rel} differs between identical-seed runs"
-            )
+        assert_trees_byte_identical(out, tmp_path / "b")
 
     def test_terrain_uses_the_stage_tileset(self, world) -> None:
         """A stage-2 level's terrain must resolve through its own stage's

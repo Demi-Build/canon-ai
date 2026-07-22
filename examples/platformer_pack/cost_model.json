@@ -1,0 +1,74 @@
+{
+  "tasks": {
+    "plat:world": {
+      "input_tokens": 900,
+      "output_tokens": 600
+    },
+    "plat:stage": {
+      "input_tokens": 1000,
+      "output_tokens": 700
+    },
+    "plat:style": {
+      "input_tokens": 900,
+      "output_tokens": 500
+    },
+    "plat:enemies": {
+      "input_tokens": 900,
+      "output_tokens": 260
+    },
+    "plat:items": {
+      "input_tokens": 700,
+      "output_tokens": 200
+    },
+    "plat:layout": {
+      "input_tokens": 2600,
+      "output_tokens": 900
+    },
+    "plat:placement": {
+      "input_tokens": 2200,
+      "output_tokens": 500
+    },
+    "plat:item_placement": {
+      "input_tokens": 1800,
+      "output_tokens": 450
+    },
+    "plat:decorator": {
+      "input_tokens": 900,
+      "output_tokens": 380
+    }
+  },
+  "default_task": {
+    "input_tokens": 1200,
+    "output_tokens": 600
+  },
+  "sections_per_level_avg": 4.2,
+  "worst_retries": 3,
+  "vlm_per_level": {
+    "input_tokens": 2500,
+    "output_tokens": 400
+  },
+  "vlm_per_actor": {
+    "input_tokens": 1200,
+    "output_tokens": 300
+  },
+  "assets": {
+    "image_usd_per_call": 0.04,
+    "images_per_stage": 18,
+    "images_per_stage_note": "10 tile names + 3 backdrop bands (2 + foreground) + 5 props (checkpoint, exit, dust, splash, sparkle)",
+    "images_per_enemy": 6,
+    "images_per_item": 1,
+    "images_player": 7,
+    "images_world": 1,
+    "music_per_stage": 1,
+    "music_usd_per_track": 0.1,
+    "sfx_events": 4,
+    "sfx_usd_per_event": 0.05
+  },
+  "fresh_plan": {
+    "num_stages": 3,
+    "num_levels": 9,
+    "num_enemies": 7,
+    "num_items": 5,
+    "secret_rooms_avg": 0.6
+  }
+}

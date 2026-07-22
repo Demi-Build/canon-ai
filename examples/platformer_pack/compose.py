@@ -20,17 +20,24 @@ from examples.platformer_pack.art_phases import (
     SpriteAnimationPhase,
     SpriteArtPhase,
     TilesetArtPhase,
+    WorldArtPhase,
 )
 from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
 from examples.platformer_pack.layers import BackgroundPhase, TileAssignmentPhase
 from examples.platformer_pack.level import (
     DecoratorPhase,
+    ItemsPlacementPhase,
     LayoutStampPhase,
     PlacementPhase,
 )
 from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
-from examples.platformer_pack.phases import EnemyGeneratorPhase, StagePhase, WorldPhase
+from examples.platformer_pack.phases import (
+    EnemyGeneratorPhase,
+    ItemGeneratorPhase,
+    StagePhase,
+    WorldPhase,
+)
 from examples.platformer_pack.render import RenderPhase
 from examples.platformer_pack.rules import DEFAULT_RULES, GameRules
 from examples.platformer_pack.style import StyleGuidePhase
@@ -213,6 +220,9 @@ class SliceManifestPhase:
             "world": world_title,
             # Save-file key (see world_key above) — the runtime reads this.
             "world_id": world_id,
+            # Generated world key-art (boot splash): output-relative PNG
+            # path, or "" — the engine draws its code title card instead.
+            "splash": ctx.bible.world.splash_path if ctx.bible.world else "",
             # World structure (multi-stage): biome stages in play order,
             # every level flattened in that same order, and the code-laid
             # map the world-map screen draws. Unlock policy is data.
@@ -235,6 +245,9 @@ class SliceManifestPhase:
                 else {"type": "linear"}
             ),
             "enemies": sorted(ctx.bible.enemy_definitions),
+            # World item pool ids — consumers load item/<id>.json like
+            # enemy definitions (Arc 2).
+            "items": sorted(getattr(ctx.bible, "items", {})),
             # The physics the validators actually enforced — both play
             # surfaces read this, so a custom spec must ship here too.
             "movement": self.movement.model_dump(),
@@ -282,6 +295,72 @@ class SliceManifestPhase:
         }
         ctx.adapter.write_json_singleton("manifest.json", manifest)
 
+        # BATCH OUTPUT REPORT (graphics arc, sample→lock→batch): exactly
+        # what needs regenerating, with the targeted command — a failed
+        # batch never silently loops, it hands the human a fix list.
+        needs_rework = sorted(
+            entity.artifact_id or target_id
+            for target_id, entity in [
+                (f"enemy:{eid}", e)
+                for eid, e in ctx.bible.enemy_definitions.items()
+            ]
+            + [
+                (f"item:{iid}", i)
+                for iid, i in getattr(ctx.bible, "items", {}).items()
+            ]
+            + [
+                (f"tileset:{sid}", t)
+                for sid, t in ctx.bible.tilesets.items()
+            ]
+            + [
+                (f"props:{sid}", p)
+                for sid, p in getattr(ctx.bible, "props", {}).items()
+            ]
+            + [
+                (f"backdrop:{sid}", b)
+                for sid, b in getattr(ctx.bible, "backdrops", {}).items()
+            ]
+            + (
+                [("player", ctx.bible.player)]
+                if getattr(ctx.bible, "player", None) is not None
+                else []
+            )
+            if entity.review_status == "needs-rework"
+        )
+        art_keywords = (
+            "sprite", "tileset", "animation", "palette",
+            "readability", "fidelity", "style", "backdrop",
+        )
+        ctx.adapter.write_json_singleton(
+            "review/art_report.json",
+            {
+                "needs_rework": [
+                    {
+                        "target": target,
+                        "regen": (
+                            "uv run canon regen <output>/bible.json "
+                            f"{target} --mark-only"
+                        ),
+                    }
+                    for target in needs_rework
+                ],
+                "art_warnings": [
+                    w
+                    for w in manifest["warnings"]
+                    if any(k in w for k in art_keywords)
+                ],
+            },
+        )
+
+        # Observability snapshot (MazeWorld parity): per-phase-label
+        # tokens/cost when the run wired stats into its LLMClient; all
+        # zeros otherwise. Sits OUTSIDE the byte-determinism contract
+        # (like bible.json) — call ordering is scheduler-shaped.
+        ctx.adapter.write_json_singleton(
+            "generation_stats.json",
+            ctx.stats.to_dict() if getattr(ctx, "stats", None) else {},
+        )
+
         # Generation report — the positive summary, MazeWorld-style.
         logger.info(
             "Slice complete: world %r — %d stage(s) (%s), %d levels, "
@@ -301,6 +380,7 @@ class SliceManifestPhase:
 def compose_pipeline(
     num_levels: int = 3,
     num_enemies: int = 4,
+    num_items: int = 5,
     num_stages: int = 1,
     width: int = 48,
     height: int = 16,
@@ -327,6 +407,7 @@ def compose_pipeline(
         StagePhase(num_levels=num_levels, num_enemies=num_enemies),
         StyleGuidePhase(tiles=tiles),
         EnemyGeneratorPhase(count=num_enemies, tiles=tiles),
+        ItemGeneratorPhase(count=num_items, tiles=tiles),
         PlaceholderTilesetPhase(tiles=tiles, graphics=graphics),
         LayoutStampPhase(
             width=width, height=height, movement=movement, rules=rules,
@@ -335,6 +416,7 @@ def compose_pipeline(
         TileAssignmentPhase(),
         BackgroundPhase(),
         PlacementPhase(rules=rules, tiles=tiles, variants=variants, combat=combat),
+        ItemsPlacementPhase(rules=rules, tiles=tiles, movement=movement),
         DecoratorPhase(),
         # Art AT THE END (user rule): paid generation only after every
         # gameplay layer above validated; renders below see final art.
@@ -347,11 +429,15 @@ def compose_pipeline(
             producer=image_producer, judge=vlm_judge, graphics=graphics
         ),
         BackdropArtPhase(tiles=tiles, producer=image_producer, graphics=graphics),
+        WorldArtPhase(producer=image_producer, graphics=graphics),
         AudioPhase(music_producer=music_producer, sfx_producer=sfx_producer),
         RenderPhase(variants=variants, graphics=graphics),
         # VLM QA at the VERY END of generation: it judges the renders
         # above and its failing verdicts must land in the manifest below.
-        VlmQaPhase(judge=vlm_judge, tiles=tiles, variants=variants),
+        VlmQaPhase(
+            judge=vlm_judge, tiles=tiles, variants=variants,
+            graphics=graphics,
+        ),
         SliceManifestPhase(
             movement=movement, rules=rules, tiles=tiles, variants=variants,
             graphics=graphics, combat=combat,

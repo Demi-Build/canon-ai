@@ -35,6 +35,11 @@ CHECKPOINT_COLOR = "#ffd24a"
 #: Reward markers (secret alcoves, Chunk E) draw as a filled gold GEM — a
 #: distinct shape from the outlined checkpoint boxes so they read at a glance.
 REWARD_COLOR = (255, 208, 74)
+#: Secret-room entrances/portals (multi-room arc): cyan TRIANGLES — filled
+#: on the main map (entrance; points the verb's way: down = pipe, up =
+#: door), outlined inside the room (the return portal). Inert on the play
+#: surfaces until the consumer chunk lands.
+ROOM_COLOR = (80, 220, 255)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,8 @@ def render_level(
     tileset: Tileset,
     sheet,
     variants: VariantSet = DEFAULT_VARIANTS,
+    items: dict[str, Any] | None = None,
+    graphics: GraphicsSpec = DEFAULT_GRAPHICS,
 ) -> bytes:
     from PIL import Image, ImageDraw
 
@@ -99,8 +106,20 @@ def render_level(
     for y in range(height):
         for x in range(width):
             slot = int(terrain[y, x])
-            if slot_categories.get(slot) == "empty":
+            category = slot_categories.get(slot)
+            if category == "empty":
                 color = _band_shade(bg_base, int(background[y, x]))
+            elif category == "volume":
+                # Translucent water (RB2): the slot mean composited at
+                # water_alpha over this cell's band-shaded sky — the
+                # analytic render shows the same truth the skinned/play
+                # surfaces draw. Presentation only; terrain untouched.
+                sky = _band_shade(bg_base, int(background[y, x]))
+                mean = slot_colors.get(slot, (255, 0, 255))[:3]
+                a = graphics.water_alpha
+                color = tuple(
+                    round(m * a + s * (1.0 - a)) for m, s in zip(mean, sky)
+                )
             else:
                 color = tuple(slot_colors.get(slot, (255, 0, 255))[:3])
             draw.rectangle(
@@ -133,6 +152,64 @@ def render_level(
                 [(cx, cy - 6), (cx + 5, cy), (cx, cy + 6), (cx - 5, cy)],
                 fill=REWARD_COLOR, outline="#ffffff",
             )
+    # Secret-room markers (multi-room arc): cyan triangles pointing the
+    # entry verb's way (down = pipe, up = door) — filled = the main-map
+    # entrance, outlined = the room's return portal.
+    for trigger in level.triggers:
+        if trigger.type not in ("room_entrance", "room_portal"):
+            continue
+        cx = trigger.x * SCALE + SCALE // 2
+        cy = trigger.y * SCALE + SCALE // 2
+        down = str(trigger.params.get("verb", "pipe")) == "pipe"
+        points = (
+            [(cx - 6, cy - 5), (cx + 6, cy - 5), (cx, cy + 6)]
+            if down
+            else [(cx - 6, cy + 5), (cx + 6, cy + 5), (cx, cy - 6)]
+        )
+        if trigger.type == "room_entrance":
+            draw.polygon(points, fill=ROOM_COLOR, outline="#ffffff")
+        else:
+            draw.polygon(points, outline=ROOM_COLOR)
+
+    # Items layer (Arc 2). BOX placements carry a solid box tile every
+    # consumer overlays onto the grid — the analytic render must show it
+    # (it IS collision). Items draw as filled circles in their definition
+    # color (a distinct shape from enemy rects, gems, and decor diamonds);
+    # a boxed item's circle rides on its box cell.
+    box_slot = next(
+        (
+            slot.index
+            for slot in getattr(tileset, "slots", []) or []
+            if bool((slot.params or {}).get("container"))
+        ),
+        None,
+    )
+    for placement in getattr(level, "items", []) or []:
+        item_id = placement.ref.split(":", 1)[1]
+        item = (items or {}).get(item_id)
+        color = _hex_to_rgb(
+            (item.stats.get("placeholder_color") if item else None)
+            or "#ffd700"
+        )
+        x, y = placement.pos
+        if str(placement.overrides.get("source", "")) == "box":
+            box_color = (
+                tuple(slot_colors[box_slot][:3])
+                if box_slot is not None and box_slot in slot_colors
+                else (190, 125, 45)
+            )
+            draw.rectangle(
+                (x * SCALE, y * SCALE, (x + 1) * SCALE - 1, (y + 1) * SCALE - 1),
+                fill=box_color, outline="#ffffff",
+            )
+            radius = 4
+        else:
+            radius = 6
+        cx, cy = x * SCALE + SCALE // 2, y * SCALE + SCALE // 2
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=color, outline="#ffffff",
+        )
 
     for placement in level.entities:
         enemy_id = placement.ref.split(":", 1)[1]
@@ -179,11 +256,14 @@ def render_level(
     return buffer.getvalue()
 
 
-def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
+def render_legend(
+    enemies: dict[str, EnemyDefinition],
+    items: dict[str, Any] | None = None,
+) -> bytes:
     from PIL import Image, ImageDraw
 
     row_h, swatch, pad, width = 28, 18, 8, 720
-    rows = max(len(enemies), 1) + 1  # + footer note
+    rows = max(len(enemies), 1) + len(items or {}) + 1  # + footer note
     img = Image.new("RGB", (width, pad * 2 + row_h * rows), (24, 24, 32))
     draw = ImageDraw.Draw(img)
     y = pad
@@ -205,10 +285,28 @@ def render_legend(enemies: dict[str, EnemyDefinition]) -> bytes:
             fill=(230, 230, 230),
         )
         y += row_h
+    for item in (items or {}).values():
+        color = _hex_to_rgb(item.stats.get("placeholder_color", "#ffd700"))
+        cx, cy = pad + swatch // 2, y + swatch // 2
+        draw.ellipse(
+            (cx - swatch // 2, cy - swatch // 2,
+             cx + swatch // 2, cy + swatch // 2),
+            fill=color, outline="#ffffff",
+        )
+        params = ", ".join(f"{k}={v}" for k, v in sorted(item.params.items()))
+        draw.text(
+            (pad * 2 + swatch, y + 3),
+            f"{item.name}  [item: {item.kind}]  {item.rarity}"
+            + (f"  {params}" if params else ""),
+            fill=(230, 230, 230),
+        )
+        y += row_h
     draw.text(
         (pad, y + 3),
         "white outline = variant placement (see manifest variants)   |   "
         "amber box = checkpoint   |   gold gem = secret reward   |   "
+        "cyan triangle = secret-room entrance/portal (down=pipe, up=door)"
+        "   |   circles = items (bronze tile = item box)   |   "
         "diamonds = foreground decor",
         fill=(170, 170, 180),
     )
@@ -230,6 +328,8 @@ def render_level_skinned(
     variants: VariantSet = DEFAULT_VARIANTS,
     graphics: GraphicsSpec = DEFAULT_GRAPHICS,
     prop_sprites: dict[str, Any] | None = None,
+    items: dict[str, Any] | None = None,
+    item_sprites: dict[str, Any] | None = None,
 ) -> bytes:
     """The 'what it looks like' render: real tile regions, sprites, and
     parallax scenery composited flat (camera-less). This is the skinned
@@ -270,6 +370,18 @@ def render_level_skinned(
     for slot in tileset.slots:
         x0, y0, w, h = slot.px_region
         regions[slot.index] = sheet.crop((x0, y0, x0 + w, y0 + h)).resize((px, px))
+    # Volume (water) tiles paste TRANSLUCENT — their alpha scaled by
+    # water_alpha so the backdrop already composited underneath shows
+    # through. The tile ART stays opaque on disk; presentation only.
+    for index, category in slot_categories.items():
+        if category == "volume" and index in regions:
+            rgba = regions[index].convert("RGBA")
+            rgba.putalpha(
+                rgba.getchannel("A").point(
+                    lambda a: round(a * graphics.water_alpha)
+                )
+            )
+            regions[index] = rgba
     for y in range(height):
         for x in range(width):
             slot = int(terrain[y, x])
@@ -279,29 +391,60 @@ def render_level_skinned(
             if tile is not None:
                 img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
 
+    # Items layer (Arc 2) — gameplay, so ALWAYS visible here (unlike the
+    # deliberately-omitted decor): box tiles paste their slot art (they
+    # ARE collision once consumers overlay them); items draw as colored
+    # circles until item sprites land (chunk 6).
+    box_slot_index = next(
+        (
+            slot.index
+            for slot in tileset.slots
+            if bool((slot.params or {}).get("container"))
+        ),
+        None,
+    )
+    for placement in getattr(level, "items", []) or []:
+        item_id = placement.ref.split(":", 1)[1]
+        item = (items or {}).get(item_id)
+        x, y = placement.pos
+        boxed = str(placement.overrides.get("source", "")) == "box"
+        if boxed:
+            tile = regions.get(box_slot_index)
+            if tile is not None:
+                img.paste(tile, (x * px, y * px), tile.convert("RGBA"))
+        sprite = (item_sprites or {}).get(item_id)
+        if sprite is not None and not boxed:
+            side = int(px * 0.7)
+            scaled = sprite.resize((side, side))
+            img.paste(
+                scaled,
+                (x * px + (px - side) // 2, y * px + (px - side) // 2),
+                scaled,
+            )
+            continue
+        radius = px // 6 if boxed else px // 4
+        color = _hex_to_rgb(
+            (item.stats.get("placeholder_color") if item else None)
+            or "#ffd700"
+        )
+        cx, cy = x * px + px // 2, y * px + px // 2
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=color, outline="#ffffff",
+        )
+
     # Gameplay props before actors (behind them, like both play
     # surfaces): the exit goal on the exit cell and an UNCLAIMED
     # checkpoint flag per trigger — sprite when the art track produced
     # one, drawn shape otherwise. The block render keeps its analytic
     # markers; this surface shows what the player sees.
     props = prop_sprites or {}
-    if level.exit is not None:
-        ex, ey = level.exit
-        foot = ((ex + 0.5) * px, (ey + 1) * px)
-        sprite = props.get("exit")
-        if sprite is not None:
-            side = px * 2
-            scaled = sprite.resize((side, side))
-            img.paste(scaled, (round(foot[0] - side / 2), round(foot[1] - side)), scaled)
-        else:
-            door_w, door_h = round(px * 1.1), round(px * 1.8)
-            left, top = round(foot[0] - door_w / 2), round(foot[1] - door_h)
-            overlay = Image.new("RGBA", (door_w, door_h), (64, 255, 112, 90))
-            img.paste(overlay, (left, top), overlay)
-            draw.rectangle(
-                (left, top, left + door_w - 1, top + door_h - 1),
-                outline=(64, 255, 112), width=2,
-            )
+    # The end-of-level goal has NO visual here anymore (postmortem ticket 3):
+    # the win ZONE is the whole right edge / summit, so a single-cell doorway
+    # was a false "touch here" affordance decoupled from the win condition.
+    # FUTURE finish-line seam: a full-height marker spanning the exit COLUMN,
+    # drawn once — a different asset, not this prop. level.exit and every win
+    # path stay untouched.
     for trigger in level.triggers:
         if trigger.type != "checkpoint":
             continue
@@ -417,7 +560,8 @@ def render_level_review(
         background = data["background"]
     png = render_level(
         terrain, background, level, ctx.bible.enemy_definitions, tileset,
-        sheet, variants=variants,
+        sheet, variants=variants, items=getattr(ctx.bible, "items", {}),
+        graphics=graphics,
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}.png", png
@@ -441,11 +585,18 @@ def render_level_review(
         for name, rel in (stage_props.prop_paths if stage_props else {}).items()
         if (sprite := _load_sprite(ctx, rel)) is not None
     }
+    item_sprites = {
+        iid: sprite
+        for iid, item in getattr(ctx.bible, "items", {}).items()
+        if (sprite := _load_sprite(ctx, item.sprite_path)) is not None
+    }
     skinned = render_level_skinned(
         terrain, background, level, ctx.bible.enemy_definitions, tileset,
         sheet, bands, enemy_sprites,
         _load_sprite(ctx, "sprite/player/base.png"), variants=variants,
         graphics=graphics, prop_sprites=prop_sprites,
+        items=getattr(ctx.bible, "items", {}),
+        item_sprites=item_sprites,
     )
     ctx.adapter.write_binary(
         f"review/{level.stage_id}/{level.level_id}_skinned.png", skinned
@@ -454,7 +605,11 @@ def render_level_review(
 
 def write_review_legend(ctx: Any) -> None:
     ctx.adapter.write_binary(
-        "review/legend.png", render_legend(ctx.bible.enemy_definitions)
+        "review/legend.png",
+        render_legend(
+            ctx.bible.enemy_definitions,
+            items=getattr(ctx.bible, "items", {}),
+        ),
     )
 
 

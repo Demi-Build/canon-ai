@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import pytest  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 
 from canon.backends.testing import (  # noqa: E402
@@ -42,7 +43,12 @@ from examples.platformer_pack.tileset_art import (  # noqa: E402
     remove_background,
     segment_frames,
 )
-from examples.platformer_pack.vlm_qa import make_fake_vlm_responder  # noqa: E402
+from examples.platformer_pack.vlm_qa import (  # noqa: E402
+    PLAYER_ANIMATION_STATES,
+    STATE_LOOP_MODES,
+    enemy_animation_states,
+    make_fake_vlm_responder,
+)
 from examples.run_platformer_slice import make_fake_responder  # noqa: E402
 
 SEED = "emberfall_001"
@@ -225,8 +231,11 @@ class TestSpriteArt:
             for w in ctx.artifacts.get("slice_warnings", [])
             if w.startswith("sprite art:")
         ]
-        # + player + the 2 gameplay props (checkpoint flag, exit goal)
-        assert len(warnings) == len(ctx.bible.enemy_definitions) + 3
+        # + the item pool + player + the 4 gameplay props (checkpoint
+        # flag + dust/splash/sparkle VFX — the exit goal was removed, T3)
+        assert len(warnings) == (
+            len(ctx.bible.enemy_definitions) + len(ctx.bible.items) + 5
+        )
         for enemy in ctx.bible.enemy_definitions.values():
             assert enemy.sprite_path == ""
         # No prop generated → no artifact, and the manifest block is
@@ -239,7 +248,10 @@ class TestSpriteArt:
         ctx = _run(tmp_path / "out", _producer(tmp_path))
         props = ctx.bible.props[STAGE]
         assert props.artifact_id == f"props:{STAGE}"
-        assert sorted(props.prop_paths) == ["checkpoint", "exit"]
+        # Gameplay props + the one-shot VFX pool (dust/splash/sparkle).
+        assert sorted(props.prop_paths) == [
+            "checkpoint", "dust", "sparkle", "splash",
+        ]
         for name, rel in props.prop_paths.items():
             assert rel == f"sprite/prop/{STAGE}/{name}.png"
             assert (tmp_path / "out" / rel).exists()
@@ -313,7 +325,10 @@ class TestColorlessSpriteTint:
             for w in ctx.artifacts.get("slice_warnings", [])
             if "came back colorless; tinted" in w
         ]
-        assert len(tinted) == len(ctx.bible.enemy_definitions)
+        # Enemies AND the item pool ride the same tint fallback.
+        assert len(tinted) == (
+            len(ctx.bible.enemy_definitions) + len(ctx.bible.items)
+        )
         # The saved sprite actually carries the assigned hue now.
         enemy_id, enemy = next(iter(ctx.bible.enemy_definitions.items()))
         sprite = Image.open(tmp_path / "out" / enemy.sprite_path).convert("RGBA")
@@ -326,19 +341,51 @@ class TestColorlessSpriteTint:
 
 class TestBackdropArt:
     def test_bands_written_with_own_artifact(self, tmp_path: Path) -> None:
+        """DEFAULT shape: scenery bands only — the foreground occluder is
+        an opt-in curated layer (first paid run: the generated band
+        blocked the playfield and repeated stage-wide), so nothing named
+        band_fg and no depth > 1 without an explicit graphics opt-in."""
         ctx = _run(tmp_path / "out", _producer(tmp_path))
         backdrop = ctx.bible.backdrops[STAGE]
         assert backdrop.artifact_id == f"backdrop:{STAGE}"
-        assert len(backdrop.band_paths) == 2  # DEFAULT_GRAPHICS.backdrop_bands
-        assert len(backdrop.depths) == 2
+        # DEFAULT_GRAPHICS.backdrop_bands scenery bands, far → near.
+        assert len(backdrop.band_paths) == 2
+        assert all(not rel.endswith("band_fg.png") for rel in backdrop.band_paths)
+        assert backdrop.depths == [0.2, 0.5]
         assert "phase:plat:style" in backdrop.parents
         for rel in backdrop.band_paths:
             assert (tmp_path / "out" / rel).exists()
             assert backdrop.band_hashes[rel].startswith("sha256:")
+        assert Image.open(tmp_path / "out" / backdrop.band_paths[0]).mode == "RGB"
         manifest = json.loads(
             (tmp_path / "out" / f"backdrop/{STAGE}/manifest.json").read_text()
         )
         assert manifest["band_paths"] == backdrop.band_paths
+
+    def test_foreground_band_opt_in_appends_the_occluder(
+        self, tmp_path: Path
+    ) -> None:
+        """graphics.foreground_band=True (a game that IS directing that
+        layer) appends band_fg last with depth > 1 and REAL transparency
+        (RGBA occluders consumers draw over the world; scenery stays RGB)."""
+        from examples.platformer_pack.art_phases import (
+            FOREGROUND_DEPTH,
+            BackdropArtPhase,
+        )
+
+        ctx = _run(tmp_path / "out")  # placeholder tree: stages + palettes
+        graphics = DEFAULT_GRAPHICS.model_copy(update={"foreground_band": True})
+        BackdropArtPhase(producer=_producer(tmp_path), graphics=graphics).run(ctx)
+        backdrop = ctx.bible.backdrops[STAGE]
+        assert len(backdrop.band_paths) == 3
+        assert backdrop.band_paths[-1] == f"backdrop/{STAGE}/band_fg.png"
+        assert backdrop.depths == [0.2, 0.5, FOREGROUND_DEPTH]
+        assert FOREGROUND_DEPTH > 1.0  # the consumer draw-in-front contract
+        fg = Image.open(tmp_path / "out" / backdrop.band_paths[-1])
+        assert fg.mode == "RGBA"
+        assert fg.getchannel("A").getextrema()[0] == 0
+        # Readable provenance rides the opt-in write like any band.
+        assert fg.text["canon:asset"] == f"band:{STAGE}/fg"
 
     def test_band_edit_marks_backdrop_only(self, tmp_path: Path) -> None:
         """A hand-tweaked band PNG must mark backdrop:<stage> user-edited
@@ -355,6 +402,89 @@ class TestBackdropArt:
         # Adopted into the dict-keyed hash field: next pass is clean.
         report = detect_edits(ctx.bible, tmp_path / "out")
         assert report.user_edited == []
+
+
+class TestTilesetRepaintVariants:
+    def test_one_generation_per_name_variants_shaded_mean_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """16 autotile floor slots must cost ONE floor generation (paid
+        runs stay at the unique-name count) — the shared art is pasted
+        into every slot region and each masked slot is shaded via
+        shade_floor_variant with the region mean preserved EXACTLY
+        (palette conformance + every region-average consumer depend on
+        it)."""
+        from examples.platformer_pack import tileset as tileset_mod
+
+        if not hasattr(tileset_mod, "shade_floor_variant"):
+            pytest.skip("tileset.shade_floor_variant not landed yet (G5 autotile)")
+        from canon.bible.platformer import Tileset, TileSlot
+        from examples.platformer_pack.art_phases import TilesetArtPhase
+
+        ctx = _run(tmp_path / "out")  # placeholder tree: stages + palette
+        tile_px = DEFAULT_GRAPHICS.tile_px
+        slots: list[TileSlot] = []
+
+        def add(name: str, tile_type: int, collision: str, params: dict) -> None:
+            slots.append(
+                TileSlot(
+                    index=len(slots), tile_type=tile_type, name=name,
+                    px_region=(len(slots) * tile_px, 0, tile_px, tile_px),
+                    collision=collision, params=params,
+                )
+            )
+
+        add("empty", 0, "empty", {})
+        for mask in range(16):
+            add("floor", 1, "solid", {"autotile_mask": mask})
+        add("platform", 2, "one_way", {})
+        ctx.bible.tilesets[STAGE] = Tileset(
+            artifact_id=f"tileset:{STAGE}",
+            stage_id=STAGE,
+            tilesheet_path=f"tileset/{STAGE}/tilesheet.png",
+            slots=slots,
+            palette=dict(ctx.bible.tilesets[STAGE].palette),
+        )
+
+        calls: list[str] = []
+        base = _producer(tmp_path)
+
+        class CountingProducer:
+            model = "counting-fake"
+
+            def tile_image(self, tile, role_hex, theme, world_title, graphics):
+                calls.append(tile.name)
+                return base.tile_image(
+                    tile, role_hex, theme, world_title, graphics
+                )
+
+        TilesetArtPhase(producer=CountingProducer()).run(ctx)
+        assert sorted(calls) == ["empty", "floor", "platform"]  # once per NAME
+
+        sheet = Image.open(tmp_path / "out" / f"tileset/{STAGE}/tilesheet.png")
+
+        def region(i: int) -> Image.Image:
+            return sheet.crop(
+                (i * tile_px, 0, (i + 1) * tile_px, tile_px)
+            ).convert("RGB")
+
+        def channel_sums(img: Image.Image) -> tuple[int, ...]:
+            px = list(img.get_flattened_data())
+            return tuple(sum(p[c] for p in px) for c in range(3))
+
+        base_sums = channel_sums(region(1))  # the mask-0 floor slot
+        shaded_any = False
+        for mask in range(16):
+            reg = region(1 + mask)
+            # Mean preserved EXACTLY: equal per-channel pixel sums.
+            assert channel_sums(reg) == base_sums, f"mask {mask} moved the mean"
+            if reg.tobytes() != region(1).tobytes():
+                shaded_any = True
+        assert shaded_any, "no variant differs from the mask-0 art"
+        # On a mid-range flat square the shading is guaranteed visible.
+        flat = Image.new("RGBA", (tile_px, tile_px), (119, 100, 89, 255))
+        shaded = tileset_mod.shade_floor_variant(flat.copy(), 15)
+        assert shaded.tobytes() != flat.tobytes()
 
 
 class TestArtRunsAtTheEnd:
@@ -381,7 +511,7 @@ class TestArtRunsAtTheEnd:
             i for i, nid in enumerate(done) if nid.startswith("level:")
         )
         for art in ("phase:plat:tileset_art", "phase:plat:sprite_art",
-                    "phase:plat:backdrop_art"):
+                    "phase:plat:backdrop_art", "phase:plat:world_art"):
             assert done.index(art) > last_level, art
 
     def test_regen_art_node_rerolls_art_only(self, tmp_path: Path) -> None:
@@ -419,6 +549,204 @@ class TestArtRunsAtTheEnd:
         assert not any(nid.startswith("level:") for nid in report.done)
 
 
+def _corner_pixels(path: Path) -> list[tuple[int, int, int]]:
+    """The 4x4 watermark region (2px in from bottom-right), row-major RGB."""
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    return [
+        img.getpixel((w - 6 + dx, h - 6 + dy))
+        for dy in range(4)
+        for dx in range(4)
+    ]
+
+
+def _expected_checker() -> list[tuple[int, int, int]]:
+    from examples.platformer_pack.tileset_art import _WATERMARK_TONES
+
+    return [
+        _WATERMARK_TONES[(dx // 2 + dy // 2) % 2]
+        for dy in range(4)
+        for dx in range(4)
+    ]
+
+
+class TestReadableProvenance:
+    """G6: every producer-generated PNG carries deterministic canon:*
+    tEXt chunks — round-tripped through the phases and re-opened."""
+
+    def test_sprite_and_band_text_chunks_round_trip(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        enemy_id, enemy = next(iter(ctx.bible.enemy_definitions.items()))
+        sprite = Image.open(tmp_path / "out" / enemy.sprite_path)
+        assert sprite.text["canon:generator"] == "canon-ai harness"
+        assert sprite.text["canon:asset"] == f"sprite:enemy/{enemy_id}"
+        assert sprite.text["canon:gfx"] == DEFAULT_GRAPHICS.digest()
+        assert sprite.text["canon:seed"] == SEED
+        assert sprite.text["canon:image-seed"] == ""  # fake: no seed knob
+        player = Image.open(tmp_path / "out" / "sprite/player/base.png")
+        assert player.text["canon:asset"] == "sprite:player"
+        band = Image.open(
+            tmp_path / "out" / ctx.bible.backdrops[STAGE].band_paths[0]
+        )
+        assert band.text["canon:asset"] == f"band:{STAGE}/0"
+        # (the OPT-IN foreground band's "band:<stage>/fg" chunk is
+        # asserted in TestBackdropArt's opt-in test — off by default)
+        prop_rel = ctx.bible.props[STAGE].prop_paths["checkpoint"]
+        prop = Image.open(tmp_path / "out" / prop_rel)
+        assert prop.text["canon:asset"] == f"sprite:prop/{STAGE}/checkpoint"
+
+    def test_same_pipeline_write_twice_is_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        # The stamp is a pure function of its inputs — two identical runs
+        # write identical stamped bytes (the tree-diff contract).
+        a = _run(tmp_path / "a", _producer(tmp_path))
+        _run(tmp_path / "b", _producer(tmp_path))
+        enemy = next(iter(a.bible.enemy_definitions.values()))
+        for rel in (
+            enemy.sprite_path,
+            a.bible.backdrops[STAGE].band_paths[0],
+            "splash/world.png",
+        ):
+            assert (tmp_path / "a" / rel).read_bytes() == (
+                tmp_path / "b" / rel
+            ).read_bytes(), rel
+
+    def test_animation_assets_carry_provenance(self, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        ctx = _run_animated(out, tmp_path)
+        enemy_id = sorted(ctx.bible.enemy_definitions)[0]
+        d = out / "sprite" / "enemy" / enemy_id
+        walk = Image.open(d / "walk.png")
+        assert walk.text["canon:asset"] == f"strip:enemy/{enemy_id}/walk"
+        assert walk.text["canon:generator"] == "canon-ai harness"
+        atlas = Image.open(d / "atlas.png")
+        assert atlas.text["canon:asset"] == f"atlas:enemy/{enemy_id}"
+        player_atlas = Image.open(out / "sprite/player/atlas.png")
+        assert player_atlas.text["canon:asset"] == "atlas:player"
+
+
+class TestVisibleWatermark:
+    def test_on_marks_sprites_bands_splash_never_tiles(
+        self, tmp_path: Path
+    ) -> None:
+        from examples.platformer_pack.art_phases import (
+            BackdropArtPhase,
+            SpriteArtPhase,
+            TilesetArtPhase,
+            WorldArtPhase,
+        )
+
+        ctx = _run(tmp_path / "out")  # placeholder tree: stages + palettes
+        wm = DEFAULT_GRAPHICS.model_copy(update={"visible_watermark": True})
+        producer = _producer(tmp_path)
+        SpriteArtPhase(producer=producer, graphics=wm).run(ctx)
+        BackdropArtPhase(producer=producer, graphics=wm).run(ctx)
+        WorldArtPhase(producer=producer, graphics=wm).run(ctx)
+        TilesetArtPhase(producer=producer, graphics=wm).run(ctx)
+
+        expected = _expected_checker()
+        out = tmp_path / "out"
+        enemy = next(iter(ctx.bible.enemy_definitions.values()))
+        assert _corner_pixels(out / enemy.sprite_path) == expected
+        assert (
+            _corner_pixels(out / ctx.bible.backdrops[STAGE].band_paths[0])
+            == expected
+        )
+        assert _corner_pixels(out / "splash/world.png") == expected
+        # NEVER the tilesheet — its region means are palette-checked.
+        assert (
+            _corner_pixels(out / ctx.bible.tilesets[STAGE].tilesheet_path)
+            != expected
+        )
+
+    def test_off_leaves_every_corner_unmarked(self, tmp_path: Path) -> None:
+        # Default spec (visible_watermark=False): no checker anywhere —
+        # the flag off is byte-identical to never having the feature.
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        expected = _expected_checker()
+        out = tmp_path / "out"
+        enemy = next(iter(ctx.bible.enemy_definitions.values()))
+        assert _corner_pixels(out / enemy.sprite_path) != expected
+        assert (
+            _corner_pixels(out / ctx.bible.backdrops[STAGE].band_paths[0])
+            != expected
+        )
+        assert _corner_pixels(out / "splash/world.png") != expected
+
+
+class TestWorldArt:
+    def test_splash_written_with_world_fields_and_manifest_key(
+        self, tmp_path: Path
+    ) -> None:
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        world = ctx.bible.world
+        assert world.splash_path == "splash/world.png"
+        assert world.splash_hash.startswith("sha256:")
+        splash = Image.open(tmp_path / "out" / world.splash_path)
+        assert splash.mode == "RGB"
+        assert splash.text["canon:asset"] == "splash:world"
+        assert splash.text["canon:generator"] == "canon-ai harness"
+        # world.json re-written with the splash reference; provenance
+        # folds the image generators in.
+        doc = json.loads((tmp_path / "out" / "world.json").read_text())
+        assert doc["splash_path"] == world.splash_path
+        assert doc["splash_hash"] == world.splash_hash
+        assert world.provenance_hash
+        manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert manifest["splash"] == "splash/world.png"
+
+    def test_no_producer_keeps_empty_splash(self, tmp_path: Path) -> None:
+        ctx = _run(tmp_path / "out")
+        assert ctx.bible.world.splash_path == ""
+        assert ctx.bible.world.splash_hash == ""
+        assert not (tmp_path / "out" / "splash").exists()
+        manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert manifest["splash"] == ""
+
+    def test_pinned_splash_keeps_splash_bytes(self, tmp_path: Path) -> None:
+        # The card is LEAF art: its pin id is "splash", never "world"
+        # (pinning the world id must not be required to protect a card).
+        from examples.platformer_pack.art_phases import WorldArtPhase
+
+        ctx = _run(tmp_path / "out", _producer(tmp_path))
+        rel = ctx.bible.world.splash_path
+        before = (tmp_path / "out" / rel).read_bytes()
+
+        ctx.bible.metadata.pinned.append("splash")
+        blue = Image.new("RGB", (64, 64), (40, 60, 200))
+        buffer = io.BytesIO()
+        blue.save(buffer, format="PNG")
+        blue_path = tmp_path / "world_blue.png"
+        blue_path.write_bytes(buffer.getvalue())
+        WorldArtPhase(
+            producer=DiffusionSheetProducer(
+                FakeImageBackend(placeholder=blue_path)
+            )
+        ).run(ctx)
+        assert (tmp_path / "out" / rel).read_bytes() == before
+
+    def test_failed_generation_warns_and_keeps_title_card(
+        self, tmp_path: Path
+    ) -> None:
+        class ExplodingBackend:
+            model = "exploding"
+
+            def generate(self, prompt: str, width: int, height: int) -> bytes:
+                raise RuntimeError("boom")
+
+        ctx = _run(tmp_path / "out", DiffusionSheetProducer(ExplodingBackend()))
+        assert any(
+            w.startswith("world art: splash generation failed")
+            for w in ctx.artifacts.get("slice_warnings", [])
+        )
+        assert ctx.bible.world.splash_path == ""
+        manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert manifest["splash"] == ""
+
+
 class TestStageEffects:
     def test_canned_run_carries_sanitized_effects(self, tmp_path: Path) -> None:
         ctx = _run(tmp_path / "out")
@@ -440,6 +768,10 @@ class TestStageEffects:
         assert "density 1-200" in vocab
         assert "speed 10-400 fall px/s" in vocab
         assert "color '#rrggbb'" in vocab
+        # The lighting kinds (Godot-only interpreters) are rollable too.
+        assert "canvas_tint(strength 0-1 0-1 blend" in vocab
+        assert "player_light(radius 32-400 px, dim 0-1 0-1 darkness" in vocab
+        assert "glow(intensity 0-2 bloom energy" in vocab
 
     def test_sanitize_clamps_and_carries_unknown(self) -> None:
         warnings: list[str] = []
@@ -458,6 +790,24 @@ class TestStageEffects:
         assert len(warnings) == 2  # two clamps
         assert out[1] == {"name": "aurora", "params": {"hue": 1}}  # inert
         assert len(out) == 2
+
+    def test_sanitize_clamps_lighting_kinds(self) -> None:
+        warnings: list[str] = []
+        out = sanitize_effects(
+            [
+                {"name": "canvas_tint",
+                 "params": {"strength": 5, "color": "#102030"}},
+                {"name": "player_light", "params": {"radius": 9999, "dim": -2}},
+                {"name": "glow", "params": {"intensity": 99}},
+            ],
+            warn=warnings.append,
+        )
+        assert out[0]["params"] == {"strength": 1.0, "color": "#102030"}
+        assert out[1]["params"]["radius"] == 400
+        assert out[1]["params"]["dim"] == 0
+        assert out[1]["params"]["color"] == "#e8e8f0"  # color always appended
+        assert out[2]["params"]["intensity"] == 2
+        assert len(warnings) == 4  # every out-of-bounds param clamped loudly
 
 
 class TestSkinnedRender:
@@ -548,17 +898,61 @@ def _run_animated(output_dir: Path, tmp_path: Path) -> PipelineContext:
 
 
 class TestSpriteAnimation:
+    def test_sprite_drift_math(self) -> None:
+        # Ticket 7: opaque-mean-RGB distance separates a RECOLOURED character
+        # (palette shift, large) from the same character reposed (≈0).
+        from examples.platformer_pack.art_phases import (
+            SPRITE_DRIFT_MAX,
+            _sprite_drift,
+        )
+
+        base = Image.new("RGBA", (16, 16), (200, 40, 40, 255))  # red mascot
+        same = base.rotate(90)  # a new pose keeps the palette
+        assert _sprite_drift(base, [same]) < 1.0
+        orange = Image.new("RGBA", (16, 16), (230, 140, 30, 255))
+        assert _sprite_drift(base, [orange]) > SPRITE_DRIFT_MAX
+
+    def test_animation_edits_use_edit_backend_with_base_reference(
+        self, tmp_path: Path
+    ) -> None:
+        # Ticket 7: the animation img2img runs on the (possibly separate)
+        # edit_backend, and EVERY sheet edit re-attaches the clean base sprite
+        # as an identity reference — "the animator gets the character sheet".
+        sprite_backend = FakeImageBackend(placeholder=tmp_path / "blob.png")
+        (tmp_path / "blob.png").write_bytes(_blob_png())
+        edit_backend = FakeImageBackend()
+        producer = DiffusionSheetProducer(sprite_backend, edit_backend)
+        ctx = PipelineContext(
+            bible=Bible.empty(seed=SEED),
+            config=CanonConfig(seed=SEED, output_dir=tmp_path / "out"),
+            rng=random.Random(SEED),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        run_pipeline(
+            compose_pipeline(
+                image_producer=producer,
+                vlm_judge=FakeVLMBackend(make_fake_vlm_responder()),
+            ),
+            ctx,
+        )
+        edits = [c for c in edit_backend.calls if c.get("op") == "edit"]
+        assert edits, "no animation edits reached the edit backend"
+        assert all(c["references"] == 1 for c in edits)
+        assert not any(c.get("op") == "edit" for c in sprite_backend.calls)
+
     def test_every_enemy_gets_per_state_strips_and_frames_json(
         self, tmp_path: Path
     ) -> None:
         out = tmp_path / "out"
-        _run_animated(out, tmp_path)
-        enemy_dirs = sorted((out / "sprite" / "enemy").glob("*"))
-        assert enemy_dirs, "SpriteArtPhase produced no base sprites"
-        for d in enemy_dirs:
+        ctx = _run_animated(out, tmp_path)
+        assert ctx.bible.enemy_definitions, "no enemies rolled"
+        for enemy_id, enemy in ctx.bible.enemy_definitions.items():
+            d = out / "sprite" / "enemy" / enemy_id
             assert (d / "base.png").exists()
             frames = json.loads((d / "frames.json").read_text())
-            assert set(frames) == {"idle", "walk", "hurt", "death"}
+            # archetype-aware set: the canned hopper carries a 5th jump state
+            assert set(frames) == set(enemy_animation_states(enemy))
             for state, meta in frames.items():
                 assert (d / f"{state}.png").exists()
                 assert meta["frames"] >= 2
@@ -582,6 +976,111 @@ class TestSpriteAnimation:
         for meta in anim["states"].values():
             assert meta["hash"].startswith("sha256:")  # hashes stay in the Bible
 
+    def test_frames_json_carries_loop_and_durations(self, tmp_path: Path) -> None:
+        # G4 playback keys: every state gets its loop mode + a per-frame
+        # duration list (uniform v1 — the user's hand-edit lever).
+        out = tmp_path / "out"
+        _run_animated(out, tmp_path)
+        dirs = [out / "sprite" / "player",
+                *sorted((out / "sprite" / "enemy").glob("*"))]
+        for d in dirs:
+            frames = json.loads((d / "frames.json").read_text())
+            for state, meta in frames.items():
+                assert meta["loop"] == STATE_LOOP_MODES[state]
+                assert meta["durations_ms"] == (
+                    [meta["duration_ms"]] * meta["frames"]
+                )
+        player = json.loads((out / "sprite/player/frames.json").read_text())
+        assert set(player) == set(PLAYER_ANIMATION_STATES)
+        assert player["jump"]["loop"] == "once"
+        assert player["land"]["loop"] == "once"
+        enemy = json.loads(
+            (sorted((out / "sprite" / "enemy").glob("*"))[0] / "frames.json")
+            .read_text()
+        )
+        assert enemy["hurt"]["loop"] == "once"
+        assert enemy["death"]["loop"] == "once"
+
+    def test_atlas_written_with_matching_state_counts(self, tmp_path: Path) -> None:
+        # G4 shipping manifest: atlas.png + atlas.json beside frames.json,
+        # every state at the same frame count, rects inside the atlas.
+        out = tmp_path / "out"
+        ctx = _run_animated(out, tmp_path)
+        for d in [out / "sprite" / "player",
+                  *sorted((out / "sprite" / "enemy").glob("*"))]:
+            frames = json.loads((d / "frames.json").read_text())
+            atlas_meta = json.loads((d / "atlas.json").read_text())
+            atlas = Image.open(d / "atlas.png")
+            assert atlas_meta["path"].endswith("atlas.png")
+            size = frames["walk"]["frame_width"]
+            assert atlas_meta["frame_size"] == [size, size]
+            assert set(atlas_meta["states"]) == set(frames)
+            for state, entry in atlas_meta["states"].items():
+                assert len(entry["frames"]) == frames[state]["frames"]
+                assert entry["loop"] == frames[state]["loop"]
+                assert entry["durations_ms"] == frames[state]["durations_ms"]
+                for rect in entry["frames"]:
+                    assert rect["x"] >= 0 and rect["y"] >= 0
+                    assert rect["x"] + rect["w"] <= atlas.width
+                    assert rect["y"] + rect["h"] <= atlas.height
+        # the Bible manifest carries the atlas artifact (path + hash)
+        enemy = next(iter(ctx.bible.enemy_definitions.values()))
+        assert enemy.stats["animation"]["atlas"]["hash"].startswith("sha256:")
+        assert ctx.bible.player.animation["atlas"]["path"].endswith("atlas.png")
+
+    def test_hopper_spec_and_manifest_include_jump(self, tmp_path: Path) -> None:
+        ctx = _run_animated(tmp_path / "out", tmp_path)
+        hopper = next(
+            e for e in ctx.bible.enemy_definitions.values()
+            if e.archetype == "hopper"
+        )
+        anim = hopper.stats["animation"]
+        assert "jump" in anim["spec"]
+        assert "jump" in anim["states"]
+        # non-hoppers never author a jump sheet
+        for enemy in ctx.bible.enemy_definitions.values():
+            if enemy.archetype != "hopper":
+                assert "jump" not in enemy.stats["animation"]["states"]
+
+    def test_asymmetric_actor_gets_left_strips_and_atlas_rows(
+        self, tmp_path: Path
+    ) -> None:
+        from examples.platformer_pack.art_phases import SpriteAnimationPhase
+
+        out = tmp_path / "out"
+        ctx = _run_animated(out, tmp_path)
+        enemy_id = sorted(ctx.bible.enemy_definitions)[0]
+        ctx.bible.enemy_definitions[enemy_id].asymmetric = True
+        SpriteAnimationPhase(
+            producer=_producer(tmp_path),
+            judge=FakeVLMBackend(make_fake_vlm_responder()),
+        ).run(ctx)
+
+        d = out / "sprite" / "enemy" / enemy_id
+        frames = json.loads((d / "frames.json").read_text())
+        for state, meta in frames.items():
+            assert (d / f"{state}_left.png").exists()
+            assert meta["path_left"].endswith(f"{state}_left.png")
+            assert meta["frames_left"] == meta["frames"]
+            assert "hash_left" not in meta  # hashes stay in the Bible
+        atlas_meta = json.loads((d / "atlas.json").read_text())
+        for entry in atlas_meta["states"].values():
+            assert len(entry["frames_left"]) == len(entry["frames"])
+        anim = ctx.bible.enemy_definitions[enemy_id].stats["animation"]
+        assert anim["states"]["walk"]["hash_left"].startswith("sha256:")
+        # symmetric actors never grow the left keys
+        other = json.loads(
+            (out / "sprite" / "enemy" /
+             sorted(ctx.bible.enemy_definitions)[1] / "frames.json").read_text()
+        )
+        assert all("path_left" not in m for m in other.values())
+        player_atlas = json.loads(
+            (out / "sprite/player/atlas.json").read_text()
+        )
+        assert all(
+            "frames_left" not in e for e in player_atlas["states"].values()
+        )
+
     def test_no_judge_keeps_sprites_static(self, tmp_path: Path) -> None:
         # loud fallback: producer present, judge absent → no motion authored
         out = tmp_path / "out"
@@ -590,6 +1089,7 @@ class TestSpriteAnimation:
         assert (d / "base.png").exists()
         assert not (d / "frames.json").exists()
         assert not (d / "walk.png").exists()
+        assert not (d / "atlas.json").exists()
 
     def test_spriteless_enemy_is_skipped(self, tmp_path: Path) -> None:
         # default FakeImageBackend (1×1) → empty sprites → nothing to animate
@@ -633,9 +1133,26 @@ class TestAnimationQaEndToEnd:
         assert "player" in report["actors"]
         assert any(k.startswith("enemy:") for k in report["actors"])
         for entry in report["actors"].values():
-            # code checks ran (strip + frames) and passed on the fake frames
+            # code checks ran (strip + frames + the ticket-6 wander meter +
+            # atlas) and passed on the fake frames
             checks = {c["check"] for c in entry["code_checks"]}
-            assert {"animation_strip", "animation_frames"} <= checks
-            assert all(c["passed"] for c in entry["code_checks"])
+            assert {
+                "animation_strip", "animation_frames",
+                "animation_wander", "animation_atlas",
+            } <= checks
+            # every check EXCEPT the new sibling-silhouette detector passes on
+            # the fake frames...
+            assert all(
+                c["passed"] for c in entry["code_checks"]
+                if c["check"] != "animation_distinct"
+            )
             # the fake judge's canned verdict passed all dimensions
             assert all(v["passed"] for v in entry["verdicts"].values())
+        # ...and the detector (ticket 8) fires on the fake's canned near-dupe
+        # states — the player has several states, so it must flag at least one
+        # sibling pair (advisory: it warns, it does not gate the report).
+        player_checks = report["actors"]["player"]["code_checks"]
+        assert any(
+            c["check"] == "animation_distinct" and not c["passed"]
+            for c in player_checks
+        )
