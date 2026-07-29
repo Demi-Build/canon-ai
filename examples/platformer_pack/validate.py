@@ -503,13 +503,22 @@ def check_level(
     tiles: TileRegistry = DEFAULT_TILES,
     triggers: list[SparseMaskEntry] | None = None,
     free_volume: set | None = None,
+    swim_anchors: bool = False,
 ) -> list[str]:
     """Return problem strings (empty = valid). Messages are written to be
     fed back to the Layout Agent verbatim. ``triggers`` (checkpoints) are
     validated like spawn/exit: standable and reachable. ``free_volume``
-    cells (deliberate water FEATURES) skip the containment rule."""
+    cells (deliberate water FEATURES) skip the containment rule.
+
+    ``swim_anchors``: also accept spawn/exit/checkpoints INSIDE swimmable
+    volume. Generation validates the DRY grid and floods after, so the
+    default stays strict; validating a PERSISTED (post-flood) grid needs
+    this or every legitimately-shipped water level reports unstandable
+    anchors — the player spawns and finishes in water just fine."""
     problems: list[str] = []
     stand = standable_cells(grid, tiles)
+    if swim_anchors:
+        stand = stand | volume_cells(grid, tiles)
     if spawn not in stand:
         problems.append(_diagnose_unstandable(grid, spawn, "spawn", tiles))
     if exit_ not in stand:

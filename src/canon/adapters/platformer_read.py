@@ -207,3 +207,300 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "props": props,
         "backdrop": backdrop,
     }
+
+
+# ---------------------------------------------------------------------------
+# Asset lineage — the journal + CAS rendered as a family tree (Library A)
+# ---------------------------------------------------------------------------
+
+#: detail.kind → node FACET: what kind of bytes a version holds. Facets route
+#: thumbnails (png vs json diff) and restore targets; unknown kinds fall back
+#: by artifact-id family below.
+_FACET_BY_KIND = {
+    "db_new": "row", "db_update": "row", "db_complete": "row",
+    "row_restore": "row",
+    "sprite_replace": "sprite", "sprite_restore": "sprite",
+    "asset_assign": "sprite",
+    "asset_animate": "animation",
+    "tile_reskin": "tilesheet", "tilesheet_restore": "tilesheet",
+    "band_replace": "band", "band_restore": "band",
+    "tile_params": "tileset_manifest",
+    "db_schema": "schema",
+}
+
+#: Facet priority per artifact family: which facet's latest version is THE
+#: current center of the tree (an animated enemy's identity is its row, not
+#: its frames.json — alphabetical facet order picked the atlas).
+_PRIMARY_FACETS = {
+    "enemy": ("row", "sprite", "animation"),
+    "item": ("row", "sprite"),
+    "player": ("sprite", "animation"),
+    "tileset": ("tilesheet", "tileset_manifest"),
+    "backdrop": ("band", "backdrop_manifest"),
+    "schema": ("schema",),
+    "level": ("level_step",),
+}
+
+
+def _facet_for(event: dict) -> str:
+    kind = str((event.get("detail") or {}).get("kind", ""))
+    aid = str(event.get("artifact_id", ""))
+    if kind == "asset_generate":
+        # generate_asset journals ONE kind for every target family; the
+        # snapshot bytes differ per family (backdrop/audio = their manifest).
+        if aid.startswith("backdrop:"):
+            return "backdrop_manifest"
+        if aid.startswith("audio:"):
+            return "audio_manifest"
+        return "sprite"
+    if kind in _FACET_BY_KIND:
+        return _FACET_BY_KIND[kind]
+    if aid.startswith("level:"):
+        return "level_step"
+    if aid.startswith("schema:"):
+        return "schema"
+    if aid.startswith(("tileset:", "backdrop:")):
+        return "tileset_manifest" if aid.startswith("tileset:") else "band"
+    return "data"
+
+
+def _placement_usage(pack: Path) -> dict[str, list[str]]:
+    """id → level ids that place it (usage badges). One pass over the tree."""
+    usage: dict[str, list[str]] = {}
+    level_root = pack / "level"
+    if not level_root.is_dir():
+        return usage
+    for level_dir in sorted(level_root.glob("*/*")):
+        lid = level_dir.name
+        for fname, key, family in (
+            ("entities.json", "enemy_id", "enemy"),
+            ("items.json", "item_id", "item"),
+        ):
+            f = level_dir / fname
+            if not f.is_file():
+                continue
+            try:
+                records = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for rec in records if isinstance(records, list) else []:
+                rid = str(rec.get(key, ""))
+                # Typed keys ("enemy:x") — enemy/item/stage ids share one
+                # slugify namespace and would collide on bare names.
+                if rid and lid not in usage.setdefault(f"{family}:{rid}", []):
+                    usage[f"{family}:{rid}"].append(lid)
+    return usage
+
+
+def asset_lineage(
+    pack_dir: str | Path, artifact_id: str, max_nodes: int = 500
+) -> dict:
+    """The artifact's family tree, derived from the journal + object store.
+
+    Content lives on NODES (one per distinct content hash — a version), and
+    provenance lives on EDGES (the journal event that turned one version into
+    the next: op, actor, time, model, prompt when recorded). Cross-asset
+    connections come free from the CAS: the same bytes appearing in two
+    artifacts' histories is ONE node wearing both badges — that's how a sheet
+    repainted and reassigned to another enemy row stays visibly connected.
+    Rooted at the earliest ancestor; centered (``requested_node_id``) on the
+    artifact's CURRENT version, per the reference contract.
+    """
+    from canon import provenance
+
+    pack = Path(pack_dir)
+    events = [
+        e for e in provenance.all_events(pack)
+        if e.get("after_hash") or e.get("before_hash")
+    ]
+
+    # Transitive closure by shared hashes: start from the target artifact's
+    # events, then pull in any event anywhere that touches a known hash.
+    # Hash-indexed BFS (linear) — a rescan loop goes quadratic on long
+    # cross-artifact chains. `included` then sorts by TIME so the
+    # producer-metadata pass (first after_hash wins) and the `latest` pass
+    # (last one wins) are journal-true regardless of discovery order.
+    idx_by_hash: dict[str, list[int]] = {}
+    for i, e in enumerate(events):
+        for h in (e.get("before_hash"), e.get("after_hash")):
+            if h:
+                idx_by_hash.setdefault(h, []).append(i)
+    queue: list[str] = []
+    hashes: set[str] = set()
+    for e in events:
+        if e.get("artifact_id") == artifact_id:
+            for h in (e.get("before_hash"), e.get("after_hash")):
+                if h and h not in hashes:
+                    hashes.add(h)
+                    queue.append(h)
+    included_ids: set[int] = set()
+    while queue:
+        h = queue.pop()
+        for i in idx_by_hash.get(h, ()):
+            if i in included_ids:
+                continue
+            included_ids.add(i)
+            e = events[i]
+            for hh in (e.get("before_hash"), e.get("after_hash")):
+                if hh and hh not in hashes:
+                    hashes.add(hh)
+                    queue.append(hh)
+    included = [events[i] for i in sorted(included_ids)]
+    included.sort(key=lambda e: str(e.get("ts", "")))
+
+    usage_map = _placement_usage(pack)
+
+    # Nodes: one per content hash; the event that PRODUCED the hash (first
+    # after_hash appearance) carries its op/actor/gen. A hash seen only as a
+    # before_hash predates the journal (baseline bytes).
+    nodes: dict[str, dict] = {}
+    for e in included:
+        for h in (e.get("before_hash"), e.get("after_hash")):
+            if h and h not in nodes:
+                nodes[h] = {
+                    "id": h, "facet": "data", "op": "baseline",
+                    "source": "", "actor": "", "ts": "",
+                    "gen": None, "artifacts": [], "current_of": [],
+                    "usage": {}, "detail": {},
+                }
+    for e in included:
+        h = e.get("after_hash")
+        aid = str(e.get("artifact_id", ""))
+        for hh in (e.get("before_hash"), e.get("after_hash")):
+            if hh and aid and aid not in nodes[hh]["artifacts"]:
+                nodes[hh]["artifacts"].append(aid)
+        if h and nodes[h]["op"] == "baseline":
+            nodes[h].update(
+                facet=_facet_for(e),
+                op=str(e.get("op", "")),
+                source=str(e.get("source", "")),
+                actor=str(e.get("actor", "")),
+                ts=str(e.get("ts", "")),
+                gen=e.get("gen"),
+                detail={
+                    k: v for k, v in (e.get("detail") or {}).items()
+                    if k in ("kind", "path", "band", "tile", "type")
+                },
+            )
+    # A before-only node (bytes that predate the journal) inherits the facet
+    # AND routing detail (band index, tile name) of the edit that consumed
+    # it — otherwise the original band art has no restore target.
+    for e in included:
+        b = e.get("before_hash")
+        if b and nodes[b]["op"] == "baseline":
+            if nodes[b]["facet"] == "data":
+                nodes[b]["facet"] = _facet_for(e)
+            if not nodes[b]["detail"]:
+                nodes[b]["detail"] = {
+                    k: v for k, v in (e.get("detail") or {}).items()
+                    if k in ("kind", "path", "band", "tile", "type")
+                }
+
+    # Current version + usage badges per artifact (latest after_hash wins —
+    # facet-scoped so a row edit doesn't unseat the current sprite).
+    latest: dict[tuple, str] = {}
+    for e in included:
+        h = e.get("after_hash")
+        if h:
+            latest[(str(e.get("artifact_id", "")), _facet_for(e))] = h
+    for (aid, facet), h in latest.items():
+        nodes[h]["current_of"].append(f"{aid}#{facet}")
+    for node in nodes.values():
+        for aid in node["artifacts"]:
+            if aid in usage_map:
+                node["usage"][aid] = usage_map[aid]
+
+    edges: list[dict] = []
+    for e in included:
+        after = e.get("after_hash")
+        if not after:
+            continue
+        detail = e.get("detail") or {}
+        base = {
+            "op": str(e.get("op", "")),
+            "kind": str(detail.get("kind", "")),
+            "actor": str(e.get("actor", "")),
+            "ts": str(e.get("ts", "")),
+            "gen": e.get("gen"),
+        }
+        # A restore's meaningful parent is the node it restored FROM
+        # (detail.to) — that's where the new branch hangs. The state it
+        # replaced stays as a secondary "replaced" edge.
+        restored_from = (
+            str(detail.get("to", ""))
+            if str(detail.get("kind", "")).endswith("_restore")
+            else ""
+        )
+        if restored_from and restored_from in nodes and restored_from != after:
+            edges.append({"from": restored_from, "to": after, **base})
+        before = e.get("before_hash")
+        if before and before != after:
+            edge = {"from": before, "to": after, **base}
+            if restored_from:
+                edge["kind"] = f"{base['kind']}:replaced"
+            edges.append(edge)
+
+    # Depths for the layered layout. Only STRUCTURAL edges participate — a
+    # restore's secondary ":replaced" edge points backward and closes a
+    # cycle (longest-path layering never terminates on cycles). The sweep
+    # is bounded anyway, so even a hand-crafted cyclic journal converges
+    # instead of hanging.
+    structural = [e for e in edges if not e["kind"].endswith(":replaced")]
+    incoming: dict[str, list[str]] = {h: [] for h in nodes}
+    for edge in structural:
+        incoming[edge["to"]].append(edge["from"])
+    depth: dict[str, int] = {h: 0 for h in nodes}
+    for _ in range(max(1, len(nodes))):
+        settled = True
+        for edge in structural:
+            d = depth[edge["from"]] + 1
+            if d > depth[edge["to"]] and d <= len(nodes):
+                depth[edge["to"]] = d
+                settled = False
+        if settled:
+            break
+    for h, node in nodes.items():
+        node["depth"] = depth[h]
+
+    # Requested = the artifact's current PRIMARY-facet version (an animated
+    # enemy centers on its row, not its frames.json).
+    priority = _PRIMARY_FACETS.get(artifact_id.split(":", 1)[0], ())
+    requested = next(
+        (
+            latest[(artifact_id, facet)]
+            for facet in priority
+            if (artifact_id, facet) in latest
+        ),
+        None,
+    )
+    if requested is None:
+        candidates = sorted(
+            (facet, h) for (aid, facet), h in latest.items() if aid == artifact_id
+        )
+        requested = candidates[0][1] if candidates else next(iter(nodes), None)
+    # Root: walk up from the requested node; earliest-ts parent wins forks.
+    root = requested
+    seen_up: set[str] = set()
+    while root and incoming.get(root) and root not in seen_up:
+        seen_up.add(root)
+        root = min(incoming[root], key=lambda h: nodes[h]["ts"])
+
+    node_list = sorted(nodes.values(), key=lambda n: (n["depth"], n["ts"]))
+    pruned = len(node_list) > max_nodes
+    if pruned:
+        keep = {n["id"] for n in node_list[:max_nodes]} | {requested, root}
+        node_list = [n for n in node_list if n["id"] in keep]
+        edges = [e for e in edges if e["from"] in keep and e["to"] in keep]
+
+    return {
+        "artifact_id": artifact_id,
+        "root_id": root,
+        "requested_node_id": requested,
+        "nodes": node_list,
+        "edges": edges,
+        "metadata": {
+            "total_nodes": len(nodes),
+            "max_depth": max((n["depth"] for n in node_list), default=0),
+            "pruned": pruned,
+        },
+    }

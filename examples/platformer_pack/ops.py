@@ -92,6 +92,14 @@ def _read(path: Path) -> Any:
         return json.load(fh)
 
 
+def _schema_path(pack: str | Path, kind: str) -> Path:
+    """The effective roll-table schema for a pack: a pack-local
+    ``schemas/<kind>.json`` override (user-edited distributions travel with
+    the game) wins over the repo default."""
+    local = Path(pack) / "schemas" / f"{kind}.json"
+    return local if local.is_file() else DB_TYPES[kind]["schema"]
+
+
 def load_pack(pack_dir: str | Path) -> SimpleNamespace:
     """Everything the ops need from the output tree, parsed once."""
     pack = Path(pack_dir)
@@ -236,7 +244,8 @@ def _llm_model(llm: LLMClient | None, label: str) -> str:
 def db_types(pack_dir: str | Path) -> dict:
     out: dict[str, Any] = {}
     for kind, meta in DB_TYPES.items():
-        spec = load_skeleton_spec(meta["schema"])
+        schema_path = _schema_path(pack_dir, kind)
+        spec = load_skeleton_spec(schema_path)
         fields = []
         for name, field in spec.fields.items():
             entry: dict[str, Any] = {"name": name}
@@ -258,6 +267,9 @@ def db_types(pack_dir: str | Path) -> dict:
             "skeleton_fields": fields,
             "llm_fields": meta["llm_fields"],
             "code_fields": meta["code_fields"],
+            "schema_source": (
+                "default" if schema_path == meta["schema"] else "pack"
+            ),
         }
     return out
 
@@ -282,7 +294,7 @@ def _enemy_row(
 ) -> EnemyDefinition:
     """The EnemyGeneratorPhase loop body, anchored by user fields."""
     fields = fields or {}
-    spec = load_skeleton_spec(DB_TYPES["enemy"]["schema"])
+    spec = load_skeleton_spec(_schema_path(info.pack, "enemy"))
     anchors = _anchors_for_spec(spec, fields)
     seed = info.seed
     skeleton = roll_skeleton(
@@ -323,6 +335,14 @@ def _enemy_row(
             if habitats == ["*"]
             else f"native to the {', '.join(habitats)} biome(s) only"
         )
+        # Stash the (deterministic) prompt for the journal's gen block — the
+        # lineage tree shows "its prompt if generated".
+        ctx.artifacts["gen_prompt"] = ctx.prompts.enemy_generation(
+            skeleton, theme, "", index,
+            used_names=list(used_names), feedback=None,
+            rarity=rarity, habitat_desc=habitat_desc,
+        ).user_message
+        fallback = {"name": anchored_name or f"Enemy {index}", "flavor": flavor}
         data = P.llm_json(
             ctx,
             f"plat:enemies:{index}",
@@ -332,7 +352,7 @@ def _enemy_row(
                 rarity=rarity, habitat_desc=habitat_desc,
             ),
             required_keys=("name",),
-            fallback={"name": anchored_name or f"Enemy {index}", "flavor": flavor},
+            fallback=fallback,
             validate_obj=lambda obj: (
                 [
                     f"Name {obj.get('name')!r} is already taken; invent a "
@@ -344,6 +364,7 @@ def _enemy_row(
                 else []
             ),
         )
+        ctx.artifacts["gen_fallback"] = data is fallback
         name = anchored_name or str(data["name"])
         flavor = flavor or str(data.get("flavor", ""))
     else:
@@ -416,7 +437,7 @@ def _item_row(
 ) -> ItemDefinition:
     """The ItemGeneratorPhase loop body, anchored by user fields."""
     fields = fields or {}
-    spec = load_skeleton_spec(DB_TYPES["item"]["schema"])
+    spec = load_skeleton_spec(_schema_path(info.pack, "item"))
     anchors = _anchors_for_spec(spec, fields)
     skeleton = roll_skeleton(
         spec, derive_rng(info.seed, "plat:items", index), locked=anchors
@@ -432,6 +453,11 @@ def _item_row(
     anchored_name = str(fields.get("name") or "").strip()
     flavor = str(fields.get("flavor") or "")
     if complete and ctx.llm is not None:
+        ctx.artifacts["gen_prompt"] = ctx.prompts.item_generation(
+            skeleton, world_title, index,
+            used_names=list(used_names), feedback=None,
+        ).user_message
+        fallback = {"name": anchored_name or f"Item {index}", "flavor": flavor}
         data = P.llm_json(
             ctx,
             f"plat:items:{index}",
@@ -440,9 +466,10 @@ def _item_row(
                 used_names=list(used_names), feedback=fb,
             ),
             required_keys=("name",),
-            fallback={"name": anchored_name or f"Item {index}", "flavor": flavor},
+            fallback=fallback,
             validate_obj=None,
         )
+        ctx.artifacts["gen_fallback"] = data is fallback
         name = anchored_name or str(data["name"])
         flavor = flavor or str(data.get("flavor", ""))
     else:
@@ -516,7 +543,19 @@ def new_db_row(
             "locked": sorted((fields or {}).keys()),
         },
         after_hash=after,
-        gen={"llm_model": _llm_model(llm, label)} if complete else None,
+        gen={
+            "llm_model": _llm_model(llm, label),
+            "prompt": str(ctx.artifacts.pop("gen_prompt", "") or ""),
+            # Truthful training data: the prompt WAS sent, but the text came
+            # from the fallback when retries exhausted.
+            **(
+                {"fallback": True}
+                if ctx.artifacts.pop("gen_fallback", False)
+                else {}
+            ),
+        }
+        if complete
+        else None,
     )
     return {
         "type": entity_type,
@@ -563,7 +602,7 @@ def complete_db_row(
     if not reroll:
         # Keep every existing mechanical value as an anchor; only the LLM
         # fields (and empties) change.
-        spec = load_skeleton_spec(DB_TYPES[entity_type]["schema"])
+        spec = load_skeleton_spec(_schema_path(info.pack, entity_type))
         for name in spec.fields:
             if name in flat and flat.get(name) is not None and name not in fields:
                 fields[name] = flat[name]
@@ -608,13 +647,673 @@ def complete_db_row(
         },
         before_hash=before,
         after_hash=after,
-        gen={"llm_model": _llm_model(llm, label)},
+        gen={
+            "llm_model": _llm_model(llm, label),
+            "prompt": str(ctx.artifacts.pop("gen_prompt", "") or ""),
+            **(
+                {"fallback": True}
+                if ctx.artifacts.pop("gen_fallback", False)
+                else {}
+            ),
+        },
     )
     return {
         "type": entity_type,
         "id": entity_id,
         "row": entity.model_dump(mode="json"),
         "warnings": _warnings(ctx),
+    }
+
+
+# ---------------------------------------------------------------------------
+# db update — DIRECT human edits (no rerolls, no LLM): row fields, tile-type
+# gameplay knobs, and the roll-table schemas themselves
+# ---------------------------------------------------------------------------
+
+#: Flat-name routing for row edits: which nested dict each known knob lives
+#: in. Anything else is either a top-level model field or needs an explicit
+#: dotted path ("stats.custom_knob") to reach hand-added keys.
+_UPDATE_NESTING: dict[str, dict[str, str]] = {
+    "enemy": {
+        **dict.fromkeys(
+            ("hp", "damage", "speed", "flavor", "placeholder_color"), "stats"
+        ),
+        **dict.fromkeys(
+            (
+                "patrol_range", "aggro_range", "leash_range", "swim_style",
+                "hop_height", "hop_period_s",
+            ),
+            "behavior",
+        ),
+    },
+    "item": {
+        **dict.fromkeys(
+            ("duration_s", "heal_amount", "coin_value", "boost_mult"), "params"
+        ),
+        **dict.fromkeys(("flavor", "placeholder_color"), "stats"),
+    },
+}
+
+#: Dotted-path containers each row shape allows.
+_DICT_CONTAINERS: dict[str, tuple[str, ...]] = {
+    "enemy": ("stats", "behavior"),
+    "item": ("params", "stats"),
+}
+
+#: Identity / provenance / art plumbing — never editable through db update
+#: (sprites change via ``canon asset replace``; animation via ``asset
+#: animate``). Matched against the LAST path segment so dotted paths can't
+#: sneak past (``stats.animation``).
+_PROTECTED_FIELDS = frozenset({
+    "artifact_id", "enemy_id", "item_id", "provenance_hash", "parents",
+    "status", "review_status", "sprite_path", "sprite_hash", "animation",
+})
+
+_COLLISION_CATEGORIES = ("empty", "solid", "one_way", "hazard", "volume")
+
+#: Slot params owned by generation/code, not user-tunable gameplay knobs:
+#: autotile variant selection and the code-derived deep-water sibling flag.
+_STRUCTURAL_PARAMS = frozenset({"autotile_mask", "water_deep"})
+
+
+def update_db_row(
+    pack_dir: str | Path,
+    entity_type: str,
+    entity_id: str,
+    changes: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Apply direct human edits to an existing row — values land verbatim.
+
+    ``changes`` maps flat field names to new values: known stat/behavior/
+    params knobs route into their nested dicts, model fields land top-level,
+    and dotted paths ("stats.custom") reach hand-added knobs; ``None``
+    deletes a nested key. The result is validated through the entity model
+    (fail-closed), rewritten + rehashed, stamped ``user_edited``, and
+    journaled ``op:"edit"`` with the per-field diff — the (generated →
+    human-corrected) training pair.
+    """
+    if entity_type not in DB_TYPES:
+        raise ValueError(f"unknown db type {entity_type!r} (one of {list(DB_TYPES)})")
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("--set needs a non-empty JSON object of field: value")
+    pack = Path(pack_dir)
+    rel = f"{DB_TYPES[entity_type]['dir']}/{entity_id}.json"
+    path = pack / rel
+    if not path.is_file():
+        raise FileNotFoundError(f"{entity_type} {entity_id!r} not found")
+    model = EnemyDefinition if entity_type == "enemy" else ItemDefinition
+    current = _read(path)
+    updated = json.loads(json.dumps(current))  # deep copy
+    nesting = _UPDATE_NESTING[entity_type]
+    containers = _DICT_CONTAINERS[entity_type]
+    spec = load_skeleton_spec(_schema_path(pack, entity_type))
+    diff: dict[str, dict] = {}
+    warnings: list[str] = []
+
+    for name, value in changes.items():
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in _PROTECTED_FIELDS:
+            raise ValueError(
+                f"{name!r} is protected (identity/provenance/art plumbing — "
+                "sprites change via `canon asset replace`)"
+            )
+        if name in containers:
+            # Whole-container replaces would smuggle protected keys past the
+            # wall (stats.animation, sprite hashes) and wipe siblings.
+            raise ValueError(
+                f"{name!r} is a container — edit knobs individually "
+                f"('{name}.<key>' or their flat names)"
+            )
+        if "." in name:
+            container, _, key = name.partition(".")
+            if container not in containers or not key or "." in key:
+                raise ValueError(
+                    f"dotted path {name!r} must be <container>.<key> with "
+                    f"container one of {list(containers)}"
+                )
+        elif name in nesting:
+            container, key = nesting[name], name
+        elif name in model.model_fields:
+            container, key = "", name
+        else:
+            known = sorted(
+                (set(nesting) | set(model.model_fields)) - _PROTECTED_FIELDS
+            )
+            raise ValueError(
+                f"unknown field {name!r} for {entity_type} — one of {known}, "
+                "or a dotted path like 'stats.custom'"
+            )
+        if not container:
+            if value is None:
+                raise ValueError(f"cannot delete top-level field {name!r}")
+            old = updated.get(key)
+            updated[key] = value
+        else:
+            bucket = updated.setdefault(container, {})
+            old = bucket.get(key)
+            if value is None:
+                bucket.pop(key, None)
+            else:
+                bucket[key] = value
+        if old != value:
+            diff[name] = {"from": old, "to": value}
+
+    # Off-table values are allowed (hand edits are authoritative) but
+    # surfaced — generation would never roll them. Checked AFTER the whole
+    # edit lands so lookups resolve against the row's final state (editing
+    # size and hp together judges hp under the new size).
+    flat_after: dict[str, Any] = {
+        k: v for k, v in updated.items() if not isinstance(v, dict)
+    }
+    for bucket in containers:
+        flat_after.update(updated.get(bucket) or {})
+    for changed_name in diff:
+        leaf = changed_name.rsplit(".", 1)[-1]
+        field = spec.fields.get(leaf)
+        value = flat_after.get(leaf)
+        if field is None or value is None:
+            continue
+        try:
+            if field.choices is not None:
+                allowed = [v for v, _ in field.choices]
+                if value not in allowed:
+                    warnings.append(
+                        f"{leaf}={value!r} is outside the roll table "
+                        f"({allowed}) — kept as a hand edit"
+                    )
+            elif field.range is not None:
+                if not (field.range[0] <= value <= field.range[1]):
+                    warnings.append(
+                        f"{leaf}={value!r} is outside the rolled range "
+                        f"{list(field.range)} — kept as a hand edit"
+                    )
+            elif field.lookup is not None and field.depends_on:
+                dep_val = flat_after.get(field.depends_on)
+                entry = field.lookup.get(dep_val)
+                if entry is None:
+                    warnings.append(
+                        f"{leaf}={value!r}: no roll-table row for "
+                        f"{field.depends_on}={dep_val!r} — kept as a hand edit"
+                    )
+                elif (
+                    field.lookup_ranges
+                    and isinstance(entry, (list, tuple)) and len(entry) == 2
+                ):
+                    if not (entry[0] <= value <= entry[1]):
+                        warnings.append(
+                            f"{leaf}={value!r} is outside the rolled band "
+                            f"{list(entry)} for {field.depends_on}={dep_val!r} "
+                            "— kept as a hand edit"
+                        )
+                elif not field.lookup_ranges and entry != value:
+                    warnings.append(
+                        f"{leaf}={value!r} differs from the table's {entry!r} "
+                        f"for {field.depends_on}={dep_val!r} — kept as a hand edit"
+                    )
+        except TypeError:
+            warnings.append(
+                f"{leaf}={value!r} has a different type than the roll "
+                "table — kept as a hand edit"
+            )
+
+    if not diff:
+        return {
+            "type": entity_type, "id": entity_id, "row": current,
+            "changed": {}, "no_change": True, "warnings": warnings,
+        }
+
+    before = provenance.snapshot_file(pack, path)
+    updated["status"] = "user_edited"
+    entity = model.model_validate(updated)  # fail-closed shape check
+    data = entity.model_dump(mode="json")
+    for key, value in updated.items():  # keep hand-added top-level keys
+        if key not in data:
+            data[key] = value
+    _pack_adapter(pack).write_json_singleton(rel, data)
+    after = provenance.snapshot_file(pack, path)
+    provenance.record(
+        pack,
+        artifact_id=f"{entity_type}:{entity_id}",
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={"kind": "db_update", "type": entity_type, "changed": diff},
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "type": entity_type, "id": entity_id, "row": data,
+        "changed": diff, "warnings": warnings,
+    }
+
+
+def update_tile_slots(
+    pack_dir: str | Path,
+    target: str,
+    changes: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Edit gameplay knobs on a tile TYPE: ``target`` = "<stage>/<tile_name>".
+
+    ``changes`` accepts ``collision`` (category string) and ``params`` (dict
+    merged into every slot of the name; ``None`` deletes a knob). Structural
+    fields (px_region, autotile_mask, water_deep, …) belong to generation and
+    are refused. All same-name slots update together — the same doctrine as
+    tile reskins.
+    """
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("--set needs a non-empty JSON object")
+    pack = Path(pack_dir)
+    stage_id, _, tile_name = str(target).partition("/")
+    if not stage_id or not tile_name:
+        raise ValueError(f"tile id {target!r} must be <stage>/<tile_name>")
+    ts_rel = f"tileset/{stage_id}/manifest.json"
+    ts_path = pack / ts_rel
+    if not ts_path.is_file():
+        raise FileNotFoundError(f"tileset for stage {stage_id!r} not found")
+    unknown = set(changes) - {"collision", "params"}
+    if unknown:
+        raise ValueError(
+            f"tile edits accept only 'collision' and 'params' (got "
+            f"{sorted(unknown)}) — art changes go through `canon asset "
+            "replace`, structure belongs to generation"
+        )
+    tileset = _read(ts_path)
+    slots = [s for s in tileset.get("slots", []) if s.get("name") == tile_name]
+    if not slots:
+        names = sorted({s.get("name", "") for s in tileset.get("slots", [])})
+        raise ValueError(
+            f"tile {tile_name!r} not in the {stage_id} tileset (has {names})"
+        )
+
+    # Diffs consider EVERY same-name slot: a hand-edited manifest can leave
+    # siblings divergent, and this op is exactly the convergence tool — a
+    # slots[0]-only sample would report no_change and never write.
+    diff: dict[str, dict] = {}
+    collision = changes.get("collision")
+    if collision is not None:
+        if collision not in _COLLISION_CATEGORIES:
+            raise ValueError(
+                f"collision {collision!r} is not a category "
+                f"{list(_COLLISION_CATEGORIES)}"
+            )
+        olds = sorted({str(s.get("collision", "")) for s in slots})
+        if olds != [collision]:
+            diff["collision"] = {
+                "from": olds[0] if len(olds) == 1 else olds, "to": collision,
+            }
+        for slot in slots:
+            slot["collision"] = collision
+    params = changes.get("params")
+    if params is not None:
+        if not isinstance(params, dict):
+            raise ValueError("'params' must be an object of knob: value")
+        blocked = _STRUCTURAL_PARAMS & set(params)
+        if blocked:
+            raise ValueError(
+                f"params {sorted(blocked)} are structural (generation-owned)"
+            )
+        for key, value in params.items():
+            if value is None:
+                needs_write = any(
+                    key in (s.get("params") or {}) for s in slots
+                )
+            else:
+                needs_write = any(
+                    (s.get("params") or {}).get(key) != value for s in slots
+                )
+            if needs_write:
+                diff[f"params.{key}"] = {
+                    "from": (slots[0].get("params") or {}).get(key),
+                    "to": value,
+                }
+        for slot in slots:
+            bucket = slot.setdefault("params", {})
+            for key, value in params.items():
+                if value is None:
+                    bucket.pop(key, None)
+                else:
+                    bucket[key] = value
+
+    if not diff:
+        return {
+            "stage": stage_id, "tile": tile_name, "slots": len(slots),
+            "changed": {}, "no_change": True,
+        }
+
+    before = provenance.snapshot_file(pack, ts_path)
+    tileset["status"] = "user_edited"
+    Tileset.model_validate(tileset)  # fail-closed shape check
+    _pack_adapter(pack).write_json_singleton(ts_rel, tileset)
+    after = provenance.snapshot_file(pack, ts_path)
+    provenance.record(
+        pack,
+        artifact_id=f"tileset:{stage_id}",
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={
+            "kind": "tile_params", "tile": tile_name,
+            "slots": len(slots), "changed": diff,
+        },
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "stage": stage_id, "tile": tile_name, "slots": len(slots),
+        "changed": diff,
+    }
+
+
+def read_db_schema(pack_dir: str | Path, entity_type: str) -> dict:
+    """The EFFECTIVE roll-table schema for one type + where it came from."""
+    if entity_type not in DB_TYPES:
+        raise ValueError(f"unknown db type {entity_type!r} (one of {list(DB_TYPES)})")
+    path = _schema_path(pack_dir, entity_type)
+    return {
+        "type": entity_type,
+        "source": "default" if path == DB_TYPES[entity_type]["schema"] else "pack",
+        "path": str(path),
+        "schema": _read(path),
+    }
+
+
+def _check_lookup_coverage(spec) -> None:
+    """Every lookup table must cover its dependency's choice values — the
+    classic table-editing mistake (add an archetype, forget its speed row)."""
+    for name, field in spec.fields.items():
+        if field.lookup is None or not field.depends_on:
+            continue
+        parent = spec.fields.get(field.depends_on)
+        if parent is None or parent.choices is None:
+            continue
+        missing = [v for v, _ in parent.choices if v not in field.lookup]
+        if missing:
+            raise ValueError(
+                f"lookup {name!r} has no row for {field.depends_on} "
+                f"value(s) {missing} — add rows or remove those choices"
+            )
+
+
+def update_db_schema(
+    pack_dir: str | Path,
+    entity_type: str,
+    changes: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Edit the roll tables bounding generation for one entity type.
+
+    ``changes`` = ``{"fields": {<name>: <field entry> | null}}`` — each named
+    field entry is replaced wholesale (null deletes the field); everything
+    else carries over. The merged document must load as a SkeletonSpec, pass
+    lookup-coverage, and survive a smoke roll BEFORE anything is written.
+    Edits land as a PACK-LOCAL override (``schemas/<type>.json``; the repo
+    default is never touched) and journal ``op:"edit"`` on ``schema:<type>``.
+    """
+    if entity_type not in DB_TYPES:
+        raise ValueError(f"unknown db type {entity_type!r} (one of {list(DB_TYPES)})")
+    field_changes = (changes or {}).get("fields")
+    if not isinstance(field_changes, dict) or not field_changes:
+        raise ValueError('--set needs {"fields": {<name>: <entry>|null, ...}}')
+    pack = Path(pack_dir)
+    current = read_db_schema(pack, entity_type)
+    merged = json.loads(json.dumps(current["schema"]))  # deep copy
+    fields = merged.setdefault("fields", {})
+    diff: dict[str, dict] = {}
+    for name, entry in field_changes.items():
+        old = fields.get(name)
+        if entry is None:
+            fields.pop(name, None)
+        else:
+            fields[name] = entry
+        if old != entry:
+            diff[name] = {"from": old, "to": entry}
+    if not diff:
+        return {**current, "changed": {}, "no_change": True}
+
+    # Fail-closed validation: loader (shape + dependency order), coverage,
+    # then a smoke roll (skipped when a field keys off outer context — no
+    # context to thread here).
+    spec = load_skeleton_spec(merged)
+    _check_lookup_coverage(spec)
+    if not any(f.depends_on_context for f in spec.fields.values()):
+        roll_skeleton(spec, random.Random(0))
+
+    rel = f"schemas/{entity_type}.json"
+    before = provenance.snapshot_file(pack, Path(current["path"]))
+    _pack_adapter(pack).write_json_singleton(rel, merged)
+    after = provenance.snapshot_file(pack, pack / rel)
+    provenance.record(
+        pack,
+        artifact_id=f"schema:{entity_type}",
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={
+            "kind": "db_schema", "type": entity_type,
+            "changed": sorted(diff), "was": current["source"],
+        },
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "type": entity_type, "source": "pack", "path": str(pack / rel),
+        "schema": merged, "changed": diff,
+    }
+
+
+# ---------------------------------------------------------------------------
+# level validate — generation's REAL checks on a level as it sits on disk
+# (pure read: no repairs, no writes, no journal)
+# ---------------------------------------------------------------------------
+
+
+def validate_level(
+    pack_dir: str | Path, level_id: str, _seen: frozenset = frozenset()
+) -> dict:
+    """Run the real validation suite over one level exactly as it sits on
+    disk, hand edits included.
+
+    Mirrors the play surfaces' load semantics: movement/rules merge the
+    level's persisted overrides over the manifest ("a level validates under
+    its own physics"), the tile registry comes from the manifest, box item
+    placements overlay their container tile before terrain checks
+    (collision.npz never carries boxes), water anchors count (persisted
+    grids are post-flood — ``swim_anchors``), and spilled contained water is
+    re-interpreted as free-water features via
+    :func:`repair_containment_grid` (the generation-time exemption is never
+    persisted) so flooded shorelines don't false-positive. Secret rooms
+    validate recursively (cycle-guarded) and ride in ``rooms``.
+    """
+    import numpy as np
+
+    from canon.adapters.platformer_write import _find_level_dir
+    from canon.bible.platformer import SparseMaskEntry
+    from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
+    from examples.platformer_pack.movement import PlayerMovementSpec
+    from examples.platformer_pack.rules import GameRules
+    from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
+    from examples.platformer_pack.validate import (
+        check_item_placements,
+        check_level,
+        check_placements,
+        repair_containment_grid,
+    )
+    from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
+
+    # A hand-edited cyclic room link must report, not recurse forever.
+    if level_id in _seen:
+        return {
+            "level_id": level_id, "stage_id": "", "display_name": "",
+            "ok": False,
+            "checks": [{
+                "name": "rooms",
+                "problems": [
+                    f"cyclic room link: {level_id!r} appears in its own ancestry"
+                ],
+            }],
+            "movement": {}, "rooms": [],
+        }
+
+    pack = Path(pack_dir)
+    manifest = _read(pack / "manifest.json")
+    level_dir, stage_id = _find_level_dir(pack, level_id)
+    level = _read(level_dir / "level.json")
+    grid = np.load(level_dir / "collision.npz")["collision"].copy()
+
+    movement = PlayerMovementSpec.model_validate({
+        **(manifest.get("movement") or {}),
+        **(level.get("movement_overrides") or {}),
+    })
+    rules = GameRules.model_validate({
+        **(manifest.get("rules") or {}),
+        **(level.get("rules_overrides") or {}),
+    })
+    combat = (
+        CombatSpec.model_validate(manifest["combat"])
+        if manifest.get("combat") else DEFAULT_COMBAT
+    )
+    variants = (
+        VariantSet.model_validate({"variants": manifest["variants"]})
+        if manifest.get("variants") else DEFAULT_VARIANTS
+    )
+    # The manifest carries the game's ACTUAL registry (compose persists it);
+    # the repo default only serves packs from before that landed.
+    tiles = (
+        TileRegistry.model_validate({"tiles": manifest["tiles"]})
+        if manifest.get("tiles") else DEFAULT_TILES
+    )
+
+    spawn = tuple(level.get("spawn") or (0, 0))
+    exit_ = tuple(level.get("exit") or (0, 0))
+    triggers = [
+        SparseMaskEntry.model_validate(t) for t in (level.get("triggers") or [])
+    ]
+
+    def _flat(name: str) -> list:
+        p = level_dir / name
+        return _read(p) if p.is_file() else []
+
+    entities = _flat("entities.json")
+    items = _flat("items.json")
+
+    # Box placements overlay their container tile for terrain/reachability —
+    # every play surface does the same at load.
+    ts_path = pack / "tileset" / stage_id / "manifest.json"
+    slots = (_read(ts_path).get("slots") if ts_path.is_file() else None) or []
+    box_tile = next(
+        (
+            int(s["tile_type"]) for s in slots
+            if (s.get("params") or {}).get("container")
+        ),
+        None,
+    )
+    boxed = grid.copy()
+    grid_h, grid_w = boxed.shape
+    for rec in items:
+        if str(rec.get("source", "")) != "box" or box_tile is None:
+            continue
+        try:
+            bx, by = int(rec.get("x")), int(rec.get("y"))
+        except (TypeError, ValueError):
+            continue  # malformed record — check_item_placements reports it
+        if 0 <= by < grid_h and 0 <= bx < grid_w:
+            boxed[by, bx] = box_tile
+
+    # Hand-edited slot physics diverging from the registry is worth saying
+    # out loud: play follows the tileset slots, this validation the registry.
+    tile_notes: list[str] = []
+    by_id = {t.id: t.category for t in tiles.tiles}
+    seen_divergence: set[tuple] = set()
+    for s in slots:
+        category = by_id.get(int(s.get("tile_type", -1)))
+        slot_collision = s.get("collision") or ""
+        key = (s.get("name"), slot_collision, category)
+        if (
+            category is not None and slot_collision
+            and slot_collision != category and key not in seen_divergence
+        ):
+            seen_divergence.add(key)
+            tile_notes.append(
+                f"tile {s.get('name')!r} collision {slot_collision!r} diverges "
+                f"from registry category {category!r} — play follows the "
+                "tileset; this validation follows the registry"
+            )
+
+    free_volume, containment_notes = repair_containment_grid(grid.copy(), tiles)
+
+    terrain_problems = check_level(
+        boxed, spawn, exit_, movement,
+        rules=rules, tiles=tiles, triggers=triggers,
+        free_volume=free_volume or None,
+        swim_anchors=True,  # persisted grids are post-flood
+    )
+
+    # Enemy placements validate against the plain grid (generation places
+    # enemies before the items step), items against the same + spawn reach.
+    enemies = {
+        eid: {
+            "archetype": d.archetype,
+            "size": d.size,
+            "rarity": d.rarity,
+            "swim_style": str((d.behavior or {}).get("swim_style", "") or ""),
+        }
+        for eid, d in _load_defs(pack, "enemy").items()
+    }
+    _, enemy_problems, enemy_repairs = check_placements(
+        grid, entities, spawn, enemies,
+        rules=rules, tiles=tiles, variants=variants, combat=combat,
+    )
+    item_defs = {
+        iid: d.model_dump(mode="json")
+        for iid, d in _load_defs(pack, "item").items()
+    }
+    _, item_problems, item_repairs = check_item_placements(
+        grid, items, spawn, item_defs, movement, rules, tiles,
+    )
+
+    checks = [
+        {
+            "name": "terrain", "problems": terrain_problems,
+            "notes": containment_notes + tile_notes,
+        },
+        {
+            "name": "enemies", "problems": enemy_problems,
+            "repairs": enemy_repairs, "count": len(entities),
+        },
+        {
+            "name": "items", "problems": item_problems,
+            "repairs": item_repairs, "count": len(items),
+        },
+    ]
+    rooms = [
+        validate_level(pack, rid, _seen=_seen | {level_id})
+        for rid in (level.get("secret_rooms") or [])
+    ]
+    # Two-tier verdict: ``ok`` = playable as-is (spawn→exit works); repairs
+    # are placement defects generation would relocate/drop — the level still
+    # plays, so they ride separately in ``repair_count`` for amber surfacing.
+    ok = not any(c["problems"] for c in checks) and all(r["ok"] for r in rooms)
+    return {
+        "level_id": level_id,
+        "stage_id": stage_id,
+        "display_name": str(level.get("display_name") or ""),
+        "ok": ok,
+        "checks": checks,
+        "repair_count": len(enemy_repairs) + len(item_repairs)
+        + sum(r.get("repair_count", 0) for r in rooms),
+        "movement": movement.model_dump(mode="json"),
+        "rooms": rooms,
     }
 
 

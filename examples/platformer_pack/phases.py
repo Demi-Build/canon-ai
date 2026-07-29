@@ -29,6 +29,22 @@ from examples.platformer_pack import color as color_math
 SCHEMAS_DIR = Path(__file__).parent / "schemas"
 PROMPT_VERSION = "slice-1"
 
+
+def _schema_for(ctx: Any, default_path: Path, explicit: bool) -> Path:
+    """The roll-table schema a generator phase should load: a PACK-LOCAL
+    override (``schemas/<name>.json`` under the run's output tree — written
+    by ``canon db schema --set``) wins over the repo default, so regen and
+    resume roll the same tables the user edited. A caller-pinned
+    ``schema_path`` (``explicit``) is always honored verbatim."""
+    if explicit:
+        return default_path
+    out = getattr(getattr(ctx, "config", None), "output_dir", None)
+    if out:
+        local = Path(out) / "schemas" / default_path.name
+        if local.is_file():
+            return local
+    return default_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -528,6 +544,7 @@ class EnemyGeneratorPhase:
         from examples.platformer_pack.tiles import DEFAULT_TILES
 
         self.count = count
+        self._schema_explicit = schema_path is not None
         self.schema_path = schema_path or (SCHEMAS_DIR / "enemy.json")
         self.tiles = tiles or DEFAULT_TILES
 
@@ -545,7 +562,9 @@ class EnemyGeneratorPhase:
         return f"native to the {', '.join(habitats)} biome(s) only"
 
     def run(self, ctx: Any) -> None:
-        spec = load_skeleton_spec(self.schema_path)
+        spec = load_skeleton_spec(
+            _schema_for(ctx, Path(self.schema_path), self._schema_explicit)
+        )
         stages = list(ctx.bible.stages.values())
         biomes = [s.biome for s in stages if s.biome]
         roster_briefs = ctx.artifacts.get("roster_briefs", {})
@@ -809,6 +828,7 @@ class ItemGeneratorPhase:
         from examples.platformer_pack.tiles import DEFAULT_TILES
 
         self.count = count
+        self._schema_explicit = schema_path is not None
         self.schema_path = Path(schema_path or SCHEMAS_DIR / "item.json")
         self.tiles = tiles or DEFAULT_TILES
 
@@ -818,7 +838,9 @@ class ItemGeneratorPhase:
     def run(self, ctx: Any) -> None:
         from canon.bible.platformer import ItemDefinition
 
-        spec_raw = json.loads(self.schema_path.read_text())
+        spec_raw = json.loads(
+            _schema_for(ctx, self.schema_path, self._schema_explicit).read_text()
+        )
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         seed = str(getattr(ctx.config, "seed", ""))
         bg_lums = background_luminances(_ctx_palettes(ctx), self.tiles)

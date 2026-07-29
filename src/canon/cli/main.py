@@ -1051,6 +1051,26 @@ def level_publish(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@level_app.command("validate")
+def level_validate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (e.g. l1)."),
+) -> None:
+    """Run generation's REAL validation suite on a level as it sits on disk
+    (hand edits included): spawn→exit/checkpoint reachability under the
+    level's own physics (jump-arc simulation, run-up momentum, swim), enemy
+    placement rules (water policy, footprint, variant/rarity caps), and item
+    collectibility. Pure read — no repairs, no writes, no journal."""
+    ops = _pack_ops()
+    try:
+        result = ops.validate_level(pack_dir, level_id)
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level validate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 @level_app.command("versions")
 def level_versions(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
@@ -1245,6 +1265,85 @@ def db_complete_cmd(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@db_app.command("update")
+def db_update_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item | tile"),
+    entity_id: str = typer.Option(
+        ..., "--id",
+        help="Row id — or <stage>/<tile_name> with --type tile.",
+    ),
+    set_json: str = typer.Option(
+        ..., "--set",
+        help='JSON of field: value changes (e.g. \'{"hp": 9, "name": "Grub"}\'; '
+        "null deletes a nested knob). Values land verbatim — no rerolls.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """DIRECT human edit of an existing row (no LLM, no rerolls): enemy/item
+    fields, or collision/params for a tile type. Rehashes, stamps
+    ``user_edited``, journals ``op:"edit"`` with the field diff."""
+    ops = _pack_ops()
+    try:
+        changes = json.loads(set_json)
+    except json.JSONDecodeError as e:
+        _emit_error(f"Invalid --set JSON: {e}")
+    try:
+        if entity_type == "tile":
+            result = ops.update_tile_slots(
+                pack_dir, entity_id, changes, actor=actor, session=session
+            )
+        else:
+            result = ops.update_db_row(
+                pack_dir, entity_type, entity_id, changes,
+                actor=actor, session=session,
+            )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type, id=entity_id)
+    except Exception as e:
+        _emit_error(f"db update failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@db_app.command("schema")
+def db_schema_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item"),
+    set_json: str | None = typer.Option(
+        None, "--set",
+        help='Edit: {"fields": {<name>: <field entry>|null, ...}} — each named '
+        "field is replaced wholesale. Omit to just read the effective schema.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Read (default) or edit (--set) the roll-table schema bounding
+    generation for one entity type. Edits are validated fail-closed (loader +
+    lookup coverage + smoke roll) and land as a PACK-LOCAL override."""
+    changes = None
+    if set_json is not None:
+        # Parsed OUTSIDE the op try: _emit_error's Exit must not be re-caught
+        # below as a second "db schema failed" payload.
+        try:
+            changes = json.loads(set_json)
+        except json.JSONDecodeError as e:
+            _emit_error(f"Invalid --set JSON: {e}")
+    ops = _pack_ops()
+    try:
+        if changes is None:
+            result = ops.read_db_schema(pack_dir, entity_type)
+        else:
+            result = ops.update_db_schema(
+                pack_dir, entity_type, changes, actor=actor, session=session
+            )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type)
+    except Exception as e:
+        _emit_error(f"db schema failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 asset_app = typer.Typer(help="Pack asset replacement (user art entering the pack).")
 app.add_typer(asset_app, name="asset")
 
@@ -1360,6 +1459,249 @@ def asset_replace(
     except Exception as e:
         _emit_error(f"Asset replace failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("versions")
+def asset_versions_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target", help="Artifact id (enemy:<id>, tileset:<stage>, …)."
+    ),
+) -> None:
+    """The compact version chain for ANY journaled artifact (the restore
+    picker's source) — level steps keep `level versions`."""
+    try:
+        from canon.provenance import artifact_versions
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+    versions = artifact_versions(pack_dir, target)  # type: ignore[possibly-unbound]
+    _emit({"artifact_id": target, "versions": versions, "count": len(versions)})
+
+
+@asset_app.command("lineage")
+def asset_lineage_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(..., "--target", help="Artifact id."),
+    max_nodes: int = typer.Option(500, "--max-nodes"),
+) -> None:
+    """The artifact's FAMILY TREE from the journal + object store: nodes =
+    versions (content hashes, with facet/actor/model/prompt), edges = the
+    events between them; shared bytes connect artifacts across the pack."""
+    try:
+        from canon.adapters.platformer_read import asset_lineage
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer reader: {e}")
+    try:
+        result = asset_lineage(pack_dir, target, max_nodes=max_nodes)  # type: ignore[possibly-unbound]
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset lineage failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("restore")
+def asset_restore_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> (row JSON or sprite PNG by bytes) | "
+        "player | tilesheet:<stage> | backdrop:<stage>/<index>",
+    ),
+    to: str = typer.Option(..., "--to", help="Version hash (sha256:…)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Make a historic version current again (op:"restore"). Nothing is
+    deleted — the lineage grows a new branch from the chosen node."""
+    try:
+        from canon.adapters.platformer_write import restore_asset
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+    try:
+        result = restore_asset(  # type: ignore[possibly-unbound]
+            pack_dir, target, to, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset restore failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("assign")
+def asset_assign_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    source: str = typer.Option(..., "--source", help="enemy:<id> | item:<id>"),
+    to: str = typer.Option(..., "--to", help="enemy:<id> | item:<id>"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Use one row's art on another: copies the WHOLE bundle (sprite +
+    animation) with a cross-artifact provenance edge — the lineage tree
+    shows both rows sharing the same nodes afterward."""
+    try:
+        from canon.adapters.platformer_write import assign_asset
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+    try:
+        result = assign_asset(  # type: ignore[possibly-unbound]
+            pack_dir, source, to, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), source=source, to=to)
+    except Exception as e:
+        _emit_error(f"asset assign failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+library_app = typer.Typer(
+    help="The GLOBAL cross-project asset library ($CANON_LIBRARY, "
+    "default ~/.canon/library)."
+)
+app.add_typer(library_app, name="library")
+
+
+@library_app.command("publish")
+def library_publish_cmd(
+    pack_dir: Path = typer.Argument(..., help="Source pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> | player | tile:<stage>/<name> | "
+        "backdrop:<stage>/<i> | audio:<stage>",
+    ),
+    name: str | None = typer.Option(None, "--name"),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Publish an asset into the library (composite assets travel whole;
+    identical re-publishes dedup). Journals op:"keep" in the source pack."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        result = library.publish(  # type: ignore[possibly-unbound]
+            pack_dir, target, name=name,
+            tags=[t.strip() for t in tags.split(",")] if tags else (),
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"library publish failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@library_app.command("list")
+def library_list_cmd(
+    kind: str | None = typer.Option(None, "--kind"),
+    tag: str | None = typer.Option(None, "--tag"),
+    query: str | None = typer.Option(None, "--query"),
+    project: str | None = typer.Option(
+        None, "--project",
+        help="Filter by source pack path/world name (the project view).",
+    ),
+) -> None:
+    """Browse the library index (newest first)."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    entries = library.list_entries(kind=kind, tag=tag, query=query, project=project)  # type: ignore[possibly-unbound]
+    _emit({"entries": entries, "count": len(entries), "root": str(library.library_root())})  # type: ignore[possibly-unbound]
+
+
+@library_app.command("import")
+def library_import_cmd(
+    pack_dir: Path = typer.Argument(..., help="Destination pack root."),
+    library_id: str = typer.Option(..., "--id"),
+    new_id: str | None = typer.Option(
+        None, "--as", help="Preferred id (a fresh one is minted on collision)."
+    ),
+    into: str | None = typer.Option(
+        None, "--into",
+        help="tile:<stage>/<name> | backdrop:<stage>/<i> | audio:<stage> "
+        "(required for those kinds).",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Import a library entry: bytes copy in (packs stay self-contained),
+    ids are always fresh, and the artifact carries a durable library_ref."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        result = library.import_entry(  # type: ignore[possibly-unbound]
+            pack_dir, library_id, new_id=new_id, into=into,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), id=library_id)
+    except Exception as e:
+        _emit_error(f"library import failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@library_app.command("cat")
+def library_cat_cmd(
+    content_hash: str = typer.Argument(..., help="sha256:<hex> object hash."),
+) -> None:
+    """Fetch library object bytes as base64 (previews for the browser UI)."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        data = library.read_object(content_hash)  # type: ignore[possibly-unbound]
+    except FileNotFoundError:
+        _emit_error(f"object {content_hash} not in the library store")
+    import base64
+
+    _emit({
+        "hash": content_hash,
+        "size": len(data),  # type: ignore[possibly-unbound]
+        "bytes_b64": base64.b64encode(data).decode("ascii"),  # type: ignore[possibly-unbound]
+    })
+
+
+object_app = typer.Typer(help="Content-addressed object store reads.")
+app.add_typer(object_app, name="object")
+
+
+@object_app.command("cat")
+def object_cat_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    content_hash: str = typer.Argument(..., help="sha256:<hex> version hash."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Write raw bytes to a file instead of emitting JSON."
+    ),
+) -> None:
+    """Fetch a stored version's bytes (thumbnails of history live only in
+    the CAS). Without --out, emits base64 JSON small enough for UI pipes."""
+    try:
+        from canon.provenance import read_object
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+    try:
+        data = read_object(pack_dir, content_hash)  # type: ignore[possibly-unbound]
+    except FileNotFoundError:
+        _emit_error(f"object {content_hash} not in the store", pack_dir=str(pack_dir))
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[possibly-unbound]
+        out.write_bytes(data)  # type: ignore[possibly-unbound]
+        _emit({"hash": content_hash, "size": len(data), "out": str(out)})  # type: ignore[possibly-unbound]
+    else:
+        import base64
+
+        _emit({
+            "hash": content_hash,
+            "size": len(data),  # type: ignore[possibly-unbound]
+            "bytes_b64": base64.b64encode(data).decode("ascii"),  # type: ignore[possibly-unbound]
+        })
 
 
 def main() -> None:

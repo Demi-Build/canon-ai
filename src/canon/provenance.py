@@ -114,6 +114,23 @@ def append_event(pack: str | Path, event: dict) -> dict:
     return full
 
 
+def all_events(pack: str | Path) -> list[dict]:
+    """Every parsed journal event, in append order. The lineage builder
+    reads the WHOLE journal once — cross-artifact connections are found by
+    shared content hashes, which no per-artifact filter can see."""
+    jp = journal_path(pack)
+    out: list[dict] = []
+    if not jp.is_file():
+        return out
+    with jp.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
 def artifact_versions(pack: str | Path, artifact_id: str) -> list[dict]:
     """The ordered version chain for one artifact, from the journal.
 

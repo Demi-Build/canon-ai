@@ -823,6 +823,7 @@ def replace_asset(
     *,
     actor: str = "user",
     session: str | None = None,
+    extra_detail: dict | None = None,
 ) -> dict:
     """Replace an asset's bytes with an uploaded PNG.
 
@@ -919,6 +920,10 @@ def replace_asset(
         )
 
     pinned = _maybe_pin(pack, artifact_id)
+    if extra_detail:
+        # Callers wrapping this install (library import) fold their
+        # provenance into the ONE event instead of journaling a second.
+        detail = {**detail, **extra_detail}
     provenance.record(
         pack,
         artifact_id=artifact_id,
@@ -931,3 +936,263 @@ def replace_asset(
         after_hash=after,
     )
     return {"target": target, "artifact_id": artifact_id, "pinned": pinned, **detail}
+
+
+def restore_asset(
+    pack_dir: str | Path,
+    target: str,
+    to_hash: str,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Make a HISTORIC version current again (Library A: lineage restore).
+
+    Nothing is deleted: newer versions keep their bytes and events; this
+    writes the chosen version's bytes back into place and journals
+    ``op:"restore"``, so the lineage grows a new branch from an old node.
+
+    Routing is by target family + the bytes themselves:
+      ``enemy:<id>`` / ``item:<id>`` — JSON bytes → the DB row; PNG bytes →
+      the sprite (hash + refs updated, like ``asset replace``)
+      ``player``                     — sprite/player/base.png
+      ``tilesheet:<stage>``          — the WHOLE tilesheet
+      ``backdrop:<stage>/<index>``   — one parallax band
+    """
+    pack = Path(pack_dir)
+    data = provenance.read_object(pack, to_hash)
+    adapter = _pack_adapter(pack)
+    kind, _, rest = target.partition(":")
+    is_png = data.startswith(_PNG_MAGIC)
+
+    # Restore only rewinds an artifact's OWN lineage — without this, any PNG
+    # in the store lands on any PNG target (fail-open). Moving bytes BETWEEN
+    # artifacts is a deliberate future op (library import/assign), not this.
+    expected_artifact = {
+        "enemy": f"enemy:{rest}",
+        "item": f"item:{rest}",
+        "player": "player",
+        "tilesheet": f"tileset:{rest}",
+        "backdrop": f"backdrop:{rest.partition('/')[0]}",
+    }.get(kind)
+    if expected_artifact is not None and not any(
+        e.get("artifact_id") == expected_artifact
+        and to_hash in (e.get("before_hash"), e.get("after_hash"))
+        for e in provenance.all_events(pack)
+    ):
+        raise ValueError(
+            f"{to_hash} is not part of {expected_artifact}'s history — "
+            "restore only rewinds an artifact's own lineage"
+        )
+
+    if kind in ("enemy", "item") and rest and not is_png:
+        entity_path = pack / kind / f"{rest}.json"
+        if not entity_path.is_file():
+            raise FileNotFoundError(f"{kind} {rest!r} not found")
+        try:
+            row = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError(
+                f"version {to_hash} is neither PNG nor JSON — wrong hash?"
+            ) from None
+        id_field = f"{kind}_id"
+        if str(row.get(id_field, "")) != rest:
+            raise ValueError(
+                f"version {to_hash} belongs to {kind} "
+                f"{row.get(id_field)!r}, not {rest!r}"
+            )
+        before = provenance.snapshot_file(pack, entity_path)
+        row["status"] = "user_edited"
+        adapter.write_json_singleton(f"{kind}/{rest}.json", row)
+        after = provenance.snapshot_file(pack, entity_path)
+        artifact_id = f"{kind}:{rest}"
+        detail: dict = {"kind": "row_restore", "to": to_hash}
+
+    elif kind in ("enemy", "item", "player") and is_png:
+        if kind == "player":
+            rel = "sprite/player/base.png"
+            artifact_id = "player"
+        else:
+            entity_path = pack / kind / f"{rest}.json"
+            if not entity_path.is_file():
+                raise FileNotFoundError(f"{kind} {rest!r} not found")
+            entity = _read(entity_path)
+            rel = entity.get("sprite_path") or f"sprite/{kind}/{rest}/base.png"
+            artifact_id = f"{kind}:{rest}"
+        before = provenance.snapshot_file(pack, pack / rel)
+        sprite_hash = adapter.write_binary(rel, data)
+        if kind != "player":
+            entity["sprite_path"] = rel
+            entity["sprite_hash"] = sprite_hash
+            entity["status"] = "user_edited"
+            adapter.write_json_singleton(f"{kind}/{rest}.json", entity)
+        after = provenance.snapshot_file(pack, pack / rel)
+        detail = {"kind": "sprite_restore", "path": rel, "to": to_hash}
+
+    elif kind == "tilesheet" and rest and is_png:
+        ts_path = pack / "tileset" / rest / "manifest.json"
+        if not ts_path.is_file():
+            raise FileNotFoundError(f"tileset for stage {rest!r} not found")
+        tileset = _read(ts_path)
+        sheet_rel = tileset["tilesheet_path"]
+        before = provenance.snapshot_file(pack, pack / sheet_rel)
+        tileset["tilesheet_hash"] = adapter.write_binary(sheet_rel, data)
+        tileset["status"] = "user_edited"
+        adapter.write_json_singleton(f"tileset/{rest}/manifest.json", tileset)
+        after = provenance.snapshot_file(pack, pack / sheet_rel)
+        artifact_id = f"tileset:{rest}"
+        detail = {"kind": "tilesheet_restore", "to": to_hash}
+
+    elif kind == "backdrop" and "/" in rest and is_png:
+        stage_id, _, idx_s = rest.partition("/")
+        bd_path = pack / "backdrop" / stage_id / "manifest.json"
+        if not bd_path.is_file():
+            raise FileNotFoundError(f"backdrop for stage {stage_id!r} not found")
+        backdrop = _read(bd_path)
+        bands = backdrop.get("band_paths", [])
+        idx = int(idx_s)
+        if not (0 <= idx < len(bands)):
+            raise ValueError(f"band index {idx} out of range (0..{len(bands) - 1})")
+        rel = bands[idx]
+        before = provenance.snapshot_file(pack, pack / rel)
+        band_hash = adapter.write_binary(rel, data)
+        backdrop.setdefault("band_hashes", {})[rel] = band_hash
+        adapter.write_json_singleton(f"backdrop/{stage_id}/manifest.json", backdrop)
+        after = provenance.snapshot_file(pack, pack / rel)
+        artifact_id = f"backdrop:{stage_id}"
+        detail = {"kind": "band_restore", "band": idx, "path": rel, "to": to_hash}
+
+    else:
+        raise ValueError(
+            f"cannot restore {target!r} from these bytes — targets: "
+            "enemy:<id> | item:<id> (row JSON or sprite PNG), player, "
+            "tilesheet:<stage>, backdrop:<stage>/<index>"
+        )
+
+    pinned = _maybe_pin(pack, artifact_id)
+    provenance.record(
+        pack,
+        artifact_id=artifact_id,
+        op="restore",
+        source="user",
+        actor=actor,
+        session=session,
+        detail=detail,
+        before_hash=before,
+        after_hash=after,
+    )
+    return {"target": target, "artifact_id": artifact_id, "pinned": pinned, **detail}
+
+
+def assign_asset(
+    pack_dir: str | Path,
+    source: str,
+    to: str,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """The in-project "use this asset here" gesture (design §5a): copy one
+    actor's WHOLE art bundle (base sprite + animation strips/atlas/frames)
+    onto another row. Bytes are copied (rows stay independently editable),
+    and because the copies hash identically, the lineage tree shows the two
+    artifacts sharing nodes — the cross-asset connection the library exists
+    to surface. Journals ``op:"import"``, ``detail.kind:"asset_assign"``.
+
+    ``source`` / ``to``: ``enemy:<id>`` | ``item:<id>`` (distinct).
+    """
+    pack = Path(pack_dir)
+    s_kind, _, s_id = source.partition(":")
+    t_kind, _, t_id = to.partition(":")
+    if s_kind not in ("enemy", "item") or t_kind not in ("enemy", "item"):
+        raise ValueError("assign works between enemy:<id> / item:<id> rows")
+    if (s_kind, s_id) == (t_kind, t_id):
+        raise ValueError("source and destination are the same row")
+    s_path = pack / s_kind / f"{s_id}.json"
+    t_path = pack / t_kind / f"{t_id}.json"
+    if not s_path.is_file():
+        raise FileNotFoundError(f"{s_kind} {s_id!r} not found")
+    if not t_path.is_file():
+        raise FileNotFoundError(f"{t_kind} {t_id!r} not found")
+
+    src_row = _read(s_path)
+    sprite_rel = str(src_row.get("sprite_path") or "")
+    src_base = pack / sprite_rel
+    if not sprite_rel or not src_base.is_file():
+        raise FileNotFoundError(f"{source} has no sprite to assign")
+    src_dir = src_base.parent
+    old_prefix = str(Path(sprite_rel).parent)
+    new_prefix = f"sprite/{t_kind}/{t_id}"
+
+    adapter = _pack_adapter(pack)
+    dest_row = _read(t_path)
+    # The event's hashes are the SPRITE bytes (facet sprite) — the after
+    # hash equals the source's sprite hash, which is exactly what makes the
+    # lineage tree show both artifacts sharing one node.
+    old_sprite_rel = str(dest_row.get("sprite_path") or "")
+    before = (
+        provenance.snapshot_file(pack, pack / old_sprite_rel)
+        if old_sprite_rel else None
+    )
+    # Clear stale art first: assigning a STATIC sprite must not leave the
+    # dest's old animation playing from leftover manifests/strips.
+    dest_dir = pack / new_prefix
+    src_names = {
+        f.name for f in src_dir.iterdir()
+        if f.is_file() and not f.name.startswith(".") and not f.name.endswith(".tmp")
+    }
+    if dest_dir.is_dir():
+        for f in dest_dir.iterdir():
+            if f.is_file() and f.name not in src_names:
+                f.unlink()
+    sprite_hash = ""
+    for f in sorted(src_dir.iterdir()):
+        if (
+            not f.is_file() or f.name.startswith(".") or f.name.endswith(".tmp")
+        ):
+            continue
+        data = f.read_bytes()
+        if f.name.endswith(".json"):
+            # Playback manifests embed pack-relative paths — the play
+            # surfaces read THESE, so a verbatim copy would render the dest
+            # from the source's live files.
+            data = (
+                data.decode("utf-8").replace(old_prefix, new_prefix).encode("utf-8")
+            )
+        written = adapter.write_binary(f"{new_prefix}/{f.name}", data)
+        if f.name == src_base.name:
+            sprite_hash = written
+    dest_row["sprite_path"] = f"{new_prefix}/{src_base.name}"
+    dest_row["sprite_hash"] = sprite_hash
+    dest_row["status"] = "user_edited"
+    src_anim = (src_row.get("stats") or {}).get("animation")
+    if isinstance(src_anim, dict):
+        replaced = json.loads(
+            json.dumps(src_anim).replace(old_prefix, new_prefix)
+        )
+        dest_row.setdefault("stats", {})["animation"] = replaced
+    else:
+        # Source is static — the dest's old animation block is now a lie.
+        (dest_row.get("stats") or {}).pop("animation", None)
+    adapter.write_json_singleton(f"{t_kind}/{t_id}.json", dest_row)
+    after = provenance.snapshot_file(
+        pack, pack / f"{new_prefix}/{src_base.name}"
+    )
+
+    pinned = _maybe_pin(pack, f"{t_kind}:{t_id}")
+    provenance.record(
+        pack,
+        artifact_id=f"{t_kind}:{t_id}",
+        op="import",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={
+            "kind": "asset_assign", "from": source, "from_hash": sprite_hash,
+        },
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "from": source, "to": to, "sprite_hash": sprite_hash, "pinned": pinned,
+    }

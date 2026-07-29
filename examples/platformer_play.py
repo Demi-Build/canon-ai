@@ -40,6 +40,10 @@ def _sign(v: float) -> float:
 
 SCALE = 32
 FPS = 60
+#: PLAT_PLAIN=1 — play WITHOUT art: palette-role tile blocks (the editor's
+#: Blocks view), placeholder shapes for sprites/items/props, no backdrop.
+#: Physics identical; purely a presentation switch for layout feel-checks.
+_PLAIN = bool(os.environ.get("PLAT_PLAIN"))
 # Landing one-shot window (presentation only): armed on the airborne →
 # grounded EDGE, read by the anim candidates alone. main.gd shares the value.
 LAND_ANIM_S = 0.15
@@ -92,11 +96,33 @@ def _load(data_dir: Path, level_id: str):
     )
 
 
-def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
+def _tile_colors(
+    data_dir: Path, tileset: dict, manifest: dict | None = None
+) -> dict[int, tuple]:
     """Resolve tile colors by sampling the tilesheet via the Tileset slots —
     same resolution path the renderer and Godot use. Each sample is the
     tile REGION's average, so generated textures resolve to their
-    palette-conformed mean, not one arbitrary pixel."""
+    palette-conformed mean, not one arbitrary pixel.
+
+    PLAT_PLAIN skips the sheet entirely: palette-ROLE colors per tile type
+    (the editor's Blocks view), so layout reads as pure blocks."""
+    if _PLAIN:
+        def hex_rgb(h: str) -> tuple:
+            h = str(h).lstrip("#")
+            return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+
+        palette = tileset.get("palette") or {}
+        roles = {
+            int(t["id"]): str(t.get("color_role", "ground"))
+            for t in (manifest or {}).get("tiles", [])
+        }
+        return {
+            int(slot["tile_type"]): hex_rgb(
+                palette.get(roles.get(int(slot["tile_type"]), "ground"), "#888888")
+            )
+            for slot in tileset["slots"]
+        }
+
     from PIL import Image
 
     sheet = Image.open(data_dir / tileset["tilesheet_path"]).convert("RGB")
@@ -108,6 +134,49 @@ def _tile_colors(data_dir: Path, tileset: dict) -> dict[int, tuple]:
             (1, 1), Image.BILINEAR
         ).getpixel((0, 0))
     return colors
+
+
+def _tile_textures(sheet, tileset: dict, size: int) -> dict:
+    """Real tilesheet crops per tile TYPE for the art view — the harness's
+    lift above flat region-average blocks.
+
+    One representative slot per type is cropped from the sheet and scaled to
+    the cell: the fully-surrounded autotile variant (max ``autotile_mask``)
+    when the sheet carries the 16-variant set, else the type's only slot.
+    We DON'T per-cell autotile — Godot stays the autotiled art surface of
+    record; a single faithful crop per type is all the review harness needs
+    to read as its texture (a light palette's near-white floor stops
+    rendering as a blank square). Keyed by tile_type so the draw loop, which
+    owns the collision grid and every runtime mutation (crumbles, box
+    overlays), blits a texture wherever it used to fill a flat rect.
+    ``sheet`` is a display-converted pygame Surface; returns
+    ``{tile_type: Surface}`` (empty when PLAT_PLAIN — blocks view stays
+    flat palette colors)."""
+    import pygame
+
+    if _PLAIN:
+        return {}
+    best: dict[int, dict] = {}
+    for slot in tileset["slots"]:
+        tt = int(slot["tile_type"])
+        if tt == 0:
+            continue  # empty draws as the background fill, never a tile
+        mask = int((slot.get("params") or {}).get("autotile_mask", 0))
+        if tt not in best or mask > best[tt]["mask"]:
+            best[tt] = {"mask": mask, "region": slot["px_region"]}
+    surfs: dict = {}
+    sw, sh = sheet.get_size()
+    for tt, info in best.items():
+        x, y, w, h = (int(v) for v in info["region"])
+        if x < 0 or y < 0 or x + w > sw or y + h > sh or w <= 0 or h <= 0:
+            continue  # region outside the sheet — flat-color fallback
+        sub = sheet.subsurface(pygame.Rect(x, y, w, h))
+        surfs[tt] = (
+            sub.copy()
+            if (w, h) == (size, size)
+            else pygame.transform.smoothscale(sub, (size, size))
+        )
+    return surfs
 
 
 def _walk_durs(t: float, durs: list) -> int:
@@ -319,7 +388,7 @@ def run_level(
     # _load_level_by_id mirrors this (mechanics parity).
     movement = dict(manifest["movement"])
     movement.update(level.get("movement_overrides") or {})
-    tile_colors = _tile_colors(data_dir, tileset)
+    tile_colors = _tile_colors(data_dir, tileset, manifest)
     height, width = grid.shape
     BODY_L, BODY_R = 0.15, 0.85  # player body span — sample BOTH corners
 
@@ -922,6 +991,21 @@ def run_level(
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 28)
 
+    # Real tile textures for the ART view (blocks view stays flat colors):
+    # one representative crop per tile TYPE, blitted by the draw loop in
+    # place of the region-average rect. Needs the display (convert_alpha),
+    # so it's built here rather than beside tile_colors. An unreadable sheet
+    # falls back to the flat colors — the harness never hard-fails on art.
+    tile_surfs: dict = {}
+    if not _PLAIN:
+        try:
+            _sheet = pygame.image.load(
+                str(data_dir / tileset["tilesheet_path"])
+            ).convert_alpha()
+            tile_surfs = _tile_textures(_sheet, tileset, SCALE)
+        except (pygame.error, OSError, KeyError, ValueError):
+            tile_surfs = {}
+
     # Generated audio (manifest["audio"], late audio phase). Best-effort:
     # music loops, SFX keyed by event; ANY failure (no device, no files,
     # pre-audio manifest) leaves the game silent — this harness is the
@@ -952,8 +1036,8 @@ def run_level(
     # Godot is the art surface of record) ---
     def _sprite(rel: str, size: tuple) -> pygame.Surface | None:
         path = data_dir / rel
-        if not rel or not path.exists():
-            return None
+        if _PLAIN or not rel or not path.exists():
+            return None  # placeholder shapes take over (pre-art rendering)
         return pygame.transform.smoothscale(
             pygame.image.load(str(path)).convert_alpha(), size
         )
@@ -1044,7 +1128,7 @@ def run_level(
         return anim or None
 
     def _load_anim(sprite_rel: str, size: tuple) -> dict | None:
-        if not sprite_rel:
+        if _PLAIN or not sprite_rel:
             return None
         sprite_dir = sprite_rel.rsplit("/", 1)[0]
         anim = _load_atlas_anim(sprite_dir, size)
@@ -1154,7 +1238,7 @@ def run_level(
     backdrop_bands = []
     foreground_bands = []
     backdrop_manifest = data_dir / "backdrop" / stage_id / "manifest.json"
-    if backdrop_manifest.exists():
+    if not _PLAIN and backdrop_manifest.exists():
         backdrop = json.loads(backdrop_manifest.read_text())
         depths = backdrop.get("depths", [])
         for i, rel in enumerate(backdrop.get("band_paths", [])):
@@ -1901,7 +1985,9 @@ def run_level(
                 t = int(grid[y, x])
                 if t in VOLUME_SURFS:  # translucent water over the backdrop
                     screen.blit(VOLUME_SURFS[t], (x * SCALE, y * SCALE))
-                elif t:
+                elif t in tile_surfs:  # real tilesheet crop (art view)
+                    screen.blit(tile_surfs[t], (x * SCALE, y * SCALE))
+                elif t:  # blocks view, or a type without a usable crop
                     pygame.draw.rect(
                         screen,
                         tile_colors.get(t, (255, 0, 255)),
