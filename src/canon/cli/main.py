@@ -803,6 +803,104 @@ def status_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Whole-project scaffolding — start a fresh platformer from cradle.
+# ---------------------------------------------------------------------------
+
+world_app = typer.Typer(help="Whole-project scaffolding.")
+app.add_typer(world_app, name="world")
+
+
+def _set_world_name(pack_dir: Path, name: str) -> None:
+    """Stamp the chosen world name over the fake-generated one so the new
+    project reads as the user's (manifest ``world`` string + world.json
+    ``title``). Cosmetic — stage/level ids and physics are untouched."""
+    mf = pack_dir / "manifest.json"
+    if mf.is_file():
+        data = json.loads(mf.read_text())
+        data["world"] = name
+        mf.write_text(json.dumps(data, indent=2))
+    wj = pack_dir / "world.json"
+    if wj.is_file():
+        world = json.loads(wj.read_text())
+        world["title"] = name
+        wj.write_text(json.dumps(world, indent=2))
+
+
+@world_app.command("new")
+def world_new(
+    output_dir: Path = typer.Argument(..., help="Where to create the new pack (must be empty/new)."),
+    name: str = typer.Option("My Platformer", "--name", help="World display name."),
+    stages: int = typer.Option(1, "--stages", help="Number of biome stages."),
+    levels: int = typer.Option(2, "--levels", help="Levels per stage."),
+    enemies: int = typer.Option(4, "--enemies", help="Enemy roster size."),
+    items: int = typer.Option(4, "--items", help="Item pool size."),
+    seed: str | None = typer.Option(None, "--seed", help="Pin for reproducibility (default: varied)."),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="Design text: fake ($0) | anthropic (paid)."),
+    image_backend: str = typer.Option("fake", "--image-backend", help="Art: none | fake | fal | retro | pixellab | local."),
+    music_backend: str = typer.Option("none", "--music-backend", help="Music: none | fake | lyria."),
+    sfx_backend: str = typer.Option("none", "--sfx-backend", help="SFX: none | fake | elevenlabs."),
+    vlm_backend: str = typer.Option("none", "--vlm-backend", help="Animation authoring: none | fake | anthropic."),
+    model: str | None = typer.Option(None, "--model", help="LLM model (anthropic only)."),
+    env_file: Path | None = typer.Option(None, "--env-file", help="KEY=VALUE file for the paid backends."),
+) -> None:
+    """Scaffold a fresh, PLAYABLE platformer project — a populated starter.
+
+    Every generator is a separate backend so you can go free or fully paid:
+    all defaults = a $0 preview (canned text, placeholder art). Turn any dial
+    up for a real run — ``--llm-backend anthropic`` (Claude authors the world),
+    ``--image-backend fal`` (real sprites/backdrops), ``--music-backend lyria``,
+    ``--sfx-backend elevenlabs``, ``--vlm-backend anthropic`` (animation). Paid
+    backends need their keys via --env-file. This is what cradle's "new
+    project" shells to.
+    """
+    import secrets
+    import subprocess
+
+    import canon as _canon_pkg
+
+    _load_env_file(env_file)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        _emit_error(f"target already exists and is not empty: {output_dir}")
+    repo = Path(_canon_pkg.__file__).resolve().parents[2]
+    script = repo / "examples" / "run_platformer_slice.py"
+    if not script.is_file():
+        _emit_error(
+            f"bootstrap script not found at {script} — `canon world new` needs a "
+            "source checkout of canon-ai (editable install)."
+        )
+    eff_seed = seed or f"cradle-{secrets.token_hex(4)}"
+    # Each generator's backend flows straight through to the slice. The
+    # subprocess inherits os.environ, so _load_env_file above puts any keys in
+    # reach for the paid backends.
+    cmd = [
+        sys.executable, str(script),
+        "--backend", llm_backend, "--engine", "json",
+        "--image-backend", image_backend,
+        "--music-backend", music_backend,
+        "--sfx-backend", sfx_backend,
+        "--vlm-backend", vlm_backend,
+        "--num-stages", str(stages), "--num-levels", str(levels),
+        "--num-enemies", str(enemies), "--num-items", str(items),
+        "--seed", eff_seed, "--output-dir", str(output_dir),
+    ]
+    if model:
+        cmd += ["--model", model]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=str(repo))
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or b"").decode(errors="replace")[-800:]
+        _emit_error(f"world new failed:\n{tail}")
+    _set_world_name(output_dir, name)
+    _emit({
+        "pack_dir": str(output_dir), "world": name, "seed": eff_seed,
+        "backends": {
+            "llm": llm_backend, "image": image_backend,
+            "music": music_backend, "sfx": sfx_backend, "vlm": vlm_backend,
+        },
+    })
+
+
+# ---------------------------------------------------------------------------
 # Platformer read/export verbs — the read half external tooling (Cradle)
 # shells out to instead of re-implementing .npz decoding + the tileset registry.
 # ---------------------------------------------------------------------------
@@ -1014,6 +1112,179 @@ def level_create(
         _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
     except Exception as e:
         _emit_error(f"Create failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("generate")
+def level_generate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str = typer.Option(..., "--stage", help="Stage the level belongs to."),
+    brief: str = typer.Option("", "--brief", help="Design brief the layout agent honors."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled by world position)."),
+    width: int | None = typer.Option(None, "--width"),
+    height: int | None = typer.Option(None, "--height"),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    enemies: int = typer.Option(4, "--enemies", help="Max enemy placements."),
+    items: int = typer.Option(12, "--items", help="Max item placements."),
+    seed: str | None = typer.Option(None, "--seed", help="Pin for reproducibility (default: varied)."),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate a WHOLE new DRAFT level — terrain + enemies + items.
+
+    Draft: stays out of the manifest/world map until `canon level publish`.
+    Full-control pins (difficulty/width/height/axis) constrain the roll. Fake
+    backend is $0 (canned DSL); anthropic is paid (key via --env-file)."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.generate_level(
+            pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, max_enemies=enemies, max_items=items, seed=seed,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
+    except Exception as e:
+        _emit_error(f"level generate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("generate-terrain")
+def level_generate_terrain(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str = typer.Option(..., "--stage", help="Stage the level belongs to."),
+    brief: str = typer.Option("", "--brief", help="Design brief the layout agent honors."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled)."),
+    width: int | None = typer.Option(None, "--width"),
+    height: int | None = typer.Option(None, "--height"),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate ONLY a new DRAFT level's TERRAIN (no placements) — then paint
+    it or run `level place-enemies`/`place-items` onto it."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.generate_terrain(
+            pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
+    except Exception as e:
+        _emit_error(f"level generate-terrain failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("place-enemies")
+def level_place_enemies(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (generated or hand-painted)."),
+    enemies: int = typer.Option(4, "--enemies", help="Max enemy placements."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Place enemies onto an EXISTING level, (re)writing entities.json against
+    its on-disk grid — works on generated OR hand-painted terrain."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.place_enemies(
+            pack_dir, level_id=level_id, backend=llm_backend, model=llm_model,
+            max_enemies=enemies, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level place-enemies failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("place-items")
+def level_place_items(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (generated or hand-painted)."),
+    items: int = typer.Option(12, "--items", help="Max item placements."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Place items onto an EXISTING level, (re)writing items.json against its
+    on-disk grid + enemy roster — generated OR hand-painted terrain."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.place_items(
+            pack_dir, level_id=level_id, backend=llm_backend, model=llm_model,
+            max_items=items, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level place-items failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("regenerate")
+def level_regenerate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Existing level to redesign (draft or published)."),
+    brief: str = typer.Option("", "--brief", help="What the redesigned level should be like."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled)."),
+    width: int | None = typer.Option(None, "--width", help="Override (default: keep current)."),
+    height: int | None = typer.Option(None, "--height", help="Override (default: keep current)."),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Regenerate an EXISTING level's TERRAIN in place from a brief — a flat
+    draft becomes a designed level, or an existing one is redesigned. Keeps the
+    current size unless --width/--height given; CLEARS placements (re-run
+    place-enemies/place-items); leaves manifest untouched (stays published)."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.regenerate_terrain(
+            pack_dir, level_id=level_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level regenerate failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
 
 

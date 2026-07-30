@@ -724,3 +724,81 @@ def test_assign_static_clears_stale_animation(pack: Path, tmp_path):
     sdir = p / "sprite" / "enemy" / static
     if (sdir / "frames.json").is_file():
         assert f"sprite/enemy/{static}" in (sdir / "frames.json").read_text()
+
+
+def test_generate_level_full_draft_and_journals(pack: Path, tmp_path):
+    """generate_level writes a full playable DRAFT (terrain + enemies +
+    items), validates ok, stays OUT of the manifest, and journals generate
+    events."""
+    import shutil
+
+    p = tmp_path / "gen_full"
+    shutil.copytree(pack, p)
+    stage_id = sorted(q.name for q in (p / "tileset").iterdir() if q.is_dir())[0]
+    manifest_before = (p / "manifest.json").read_text()
+
+    r = ops.generate_level(
+        p, stage_id=stage_id, brief="a test gauntlet", backend="fake",
+        max_enemies=2, max_items=4, actor="test",
+    )
+    lid = r["level_id"]
+    assert r["ok"] is True
+    assert r["seed"]  # effective seed recorded for reproducibility
+
+    level_dir = p / "level" / stage_id / lid
+    for name in ("collision.npz", "entities.json", "items.json", "level.json"):
+        assert (level_dir / name).is_file(), name
+
+    # Draft doctrine: the pack manifest is untouched (publish is separate).
+    assert (p / "manifest.json").read_text() == manifest_before
+    assert lid not in json.loads(manifest_before)["levels"]
+
+    # Provenance: the new level's steps journal op=generate.
+    gen = [
+        e for e in _journal(p)
+        if e.get("op") == "generate" and f"/{lid}/" in e.get("artifact_id", "")
+    ]
+    assert gen, "generated level must journal generate events"
+
+
+def test_generate_terrain_then_place_is_composable(pack: Path, tmp_path):
+    """Terrain and placement are independent: generate-terrain leaves no
+    placements; place_enemies then fills them on that grid (grid-driven, so it
+    would equally serve a hand-painted level)."""
+    import shutil
+
+    p = tmp_path / "gen_compose"
+    shutil.copytree(pack, p)
+    stage_id = sorted(q.name for q in (p / "tileset").iterdir() if q.is_dir())[0]
+
+    t = ops.generate_terrain(
+        p, stage_id=stage_id, brief="terrain only", backend="fake", actor="test"
+    )
+    lid = t["level_id"]
+    level_dir = p / "level" / stage_id / lid
+    assert t["ok"] is True
+    assert json.loads((level_dir / "entities.json").read_text()) == []
+
+    e = ops.place_enemies(p, level_id=lid, backend="fake", max_enemies=2, actor="test")
+    assert e["ok"] is True
+    assert len(json.loads((level_dir / "entities.json").read_text())) >= 1
+
+
+def test_generate_level_honors_full_control_pins(pack: Path, tmp_path):
+    """Full-control width/height pins constrain the rolled dims."""
+    import shutil
+
+    import numpy as np
+
+    p = tmp_path / "gen_pins"
+    shutil.copytree(pack, p)
+    stage_id = sorted(q.name for q in (p / "tileset").iterdir() if q.is_dir())[0]
+
+    r = ops.generate_terrain(
+        p, stage_id=stage_id, brief="pinned", backend="fake",
+        width=64, height=18, axis="horizontal", actor="test",
+    )
+    level_dir = p / "level" / stage_id / r["level_id"]
+    with np.load(level_dir / "collision.npz") as z:
+        h, w = z["collision"].shape
+    assert (h, w) == (18, 64)

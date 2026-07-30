@@ -1318,6 +1318,354 @@ def validate_level(
 
 
 # ---------------------------------------------------------------------------
+# level generation — composable per-level ops (terrain / enemies / items)
+# ---------------------------------------------------------------------------
+#
+# The pipeline's per-level generators (stamp_level_collision → place_level_
+# entities → place_level_items → decorate_level) run against a PipelineContext.
+# These ops reconstruct that ctx from the on-disk pack and drive ONE level's
+# steps INDEPENDENTLY, so a caller (the cradle create flow) can mix hand-work
+# and generation in any order: generate a whole level, or just its terrain,
+# or place enemies/items onto an EXISTING (even hand-painted) level. Every op
+# leaves the level a DRAFT — it never rewrites manifest.json (publish stays a
+# separate step). Fake backend = $0 (canned DSL); anthropic = paid.
+
+
+def _pack_specs(info: SimpleNamespace) -> SimpleNamespace:
+    """Base gameplay specs reconstructed from the manifest — the generation
+    inputs (movement/rules/combat/variants/tiles) + graphics. Mirrors
+    validate_level's manifest→spec construction; a NEW level carries no
+    per-level overrides yet, so there is nothing to merge."""
+    from examples.platformer_pack.combat import DEFAULT_COMBAT, CombatSpec
+    from examples.platformer_pack.movement import PlayerMovementSpec
+    from examples.platformer_pack.rules import GameRules
+    from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
+    from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
+
+    m = info.manifest
+    return SimpleNamespace(
+        movement=PlayerMovementSpec.model_validate(m.get("movement") or {}),
+        rules=GameRules.model_validate(m.get("rules") or {}),
+        combat=CombatSpec.model_validate(m["combat"]) if m.get("combat") else DEFAULT_COMBAT,
+        variants=VariantSet.model_validate({"variants": m["variants"]}) if m.get("variants") else DEFAULT_VARIANTS,
+        tiles=TileRegistry.model_validate({"tiles": m["tiles"]}) if m.get("tiles") else DEFAULT_TILES,
+        graphics=info.graphics,
+    )
+
+
+def _level_gen_ctx(
+    pack_dir: str | Path, backend: str, model: str | None
+) -> tuple[SimpleNamespace, PipelineContext]:
+    """A PipelineContext over the on-disk pack, populated for LEVEL generation.
+    load_pack/make_ctx don't set the enemy roster or item pool (the placement
+    generators read them from the bible) — do it here, plus the artifact slots
+    the generators consult (level_briefs, level_overrides)."""
+    info = load_pack(pack_dir)
+    ctx = make_ctx(info, llm=build_llm(backend, model))
+    ctx.bible.enemy_definitions.update(_load_defs(Path(pack_dir), "enemy"))
+    ctx.bible.items.update(_load_defs(Path(pack_dir), "item"))
+    ctx.artifacts.setdefault("level_briefs", {})
+    ctx.artifacts.setdefault("level_overrides", {})
+    return info, ctx
+
+
+def _load_level_into_ctx(ctx: PipelineContext, pack_dir: str | Path, level_id: str):
+    """Load an EXISTING on-disk level into the bible + register it in its stage
+    so the placement/decorator generators find it (they read the level from
+    ctx.bible.levels and its grid from disk). Enables placing enemies/items
+    onto a level someone else generated OR hand-painted."""
+    from canon.adapters.platformer_write import _find_level_dir
+    from canon.bible.platformer import Level
+
+    level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
+    level = Level.model_validate(_read(level_dir / "level.json"))
+    ctx.bible.levels[level_id] = level
+    stage = ctx.bible.stages[stage_id]
+    if level_id not in stage.level_ids:
+        stage.level_ids.append(level_id)
+    return level, stage_id
+
+
+def _effective_seed(info: SimpleNamespace, level_id: str, seed: str | None) -> str:
+    """The generation seed: an explicit pin (reproducible), else a SALTED
+    per-level seed so repeated generates vary — recorded for reproducibility."""
+    import secrets
+
+    return str(seed) if seed else f"{info.seed}:{level_id}:{secrets.token_hex(4)}"
+
+
+def _write_empty_placements(pack_dir: str | Path, level_id: str) -> None:
+    """Ensure a terrain-only level has empty entities/items files on disk
+    (the placement generators write them; a terrain-only pass skips them, and
+    validate/play/read all expect the files to exist)."""
+    from canon.adapters.platformer_write import _find_level_dir
+
+    level_dir, _ = _find_level_dir(Path(pack_dir), level_id)
+    for name in ("entities.json", "items.json"):
+        p = level_dir / name
+        if not p.exists():
+            p.write_text("[]")
+
+
+def _level_gen_result(
+    pack_dir: str | Path, level_id: str, stage_id: str,
+    seed: str, layout_fallback: bool, ctx: PipelineContext,
+) -> dict:
+    """Uniform op return: the inline validation verdict (same validator the
+    play surfaces use) + provenance-relevant fields."""
+    v = validate_level(pack_dir, level_id)
+    return {
+        "level_id": level_id,
+        "stage_id": stage_id,
+        "ok": v["ok"],
+        "repair_count": v.get("repair_count", 0),
+        "layout_fallback": bool(layout_fallback),
+        "seed": seed,
+        "warnings": _warnings(ctx),
+    }
+
+
+def generate_terrain(
+    pack_dir: str | Path,
+    *,
+    stage_id: str,
+    brief: str,
+    backend: str = "fake",
+    model: str | None = None,
+    difficulty: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    axis: str | None = None,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Generate ONE new DRAFT level's TERRAIN (collision + spawn/exit/hazards/
+    triggers), no placements. Full-control pins (difficulty/width/height/axis)
+    ride the level-override artifact; secret rooms are opted out (on-demand
+    single-level intent). Journals op=generate; never touches manifest.json."""
+    from canon.adapters.platformer_write import _next_level_id, baseline_level
+    from examples.platformer_pack.level import (
+        stamp_level_collision,
+        write_level_hazards,
+        write_level_manifest,
+        write_level_triggers,
+    )
+
+    info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    if stage_id not in ctx.bible.stages:
+        raise ValueError(
+            f"no stage {stage_id!r} in pack — stages: {list(ctx.bible.stages)}"
+        )
+    specs = _pack_specs(info)
+    lid = _next_level_id(Path(pack_dir))
+    eff_seed = _effective_seed(info, lid, seed)
+    ctx.config.seed = eff_seed
+    stage = ctx.bible.stages[stage_id]
+    stage.level_ids.append(lid)  # in-memory only — draft stays out of manifest
+    idx = stage.level_ids.index(lid)
+    ctx.artifacts["level_briefs"][lid] = brief
+    override: dict = {"no_secret_rooms": True}
+    if difficulty is not None:
+        override["difficulty"] = int(difficulty)
+    if width is not None:
+        override["grid_width"] = int(width)
+    if height is not None:
+        override["grid_height"] = int(height)
+    if axis:
+        override["axis"] = str(axis)
+    ctx.artifacts["level_overrides"][lid] = override
+
+    level = stamp_level_collision(
+        ctx, lid, idx,
+        movement=specs.movement, rules=specs.rules, tiles=specs.tiles,
+        graphics=specs.graphics,
+        default_width=int(width) if width else 56,
+        default_height=int(height) if height else 16,
+        phase_name="plat:layout",
+    )
+    write_level_hazards(ctx, level)
+    write_level_triggers(ctx, level)
+    write_level_manifest(ctx, level)
+    _write_empty_placements(pack_dir, lid)
+    baseline_level(Path(pack_dir), lid, actor=actor, session=session)
+    return _level_gen_result(
+        pack_dir, lid, stage_id, eff_seed, level.layout_fallback, ctx
+    )
+
+
+def place_enemies(
+    pack_dir: str | Path,
+    *,
+    level_id: str,
+    backend: str = "fake",
+    model: str | None = None,
+    max_enemies: int = 4,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Place enemies onto an EXISTING level (generated or hand-painted),
+    (re)writing entities.json against its on-disk grid. Grid-driven +
+    self-validating, so it adapts to whatever terrain is there."""
+    from canon.adapters.platformer_write import baseline_level
+    from examples.platformer_pack.level import place_level_entities
+
+    info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    level, stage_id = _load_level_into_ctx(ctx, pack_dir, level_id)
+    specs = _pack_specs(info)
+    ctx.config.seed = _effective_seed(info, level_id, seed)
+    place_level_entities(
+        ctx, level, max_enemies=int(max_enemies), rules=specs.rules,
+        tiles=specs.tiles, variants=specs.variants, combat=specs.combat,
+    )
+    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
+    return _level_gen_result(
+        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx
+    )
+
+
+def place_items(
+    pack_dir: str | Path,
+    *,
+    level_id: str,
+    backend: str = "fake",
+    model: str | None = None,
+    max_items: int = 12,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Place items onto an EXISTING level (generated or hand-painted),
+    (re)writing items.json against its on-disk grid + enemy roster."""
+    from canon.adapters.platformer_write import baseline_level
+    from examples.platformer_pack.level import place_level_items
+
+    info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    level, stage_id = _load_level_into_ctx(ctx, pack_dir, level_id)
+    specs = _pack_specs(info)
+    ctx.config.seed = _effective_seed(info, level_id, seed)
+    place_level_items(
+        ctx, level, max_items=int(max_items), rules=specs.rules,
+        tiles=specs.tiles, movement=specs.movement,
+    )
+    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
+    return _level_gen_result(
+        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx
+    )
+
+
+def generate_level(
+    pack_dir: str | Path,
+    *,
+    stage_id: str,
+    brief: str,
+    backend: str = "fake",
+    model: str | None = None,
+    difficulty: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    axis: str | None = None,
+    max_enemies: int = 4,
+    max_items: int = 12,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Convenience: a WHOLE draft level — terrain, then enemies, then items —
+    by chaining the composable ops. Shares one seed so a pinned seed fully
+    reproduces the level."""
+    terrain = generate_terrain(
+        pack_dir, stage_id=stage_id, brief=brief, backend=backend, model=model,
+        difficulty=difficulty, width=width, height=height, axis=axis,
+        seed=seed, actor=actor, session=session,
+    )
+    lid = terrain["level_id"]
+    # reuse the terrain's effective seed so the whole level is one reproducible unit
+    place_enemies(
+        pack_dir, level_id=lid, backend=backend, model=model,
+        max_enemies=max_enemies, seed=terrain["seed"], actor=actor, session=session,
+    )
+    return place_items(
+        pack_dir, level_id=lid, backend=backend, model=model,
+        max_items=max_items, seed=terrain["seed"], actor=actor, session=session,
+    )
+
+
+def regenerate_terrain(
+    pack_dir: str | Path,
+    *,
+    level_id: str,
+    brief: str,
+    backend: str = "fake",
+    model: str | None = None,
+    difficulty: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    axis: str | None = None,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Regenerate an EXISTING level's TERRAIN in place from a brief — turns a
+    flat/blank draft into a designed level, or redesigns an existing one. Same
+    level id (published or draft), overwriting collision/hazards/triggers. Keeps
+    the level's current size unless width/height are given. The old placements
+    belonged to the OLD terrain, so they're CLEARED — re-run place_enemies/
+    place_items to repopulate. Journals op=generate on the changed steps; never
+    touches manifest.json (a published level stays published, just redesigned)."""
+    from canon.adapters.platformer_write import _find_level_dir, baseline_level
+    from canon.bible.platformer import Level
+    from examples.platformer_pack.level import (
+        stamp_level_collision,
+        write_level_hazards,
+        write_level_manifest,
+        write_level_triggers,
+    )
+
+    info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
+    prior = Level.model_validate(_read(level_dir / "level.json"))
+    specs = _pack_specs(info)
+    eff_seed = _effective_seed(info, level_id, seed)
+    ctx.config.seed = eff_seed
+    stage = ctx.bible.stages[stage_id]
+    if level_id not in stage.level_ids:  # a draft isn't registered in its stage
+        stage.level_ids.append(level_id)
+    idx = stage.level_ids.index(level_id)
+    ctx.artifacts["level_briefs"][level_id] = brief or prior.brief
+    # Keep the current dims by default (a "regenerate", not a "resize").
+    override: dict = {
+        "no_secret_rooms": True,
+        "grid_width": int(width) if width else int(prior.grid_width),
+        "grid_height": int(height) if height else int(prior.grid_height),
+    }
+    if difficulty is not None:
+        override["difficulty"] = int(difficulty)
+    if axis:
+        override["axis"] = str(axis)
+    ctx.artifacts["level_overrides"][level_id] = override
+
+    level = stamp_level_collision(
+        ctx, level_id, idx,
+        movement=specs.movement, rules=specs.rules, tiles=specs.tiles,
+        graphics=specs.graphics,
+        default_width=int(prior.grid_width), default_height=int(prior.grid_height),
+        phase_name="plat:layout",
+    )
+    write_level_hazards(ctx, level)
+    write_level_triggers(ctx, level)
+    write_level_manifest(ctx, level)
+    # Placements were pinned to the OLD terrain — clear them (user re-runs 🎲).
+    (level_dir / "entities.json").write_text("[]")
+    (level_dir / "items.json").write_text("[]")
+    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
+    return _level_gen_result(
+        pack_dir, level_id, stage_id, eff_seed, level.layout_fallback, ctx
+    )
+
+
+# ---------------------------------------------------------------------------
 # asset generate / animate — the real phases on a filtered, pin-suppressed bible
 # ---------------------------------------------------------------------------
 

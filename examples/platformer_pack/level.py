@@ -205,10 +205,25 @@ def world_stages(ctx: Any) -> list:
 VERTICAL_FRACTION = 0.4
 
 
+def _level_override(ctx: Any, level_id: str) -> dict:
+    """Per-level generation overrides an on-demand caller (the cradle
+    create/generate flow) injects via ``ctx.artifacts["level_overrides"]``:
+    ``difficulty``/``grid_width``/``grid_height``/``axis`` pins and the
+    ``no_secret_rooms`` opt-out. Empty for full-pipeline runs, so their
+    deterministic rolls are unchanged. EVERY knob-recompute site reads it
+    here so layout/placement/items stay consistent (the recompute
+    discipline)."""
+    return dict(ctx.artifacts.get("level_overrides", {}).get(level_id, {}) or {})
+
+
 def _roll_level_axis(ctx: Any, level_id: str, phase_name: str, stage_number: int) -> str:
     """Deterministically pick a level's layout AXIS. Vertical climbs appear
     only from stage 2 on (a progression: horizontal intros, vertical variety
-    later), on a per-level roll keyed independently of the dims/plan rolls."""
+    later), on a per-level roll keyed independently of the dims/plan rolls. An
+    on-demand caller may PIN the axis via the level override (Full control)."""
+    override_axis = _level_override(ctx, level_id).get("axis")
+    if override_axis in ("horizontal", "vertical"):
+        return override_axis
     if stage_number < 2:
         return "horizontal"
     seed = str(getattr(ctx.config, "seed", ""))
@@ -245,20 +260,33 @@ def _roll_level_knobs(
     stage = _stage_for_level(ctx, level_id)
     seed = str(getattr(ctx.config, "seed", ""))
     stage_number = _stage_number(ctx, stage.stage_id)
+    override = _level_override(ctx, level_id)
+    # An on-demand caller may PIN difficulty (Full control); otherwise it
+    # escalates with world position. The schema keys difficulty AND the
+    # platform/hazard/gap counts off level_number, so the pin precedes the roll.
+    level_number = (
+        int(override["difficulty"]) if "difficulty" in override
+        else min(stage_number + index, 3)
+    )
     roll_context = {
-        "level_number": min(stage_number + index, 3),
+        "level_number": max(1, min(3, level_number)),
         "stage_number": stage_number,
     }
     knobs = roll_skeleton(
         spec, derive_rng(seed, phase_name, level_id), context=roll_context
     )
-    # Variable dims (GridDims, §4.2): schema-rolled per level; the defaults
-    # are the fallback for schemas without them.
-    width = int(knobs.get("grid_width", default_width))
-    height = int(knobs.get("grid_height", default_height))
     axis = _roll_level_axis(ctx, level_id, phase_name, stage_number)
-    if axis == "vertical":
-        width, height = _vertical_dims(width, height)
+    # Variable dims (GridDims, §4.2): schema-rolled per level (the defaults are
+    # the fallback), recast tall+narrow for a vertical climb — UNLESS the
+    # caller pinned exact dims, which are then authoritative (no recast).
+    if "grid_width" in override or "grid_height" in override:
+        width = int(override.get("grid_width", knobs.get("grid_width", default_width)))
+        height = int(override.get("grid_height", knobs.get("grid_height", default_height)))
+    else:
+        width = int(knobs.get("grid_width", default_width))
+        height = int(knobs.get("grid_height", default_height))
+        if axis == "vertical":
+            width, height = _vertical_dims(width, height)
     return knobs, width, height, axis
 
 
@@ -1310,6 +1338,13 @@ def stamp_level_collision(
             context=str(getattr(stage, "biome", "") or ""),
         )
         if water_spec is not None and water_spec.topology == "fully_submerged":
+            specs = []
+        # On-demand single-level generation (the cradle create flow) opts OUT
+        # of auto-rolled secret rooms — a user asked for ONE level, not a
+        # hidden sub-level. The roll above still ran (rng-stream stability);
+        # discard exactly like the fully-submerged gate. Full-pipeline runs
+        # never set this override, so their room rolls are untouched.
+        if _level_override(ctx, level_id).get("no_secret_rooms"):
             specs = []
         # A waterline entrance (and its shortcut return) must sit on DRY
         # land — the consumers' verb press is gated on not-swimming.
