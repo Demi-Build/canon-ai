@@ -42,12 +42,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 # Pricing (per 1M tokens) — used for cost reporting in GenerationStats.
-# Sourced from Anthropic public pricing as of 2026-04. Update on model bump.
+# Verified against Anthropic's public models/pricing docs on 2026-07-30
+# (platform.claude.com/docs/en/about-claude/models/overview). Opus 4.6+ is
+# $5/$25 (NOT the $15/$75 of the Opus 3/4/4.1 era — that stale rate 3x-inflated
+# every Opus line here); Haiku 4.5 is $1/$5; Sonnet 4.6 is $3/$15. Update on
+# model bump, and re-verify against the docs rather than carrying forward.
 PRICING = {
     "claude-sonnet-4-6": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
-    "claude-opus-4-8": {"input": 15.00 / 1_000_000, "output": 75.00 / 1_000_000},
-    "claude-opus-4-7": {"input": 15.00 / 1_000_000, "output": 75.00 / 1_000_000},
-    "claude-haiku-4-5-20251001": {"input": 0.80 / 1_000_000, "output": 4.00 / 1_000_000},
+    "claude-opus-4-8": {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-opus-4-7": {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
+    "claude-haiku-4-5-20251001": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
 }
 
 

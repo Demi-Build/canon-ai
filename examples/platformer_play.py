@@ -65,6 +65,20 @@ def _stage_for(manifest: dict, level_id: str) -> str:
     )
 
 
+def _active_music(level: dict, player_cell: int, stage_music: str) -> str:
+    """The output-relative music file to play at the player's cell along the
+    level's layout axis (columns horizontal / rows vertical): an active
+    user-authored ``music_sections`` entry wins (its ``music_path``, which may
+    be ``""`` = a deliberate silent zone), else the level's own ``music_path``,
+    else the ``stage_music`` default. Pure — main.gd ports this VERBATIM so
+    music switches at identical cells on both surfaces."""
+    cell = int(player_cell)
+    for sec in level.get("music_sections") or []:
+        if int(sec.get("start", 0)) <= cell < int(sec.get("end", 0)):
+            return str(sec.get("music_path") or "")
+    return str(level.get("music_path") or "") or (stage_music or "")
+
+
 def _load(data_dir: Path, level_id: str):
     import numpy as np
 
@@ -281,9 +295,11 @@ class _Hooks:
         self.headless = bool(self.cap_dir or self.traj_path)
         self.cap_i = 0
         self.frame_i = -1
-        # Which stage's music is playing — a room switch inside one stage
-        # must NOT restart the theme (rooms share the parent's stage).
-        self.music_stage: str | None = None
+        # The music track (output-relative path) currently loaded — a switch
+        # that resolves to the SAME track (room in the same stage, or staying
+        # inside a music section) must NOT restart it. None = nothing decided
+        # yet, so the first resolve always applies.
+        self.music_cur: str | None = None
         self.traj_file = (
             open(self.traj_path, "w") if self.traj_path else None  # noqa: SIM115
         )
@@ -1011,21 +1027,44 @@ def run_level(
     # pre-audio manifest) leaves the game silent — this harness is the
     # quick pre-art surface, and music confirmation is one of its jobs.
     sounds: dict = {}
+    audio_ok = False
+    # Music resolves by POSITION: a user music_section > the level's own track
+    # > the stage default theme. SFX stay per-stage (shared across a biome).
+    audio_stage = _stage_for(manifest, level_id)
+    stage_audio = (manifest.get("audio") or {}).get(audio_stage, {})
+    stage_music = stage_audio.get("music") or ""
     try:
-        # Audio is per-stage (levels in a biome share the theme). A room
-        # switch within one stage must NOT restart the theme — the music
-        # only (re)starts when the STAGE actually changes (hooks gate).
-        audio_stage = _stage_for(manifest, level_id)
-        audio = (manifest.get("audio") or {}).get(audio_stage, {})
         pygame.mixer.init()
-        if audio.get("music") and hooks.music_stage != audio_stage:
-            pygame.mixer.music.load(str(data_dir / audio["music"]))
-            pygame.mixer.music.play(-1)
-            hooks.music_stage = audio_stage
-        for sfx_event, rel in (audio.get("sfx") or {}).items():
+        audio_ok = True
+        for sfx_event, rel in (stage_audio.get("sfx") or {}).items():
             sounds[sfx_event] = pygame.mixer.Sound(str(data_dir / rel))
     except Exception as exc:  # noqa: BLE001 — silence is the fallback
         print(f"[audio] disabled: {exc}")
+
+    def apply_music(player_cell: int) -> None:
+        """(Re)start the resolved track if it changed. Gated on
+        ``hooks.music_cur`` so crossing INTO a section, or a room switch that
+        keeps the same track, never re-triggers. Best-effort — silence on any
+        failure. Called each frame (a no-op unless the resolved track flips)."""
+        if not audio_ok:
+            return
+        resolved = _active_music(level, player_cell, stage_music)
+        if resolved == hooks.music_cur:
+            return
+        try:
+            if resolved:
+                pygame.mixer.music.load(str(data_dir / resolved))
+                pygame.mixer.music.play(-1)
+            else:
+                pygame.mixer.music.stop()
+            hooks.music_cur = resolved
+        except Exception as exc:  # noqa: BLE001 — silence is the fallback
+            print(f"[audio] music switch failed: {exc}")
+
+    def _music_cell(cx: float, cy: float) -> int:
+        return int(cy if layout_axis == "vertical" else cx)
+
+    apply_music(_music_cell(spawn["x"], spawn["y"]))
 
     def play_sfx(event_name: str) -> None:
         sound = sounds.get(event_name)
@@ -1574,6 +1613,9 @@ def run_level(
         # unless the env is set. main.gd keys on the same frame numbers.
         script_act = hooks.actions.get(frame_i, "") if headless else ""
         jump_input = False  # any jump press this frame (pipe = down ALONE)
+        # Live music switch: crossing into/out of a user music_section swaps
+        # the track (gated, cosmetic — never touches physics/traj).
+        apply_music(_music_cell(px, py))
         volume = volume_params_at(px, py)
         # Coyote latch (BEFORE input and movement, off last tick's state):
         # re-arm while the deterministic foot probe finds support (same

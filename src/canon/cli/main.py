@@ -900,6 +900,48 @@ def world_new(
     })
 
 
+@world_app.command("estimate")
+def world_estimate(
+    stages: int = typer.Option(3, "--stages"),
+    levels: int = typer.Option(9, "--levels"),
+    enemies: int = typer.Option(7, "--enemies"),
+    items: int = typer.Option(5, "--items"),
+    llm_backend: str = typer.Option("fake", "--llm-backend"),
+    image_backend: str = typer.Option("fake", "--image-backend"),
+    music_backend: str = typer.Option("none", "--music-backend"),
+    sfx_backend: str = typer.Option("none", "--sfx-backend"),
+    vlm_backend: str = typer.Option("none", "--vlm-backend"),
+) -> None:
+    """Forecast the cost of a NEW project (`world new`) at these counts +
+    backends, WITHOUT running anything. fake/none categories price at $0 (the
+    counts still show, so you can see what turning a backend on would cost).
+
+    Invoke via `python -m canon.cli.main` from the repo root — the estimator
+    lives under examples.* which the `canon` console script can't import."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            "world",
+            counts={
+                "num_stages": stages, "num_levels": levels,
+                "num_enemies": enemies, "num_items": items,
+            },
+            backends={
+                "llm": llm_backend, "image": image_backend,
+                "music": music_backend, "sfx": sfx_backend, "vlm": vlm_backend,
+            },
+        )
+    except Exception as e:
+        _emit_error(f"world estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
+
+
 # ---------------------------------------------------------------------------
 # Platformer read/export verbs — the read half external tooling (Cradle)
 # shells out to instead of re-implementing .npz decoding + the tileset registry.
@@ -907,6 +949,58 @@ def world_new(
 
 level_app = typer.Typer(help="Platformer level inspection / export.")
 app.add_typer(level_app, name="level")
+
+level_music_app = typer.Typer(help="Per-level / per-section music.")
+level_app.add_typer(level_music_app, name="music")
+
+
+@level_music_app.command("list")
+def level_music_list(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+) -> None:
+    """List every music track file in the pack (for 'assign an existing track')."""
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.list_music_tracks(pack_dir)
+    except Exception as e:
+        _emit_error(f"level music list failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_music_app.command("generate")
+def level_music_generate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level (or secret room) id."),
+    brief: str = typer.Option("", "--brief", help="What the track should feel like."),
+    section: int | None = typer.Option(
+        None, "--section", help="Index into the level's music_sections (default: the level track)."
+    ),
+    music_backend: str = typer.Option("lyria", "--music-backend", help="fake ($0) | lyria (paid)."),
+    seconds: int | None = typer.Option(None, "--seconds", help="Track length (default 30s clip)."),
+    env_file: Path | None = typer.Option(None, "--env-file", help="KEY=VALUE file (GOOGLE_API_KEY for lyria)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate ONE music track for a level or one of its user-defined music
+    sections (Lyria, paid — GOOGLE_API_KEY via --env-file; fake is $0), repoint
+    the level to it (journaled), and report the actual cost."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.generate_level_music(
+            pack_dir, level_id=level_id, brief=brief, section=section,
+            backend=music_backend, music_seconds=seconds, actor=actor,
+            session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level music generate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
 
 
 @level_app.command("export")
@@ -1154,6 +1248,49 @@ def level_generate(
     except Exception as e:
         _emit_error(f"level generate failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("estimate")
+def level_estimate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(
+        "__preview__", "--level",
+        help="Existing level the op runs on (omit + pass --width to price a NEW level).",
+    ),
+    op: str = typer.Option(
+        "generate", "--op",
+        help="generate | layout | enemies | items (which per-level op to price).",
+    ),
+    width: int | None = typer.Option(
+        None, "--width",
+        help="Price a NEW level of this width instead of loading a level from disk.",
+    ),
+    axis: str | None = typer.Option(None, "--axis"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+) -> None:
+    """Forecast the cost of ONE per-level op (generate / regenerate-layout /
+    place-enemies / place-items) on an existing level, backend-aware (fake =
+    $0). LLM-only — these ops author no art/audio. Run via
+    `python -m canon.cli.main` from the repo root (estimator lives in examples.*)."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            op, pack_dir=pack_dir, level_id=level_id, width=width, axis=axis,
+            backends={"llm": llm_backend},
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id, op=op)
+    except Exception as e:
+        _emit_error(f"level estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
 
 
 @level_app.command("generate-terrain")
@@ -1445,6 +1582,54 @@ def _pack_ops():
             f"looked for examples/ under {root}."
         )
     return ops
+
+
+spend_app = typer.Typer(help="Per-project spend ledger (what paid ops cost).")
+app.add_typer(spend_app, name="spend")
+
+
+@spend_app.command("record")
+def spend_record(
+    pack_dir: Path = typer.Argument(..., help="Pack root the spend belongs to."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Spend entry, e.g. {"op":"generate","scope":"level","level_id":'
+        '"l1","backends":{"llm":"anthropic"},"actual_usd":0.07}.',
+    ),
+) -> None:
+    """Append one paid-op spend entry to <pack>/.canon/spend.jsonl. Cradle
+    calls this after each op it fires (it never writes pack files itself)."""
+    from canon.spend import record_spend
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        entry = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(entry, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        stored = record_spend(pack_dir, entry)  # type: ignore[arg-type]
+    except Exception as e:
+        _emit_error(f"spend record failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "spend_record", "entry": stored})  # type: ignore[possibly-unbound]
+
+
+@spend_app.command("list")
+def spend_list(
+    pack_dir: Path = typer.Argument(..., help="Pack root to summarize."),
+) -> None:
+    """Emit the pack's spend ledger + a roll-up (total actual, per-op)."""
+    from canon.spend import summarize
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        summary = summarize(pack_dir)
+    except Exception as e:
+        _emit_error(f"spend list failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "spend_list", "spend": summary})  # type: ignore[possibly-unbound]
 
 
 db_app = typer.Typer(help="Generic database rows: create / LLM-complete (anchored).")

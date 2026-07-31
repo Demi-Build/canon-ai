@@ -195,6 +195,31 @@ def apply_level_edit(
         updated.append(layer)
         _emit(layer, before, level_dir / f"{layer}.json", {"kind": f"{layer}_change", "count": len(entries)})
 
+    # Music override fields — level.json-only. Assigning just repoints the
+    # level (or a section) at an existing track; the track BYTES are written by
+    # the music-generate op. Both flow through here so cradle never writes
+    # pack files itself and every change is journaled.
+    music_detail: dict[str, Any] = {}
+    if "music_path" in edit:
+        music_detail["music_path"] = {
+            "from": level.get("music_path", ""), "to": str(edit["music_path"] or "")
+        }
+        level["music_path"] = str(edit["music_path"] or "")
+        level["music_hash"] = str(edit.get("music_hash", "") or "")
+        updated.append("music")
+    if "music_sections" in edit:
+        level["music_sections"] = [
+            {
+                "start": int(s["start"]), "end": int(s["end"]),
+                "music_path": str(s.get("music_path", "") or ""),
+                "music_hash": str(s.get("music_hash", "") or ""),
+                "name": str(s.get("name", "") or ""),
+            }
+            for s in edit["music_sections"]
+        ]
+        music_detail["music_sections"] = len(level["music_sections"])
+        updated.append("music_sections")
+
     # Point fields live only on level.json.
     point_detail: dict[str, Any] = {}
     for point in ("spawn", "exit"):
@@ -209,8 +234,11 @@ def apply_level_edit(
     level["status"] = "user_edited"
     before_level = provenance.snapshot_file(pack, level_dir / "level.json")
     adapter.write_json_singleton(f"{rel}/level.json", level)
-    if point_detail:
-        _emit("level", before_level, level_dir / "level.json", {"kind": "marker_move", **point_detail})
+    if point_detail or music_detail:
+        _emit(
+            "level", before_level, level_dir / "level.json",
+            {"kind": "level_edit", **point_detail, **music_detail},
+        )
 
     return {
         "level_id": level_id,

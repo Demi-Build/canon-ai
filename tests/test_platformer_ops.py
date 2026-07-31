@@ -802,3 +802,221 @@ def test_generate_level_honors_full_control_pins(pack: Path, tmp_path):
     with np.load(level_dir / "collision.npz") as z:
         h, w = z["collision"].shape
     assert (h, w) == (18, 64)
+
+
+# ---------------------------------------------------------------------------
+# Cost: pre-run estimate (backend/count aware), true per-op actuals, ledger.
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_world_is_backend_and_count_aware():
+    from examples.platformer_pack.estimate import estimate_cradle
+
+    counts = {"num_stages": 3, "num_levels": 9, "num_enemies": 7, "num_items": 5}
+    fake = estimate_cradle(
+        "world", counts=counts,
+        backends={"llm": "fake", "image": "fake", "music": "none",
+                  "sfx": "none", "vlm": "none"},
+    )
+    # fake/none = $0, but the COUNTS survive so the UI can show what an upgrade
+    # would cost.
+    assert fake["total_usd"] == {"best": 0.0, "worst": 0.0}
+    assert fake["assets"]["images"]["count"] > 0
+
+    paid = estimate_cradle(
+        "world", counts=counts,
+        backends={"llm": "anthropic", "image": "fal", "music": "none",
+                  "sfx": "none", "vlm": "none"},
+    )
+    assert paid["llm"]["usd"]["best"] > 0
+    assert paid["assets"]["images"]["usd"] > 0
+    # music/sfx/vlm were unpaid → zeroed even though a full run would price them
+    assert paid["assets"]["music"]["usd"] == 0.0
+    assert paid["assets"]["sfx"]["usd"] == 0.0
+    assert (paid["assets"]["vlm"] or {}).get("usd", {"best": 0}).get("best", 0) == 0
+
+    # Twice the levels ⇒ strictly more LLM spend (pure pricing math, no API).
+    big = estimate_cradle(
+        "world", counts={**counts, "num_levels": 18},
+        backends={"llm": "anthropic"},
+    )
+    assert big["llm"]["usd"]["best"] > paid["llm"]["usd"]["best"]
+
+
+def test_estimate_level_op_scopes(pack: Path):
+    from examples.platformer_pack.estimate import estimate_cradle
+
+    fake = estimate_cradle(
+        "generate", pack_dir=pack, level_id="l1", backends={"llm": "fake"}
+    )
+    assert fake["total_usd"] == {"best": 0.0, "worst": 0.0}
+    assert set(fake["llm"]["by_task"]) == {
+        "plat:layout", "plat:placement", "plat:item_placement", "plat:decorator"
+    }
+    # Paid pricing is deterministic (token tables × PRICING) — no API call.
+    gen = estimate_cradle(
+        "generate", pack_dir=pack, level_id="l1", backends={"llm": "anthropic"}
+    )
+    enemies = estimate_cradle(
+        "enemies", pack_dir=pack, level_id="l1", backends={"llm": "anthropic"}
+    )
+    assert gen["total_usd"]["best"] > enemies["total_usd"]["best"] > 0
+    assert gen["assets"]["images"]["count"] == 0  # per-op is LLM-only
+
+
+def test_ops_report_actual_cost_block(pack: Path):
+    # Fake backend has no usage, so the op reports a real $0 with call counts —
+    # the same field a paid run fills with measured token cost.
+    r = ops.place_enemies(pack, level_id="l1", backend="fake")
+    cost = r["cost"]
+    assert cost["usd"] == 0.0
+    assert cost["backend"] == "fake"
+    assert cost["calls"] >= 1
+
+
+def test_spend_ledger_round_trip(tmp_path: Path):
+    from canon import spend
+
+    p = tmp_path / "spend_pack"
+    p.mkdir()
+    spend.record_spend(p, {
+        "op": "generate", "scope": "level", "level_id": "l1",
+        "backends": {"llm": "anthropic"},
+        "estimate": {"best": 0.08, "worst": 0.32}, "actual_usd": 0.07,
+    })
+    spend.record_spend(p, {
+        "op": "enemies", "scope": "level", "backends": {"llm": "fake"},
+        "actual_usd": 0.0,
+    })
+    s = spend.summarize(p)
+    assert s["count"] == 2
+    assert s["total_actual_usd"] == 0.07
+    # estimate total is an INDEPENDENT comparison sum over ALL ops (not gated on
+    # having an actual) — forecast $0.08 vs measured $0.07.
+    assert s["total_estimate_usd"] == 0.08
+    assert s["by_op"]["generate"]["actual_usd"] == 0.07
+    assert s["by_op"]["generate"]["estimate_usd"] == 0.08
+    assert s["by_op"]["enemies"]["count"] == 1
+    # every stored line carries the authoritative schema + a ts
+    assert all(e["schema"] == spend.SCHEMA and e.get("ts") for e in s["entries"])
+
+
+def test_spend_read_skips_malformed_lines(tmp_path: Path):
+    """A valid-JSON but non-object line (or garbage) is skipped, not fatal —
+    `canon spend list` must survive a hand-tampered ledger."""
+    from canon import spend
+
+    p = tmp_path / "junk_pack"
+    p.mkdir()
+    spend.record_spend(p, {"op": "generate", "actual_usd": 0.05})
+    ledger = p / ".canon" / "spend.jsonl"
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write("42\n")  # valid JSON, not a dict
+        fh.write('"oops"\n')
+        fh.write("{not json\n")  # not JSON at all
+        fh.write("\n")  # blank
+    s = spend.summarize(p)  # must not raise
+    assert s["count"] == 1
+    assert s["total_actual_usd"] == 0.05
+
+
+# ---------------------------------------------------------------------------
+# Per-level / per-section music: model, position resolver (parity), assign via
+# apply-edit, generate (reroll) + audio cost capture.
+# ---------------------------------------------------------------------------
+
+
+def test_music_section_model_is_additive_and_roundtrips():
+    from canon.bible.platformer import Level
+
+    plain = Level(level_id="l1", stage_id="s1")  # old bibles: no music fields
+    assert plain.music_path == "" and plain.music_sections == []
+    lv = Level(
+        level_id="l1", stage_id="s1", music_path="music/s1/l1/theme.mp3",
+        music_sections=[{"start": 0, "end": 20, "music_path": "a.mp3", "name": "intro"}],
+    )
+    assert lv.music_sections[0].start == 0 and lv.music_sections[0].name == "intro"
+
+
+def test_active_music_resolves_section_then_level_then_stage():
+    # The parity-critical pure resolver — main.gd ports it verbatim.
+    from examples.platformer_play import _active_music
+
+    level = {
+        "music_path": "level.mp3",
+        "music_sections": [
+            {"start": 0, "end": 20, "music_path": "intro.mp3"},
+            {"start": 40, "end": 60, "music_path": ""},  # deliberate silence
+        ],
+    }
+    assert _active_music(level, 5, "stage.mp3") == "intro.mp3"   # in a section
+    assert _active_music(level, 30, "stage.mp3") == "level.mp3"  # gap → level
+    assert _active_music(level, 50, "stage.mp3") == ""           # silent section
+    assert _active_music({}, 5, "stage.mp3") == "stage.mp3"      # nothing → stage
+
+
+def test_apply_edit_music_path_and_sections_persist_and_journal(pack: Path, tmp_path: Path):
+    import shutil
+
+    from canon.adapters.platformer_write import apply_level_edit
+
+    p = tmp_path / "music_edit"
+    shutil.copytree(pack, p)
+    r = apply_level_edit(p, "l1", {
+        "music_path": "music/x/l1/theme.mp3", "music_hash": "sha256:abc",
+        "music_sections": [{"start": 5, "end": 15, "music_path": "s.mp3", "name": "cave"}],
+    }, actor="test")
+    assert "music" in r["updated"] and "music_sections" in r["updated"]
+    level = json.loads(next(p.glob("level/*/l1/level.json")).read_text())
+    assert level["music_path"] == "music/x/l1/theme.mp3"
+    assert level["music_sections"][0]["name"] == "cave"
+    assert level["status"] == "user_edited"
+    ev = [json.loads(x) for x in (p / ".canon" / "journal.jsonl").read_text().splitlines()]
+    assert any(e.get("detail", {}).get("kind") == "level_edit" for e in ev)
+
+
+def test_generate_level_music_writes_track_repoints_and_costs(pack: Path, tmp_path: Path):
+    import shutil
+
+    from examples.platformer_pack import ops
+
+    p = tmp_path / "music_gen"
+    shutil.copytree(pack, p)
+    r = ops.generate_level_music(p, level_id="l1", brief="tense", backend="fake")
+    assert r["music_path"].startswith("music/") and r["music_path"].endswith(".mp3")
+    assert (p / r["music_path"]).exists()
+    assert r["cost"]["usd"] == 0.0 and r["cost"]["audio_usd"] == 0.0  # fake = $0
+    level = json.loads(next(p.glob("level/*/l1/level.json")).read_text())
+    assert level["music_path"] == r["music_path"]
+
+
+def test_generate_level_music_captures_real_audio_cost(pack: Path, tmp_path: Path, monkeypatch):
+    """A backend that reports a per-call last_cost lands in the cost block —
+    the wiring a real Lyria run exercises (fake reports $0)."""
+    import shutil
+
+    from examples.platformer_pack import ops
+
+    class _StubMusic:
+        model = "stub-music"
+        last_cost = 0.08
+
+        def generate(self, prompt, seconds):
+            return b"ID3stub-mp3"
+
+    monkeypatch.setattr(
+        "examples.platformer_pack.audio_phases.build_music_producer",
+        lambda kind: _StubMusic(),
+    )
+    p = tmp_path / "music_cost"
+    shutil.copytree(pack, p)
+    r = ops.generate_level_music(p, level_id="l1", backend="stub")
+    assert r["cost"]["audio_usd"] == 0.08
+    assert r["cost"]["usd"] == 0.08  # total = audio (no LLM/image)
+
+
+def test_estimate_music_scope_is_backend_masked():
+    from examples.platformer_pack.estimate import estimate_cradle
+
+    assert estimate_cradle("music", backends={"music": "fake"})["total_usd"]["best"] == 0.0
+    assert estimate_cradle("music", backends={"music": "lyria"})["total_usd"]["best"] > 0.0

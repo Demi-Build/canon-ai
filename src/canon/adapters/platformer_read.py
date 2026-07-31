@@ -175,6 +175,17 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
 
     slots = tileset.get("slots", [])
     graphics = manifest.get("graphics", {})
+    # Music: the level's own override + user sections, plus the stage default
+    # it falls back to — all abs-resolved so cradle's <AudioPlayer> can play them.
+    stage_music = ((manifest.get("audio", {}) or {}).get(stage_id, {}) or {}).get("music") or ""
+    level_music = level.get("music_path") or ""
+    music_sections = [
+        {
+            **s,
+            "music_path_abs": _abs(pack, s.get("music_path")) if s.get("music_path") else None,
+        }
+        for s in (level.get("music_sections") or [])
+    ]
     return {
         "level_id": level_id,
         "stage_id": stage_id,
@@ -206,6 +217,11 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "items": items,
         "props": props,
         "backdrop": backdrop,
+        "music_path": level_music,
+        "music_path_abs": _abs(pack, level_music) if level_music else None,
+        "music_sections": music_sections,
+        "stage_music": stage_music,
+        "stage_music_abs": _abs(pack, stage_music) if stage_music else None,
     }
 
 

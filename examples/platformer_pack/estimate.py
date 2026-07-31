@@ -328,9 +328,207 @@ def _fresh_nodes(plan: dict) -> tuple[list, Any]:
         for i in range(num_rooms)
     ]
     for lid in level_ids:
-        for step in ("collision", "entities", "foreground"):
+        # A fresh run generates all four per-level steps — the pipeline DAG
+        # unconditionally creates an `items` node per level/room (place_items
+        # issues an LLM call for any non-empty item pool), so `plat:item_placement`
+        # must be priced here too. (Omitting it silently under-counted every
+        # world/fresh forecast by ~one cheap-tier call per level.)
+        for step in ("collision", "entities", "items", "foreground"):
             nodes.append(_FreshNode(f"level:<stage>/{lid}/{step}"))
     return nodes, _Bible()
+
+
+# ---------------------------------------------------------------------------
+# Cradle-facing estimate — the editor needs a BACKEND-aware, COUNT-aware price
+# for a specific op it is about to fire. estimate_run (the `canon estimate`
+# hook) is neither: it always prices at real-API rates and prices the fixed
+# fresh_plan shape. estimate_cradle reuses the SAME pricing primitives
+# (_task_calls / _price_llm / _price_assets / _fresh_nodes) and then masks the
+# categories whose backend is unpaid, so a fake/none run reads $0 while still
+# showing the counts (good "what an upgrade would cost" UX).
+# ---------------------------------------------------------------------------
+
+#: op -> level-step nodes the op runs (mirrors ops.generate_level's chain and
+#: the single-step place/regenerate ops). Steps map to tasks via
+#: _LEVEL_STEP_TASKS; anything else costs no LLM.
+_OP_STEPS = {
+    "generate": ("collision", "entities", "items", "foreground"),
+    "layout": ("collision",),  # regenerate_terrain: terrain only, clears placements
+    "enemies": ("entities",),
+    "items": ("items",),
+}
+
+
+def _paid(kind: str, backend: str | None) -> bool:
+    """Whether a category's chosen backend actually bills. fake/none/"" = $0
+    everywhere; local image gen is on-box ($0). Mirrors the NewProjectModal /
+    per-op selectors in cradle."""
+    v = (backend or "").strip().lower()
+    if kind == "llm" or kind == "vlm":
+        return v == "anthropic"
+    if kind == "image":
+        return v in {"fal", "retro", "pixellab"}
+    if kind == "music":
+        return v == "lyria"
+    if kind == "sfx":
+        return v == "elevenlabs"
+    return False
+
+
+def _zero_llm(llm: dict) -> None:
+    for entry in llm.get("by_task", {}).values():
+        entry["usd"] = 0.0
+    llm["usd"] = {"best": 0.0, "worst": 0.0}
+
+
+def _apply_backend_mask(
+    llm: dict, assets: dict, backends: dict[str, str]
+) -> None:
+    """Zero the USD of any category whose backend does not bill; recompute the
+    assets + roll-up totals. Counts stay untouched (so the UI can still show
+    '18 images · $0, fake')."""
+    if not _paid("llm", backends.get("llm")):
+        _zero_llm(llm)
+    if not _paid("image", backends.get("image")):
+        assets["images"]["usd"] = 0.0
+    if not _paid("music", backends.get("music")):
+        assets["music"]["usd"] = 0.0
+    if not _paid("sfx", backends.get("sfx")):
+        assets["sfx"]["usd"] = 0.0
+    vlm = assets.get("vlm") or {}
+    if vlm and not _paid("vlm", backends.get("vlm")):
+        vlm["usd"] = {"best": 0.0, "worst": 0.0}
+    flat = (
+        assets["images"]["usd"] + assets["music"]["usd"] + assets["sfx"]["usd"]
+    )
+    vlm_usd = vlm.get("usd", {"best": 0.0, "worst": 0.0})
+    assets["usd"] = {
+        "best": round(flat + vlm_usd["best"], 4),
+        "worst": round(flat + vlm_usd["worst"], 4),
+    }
+
+
+def _empty_assets() -> dict:
+    return {
+        "images": {"count": 0, "usd": 0.0},
+        "music": {"count": 0, "usd": 0.0},
+        "sfx": {"count": 0, "usd": 0.0},
+        "vlm": {},
+        "usd": {"best": 0.0, "worst": 0.0},
+    }
+
+
+def _op_bible(pack_dir: str | Path, level_id: str) -> Any:
+    """A minimal bible stand-in carrying just the target level, so
+    _sections_for_level can price plat:layout by the level's real width."""
+    from types import SimpleNamespace
+
+    from canon.adapters.platformer_write import _find_level_dir
+    from canon.bible.platformer import Level
+
+    level_dir, _stage = _find_level_dir(Path(pack_dir), level_id)
+    level = Level.model_validate(json.loads((level_dir / "level.json").read_text()))
+    return SimpleNamespace(
+        levels={level_id: level}, stages={}, enemy_definitions={}, items={}
+    )
+
+
+def _synthetic_op_bible(level_id: str, width: int, axis: str) -> Any:
+    """Stand-in for pricing a NEW level's op (no level on disk yet) — carries
+    just the requested width/axis so _sections_for_level can count layout
+    sections from the form's dimensions."""
+    from types import SimpleNamespace
+
+    lvl = SimpleNamespace(
+        grid_width=int(width), grid_height=int(width),
+        layout_axis=axis or "horizontal",
+    )
+    return SimpleNamespace(
+        levels={level_id: lvl}, stages={}, enemy_definitions={}, items={}
+    )
+
+
+def estimate_cradle(
+    scope: str,
+    *,
+    counts: dict | None = None,
+    backends: dict[str, str] | None = None,
+    pack_dir: str | Path | None = None,
+    level_id: str | None = None,
+    width: int | None = None,
+    axis: str | None = None,
+) -> dict:
+    """Price ONE cradle op, backend- and count-aware.
+
+    ``scope="world"`` prices a fresh full run at the requested ``counts``
+    (stages/levels/enemies/items) — the New Project surface. The per-op scopes
+    (``generate`` / ``layout`` / ``enemies`` / ``items``) price the LLM steps a
+    single level op runs against an existing ``pack_dir``/``level_id``. In every
+    case the returned USD reflects the chosen ``backends`` ($0 for fake/none).
+    Same output schema as estimate_run plus ``scope`` + echoed ``backends``.
+    """
+    cost_model = load_cost_model(
+        os.environ.get("CANON_PLAT_COST_MODEL") or DEFAULT_COST_MODEL_PATH
+    )
+    models_path = os.environ.get("CANON_PLAT_MODELS")
+    table = load_models(models_path) if models_path else load_models()
+    backends = dict(backends or {})
+    warnings: list[str] = []
+
+    if scope == "world":
+        plan = {**cost_model.get("fresh_plan", {}), **(counts or {})}
+        nodes, bible = _fresh_nodes(plan)
+        llm = _price_llm(
+            _task_calls(nodes, bible, cost_model), cost_model, table, {}, warnings
+        )
+        assets = _price_assets(nodes, bible, cost_model, warnings)
+    elif scope in _OP_STEPS:
+        lid = level_id or "__preview__"
+        if width is not None:
+            # Pricing a NEW level's op — no level on disk; use the form's width.
+            bible = _synthetic_op_bible(lid, width, axis or "")
+        elif pack_dir and level_id:
+            bible = _op_bible(pack_dir, level_id)
+        else:
+            raise ValueError(
+                f"scope {scope!r} needs (pack_dir + level_id) or an explicit width"
+            )
+        nodes = [
+            _FreshNode(f"level:x/{lid}/{step}") for step in _OP_STEPS[scope]
+        ]
+        actuals = _actuals_by_task(Path(pack_dir)) if pack_dir else {}
+        llm = _price_llm(
+            _task_calls(nodes, bible, cost_model), cost_model, table, actuals,
+            warnings,
+        )
+        assets = _empty_assets()
+    elif scope == "music":
+        # A single-track (re)generation — flat per-track price, backend-masked
+        # (fake = $0). No LLM. The mask recomputes assets/total.
+        a = cost_model.get("assets", {})
+        llm = {"by_task": {}, "calls": 0.0, "usd": {"best": 0.0, "worst": 0.0}}
+        assets = _empty_assets()
+        assets["music"] = {
+            "count": 1, "usd": round(float(a.get("music_usd_per_track", 0.10)), 4)
+        }
+    else:
+        raise ValueError(
+            f"unknown estimate scope {scope!r} "
+            f"(world|music|{'|'.join(_OP_STEPS)})"
+        )
+
+    _apply_backend_mask(llm, assets, backends)
+    return {
+        "scope": scope,
+        "backends": backends,
+        "llm": llm,
+        "assets": assets,
+        "total_usd": {
+            "best": round(llm["usd"]["best"] + assets["usd"]["best"], 4),
+            "worst": round(llm["usd"]["worst"] + assets["usd"]["worst"], 4),
+        },
+        "warnings": warnings,
+    }
 
 
 def estimate_run(ctx: Any, nodes: list, bible: Any) -> dict:

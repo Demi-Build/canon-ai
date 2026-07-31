@@ -150,6 +150,12 @@ class AssetPhase:
                     _inc(stats, "image_attempts", 1)
                     if ok:
                         _inc(stats, "image_successes", 1)
+                        # Read last_cost HERE — no await between the generate
+                        # call returning and this read, so under cooperative
+                        # asyncio no other task can clobber the shared field.
+                        # Backends that report a per-call cost (pixellab/retro)
+                        # land real dollars; ones that don't (fal/local) add 0.
+                        _add_cost(stats, "image_cost_usd", backend)
 
         # Characters
         for char in ctx.bible.characters or []:
@@ -208,6 +214,7 @@ class AssetPhase:
                     _inc(stats, "music_attempted", 1)
                     if ok:
                         _inc(stats, "music_succeeded", 1)
+                        _add_cost(stats, "audio_cost_usd", backend)
 
         environments = {
             m.environment
@@ -255,6 +262,7 @@ class AssetPhase:
                     _inc(stats, "sfx_attempted", 1)
                     if ok:
                         _inc(stats, "sfx_succeeded", 1)
+                        _add_cost(stats, "audio_cost_usd", backend)
 
         # Core fixed effects
         FIXED: list[tuple[str, str, float, bool]] = [
@@ -349,3 +357,11 @@ def _inc(stats: Any, attr: str, delta: int | float) -> None:
             setattr(stats, attr, current + delta)
         except AttributeError:
             pass
+
+
+def _add_cost(stats: Any, attr: str, backend: Any) -> None:
+    """Add the backend's most-recent per-call cost to a stats total. Call ONLY
+    on the line immediately after ``await backend.generate_and_save_async(...)``
+    (no await in between) so the shared ``last_cost`` field is still this call's
+    value — the AssetPhase gather makes reads at any other point racy."""
+    _inc(stats, attr, float(getattr(backend, "last_cost", 0.0) or 0.0))

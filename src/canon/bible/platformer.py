@@ -103,6 +103,22 @@ class SparseMaskEntry(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class MusicSection(BaseModel):
+    """A user-authored music region on a level (NOT the transient
+    generation-time layout sections). ``[start, end)`` is a half-open range of
+    cells along the level's ``layout_axis`` (columns for horizontal levels,
+    rows for vertical). While the player stands inside it, ``music_path`` plays
+    instead of the level/stage default. Empty ``music_path`` = "silence here".
+    Authored by the user after generation (agents may propose these later);
+    the play surfaces resolve section → level → stage by position."""
+
+    start: int
+    end: int
+    music_path: str = ""
+    music_hash: str = ""
+    name: str = ""
+
+
 class TileSlot(BaseModel):
     """One slot of a tilesheet: which region is which tile id.
 
@@ -248,6 +264,18 @@ class Level(ArtifactMeta):
     #: effective spec at generation time (low-gravity levels validate
     #: with low gravity). Secret rooms inherit their parent's.
     movement_overrides: dict[str, Any] = Field(default_factory=dict)
+    #: Per-level MUSIC override (additive). Empty → the stage default theme
+    #: (manifest["audio"][stage]) plays, as before. Set (assigned to an
+    #: existing track or generated per-level) → this track plays for the whole
+    #: level. Secret rooms are Levels, so a room carries its own here. The
+    #: play surfaces resolve music by position: an active ``music_sections``
+    #: entry wins, else this ``music_path``, else the stage default.
+    music_path: str = ""
+    music_hash: str = ""
+    #: User-authored music regions (see ``MusicSection``) — durable, added
+    #: after generation, each optionally its own track. Empty = the level uses
+    #: ``music_path`` / the stage default everywhere.
+    music_sections: list[MusicSection] = Field(default_factory=list)
 
     # Placements — references, never copies (§6.1)
     entities: list[Placement] = Field(default_factory=list)

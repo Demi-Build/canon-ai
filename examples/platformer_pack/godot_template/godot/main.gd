@@ -159,6 +159,14 @@ var checkpoints: Array = []
 # the game never depends on it.
 var music_player: AudioStreamPlayer = null
 var sfx_players := {}
+# Music resolves by POSITION (mirrors platformer_play.py): an active user
+# music_section > the level's own music_path > the stage default theme.
+# ``music_cur`` is the currently-loaded track ("" = stopped) — gated so a same
+# -track room switch, or staying inside a section, never restarts it.
+var music_cur := ""
+var stage_music_rel := ""
+var level_music_path := ""
+var level_music_sections: Array = []
 
 # Physics semantics from tileset slot metadata: category sets keyed by
 # tile-type int; volumes map tile-type -> params Dictionary.
@@ -749,6 +757,10 @@ func _load_level_by_id(level_id: String, preserve := false, arrive: Variant = nu
 	for k in (level.get("rules_overrides", {}) as Dictionary):
 		rules[k] = level["rules_overrides"][k]
 	break_delay_s = float(rules.get("break_delay_s", 0.6))
+	# Per-level music override (additive) — the resolver falls back to the
+	# stage theme when these are empty. Read here; applied after spawn/axis.
+	level_music_path = str(level.get("music_path", ""))
+	level_music_sections = level.get("music_sections", [])
 	grid = _load_json(base + "/collision.grid.json")["collision"]
 	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
 	tile_fuses.clear()  # per-level breakable state (broken tiles reset on reload)
@@ -766,6 +778,10 @@ func _load_level_by_id(level_id: String, preserve := false, arrive: Variant = nu
 	# past the level bounds.
 	var vp := get_viewport_rect().size
 	layout_axis = str(level.get("layout_axis", "horizontal"))
+	# Seed music for this level from the spawn cell (stage default unless the
+	# level/room carries its own track). Per-frame section swaps happen in
+	# _process; a same-track room switch is gated out by music_cur.
+	_apply_music(_music_cell(spawn))
 	var k: float
 	if layout_axis == "vertical":
 		var vr_override: Variant = level.get("view_rows")
@@ -1755,18 +1771,10 @@ func _spawn_player(preserve := false) -> void:
 
 
 func _setup_audio(audio: Dictionary) -> void:
-	var music_rel = audio.get("music")
-	if music_rel != null and str(music_rel) != "":
-		var stream := _load_audio_stream(str(music_rel))
-		if stream != null:
-			if "loop" in stream:
-				stream.loop = true
-			elif "loop_mode" in stream:
-				stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
-			music_player = AudioStreamPlayer.new()
-			music_player.stream = stream
-			add_child(music_player)
-			music_player.play()
+	# SFX stay per-stage (shared across a biome). MUSIC is resolved by
+	# position in _apply_music — record the stage default here; the actual
+	# (re)start happens on level load + per-frame section crossings.
+	stage_music_rel = str(audio.get("music", ""))
 	var sfx: Dictionary = audio.get("sfx", {})
 	for event in sfx:
 		var s := _load_audio_stream(str(sfx[event]))
@@ -1775,6 +1783,49 @@ func _setup_audio(audio: Dictionary) -> void:
 			p.stream = s
 			add_child(p)
 			sfx_players[str(event)] = p
+
+
+func _active_music(cell: int) -> String:
+	# Ported VERBATIM from platformer_play.py::_active_music so music switches
+	# at identical cells on both surfaces: a user music_section wins (its path,
+	# possibly "" = deliberate silence), else the level track, else the stage.
+	for sec in level_music_sections:
+		var s: Dictionary = sec
+		if int(s.get("start", 0)) <= cell and cell < int(s.get("end", 0)):
+			return str(s.get("music_path", ""))
+	if level_music_path != "":
+		return level_music_path
+	return stage_music_rel
+
+
+func _music_cell(pos: Vector2) -> int:
+	return int(pos.y if layout_axis == "vertical" else pos.x)
+
+
+func _apply_music(cell: int) -> void:
+	# (Re)start the resolved track only when it changes (gate on music_cur),
+	# freeing the previous player first (no leak). Best-effort — silence on any
+	# missing/failed stream. Called on level load + every frame while playing.
+	var resolved := _active_music(cell)
+	if resolved == music_cur:
+		return
+	if music_player != null:
+		music_player.queue_free()
+		music_player = null
+	music_cur = resolved
+	if resolved == "":
+		return
+	var stream := _load_audio_stream(resolved)
+	if stream == null:
+		return
+	if "loop" in stream:
+		stream.loop = true
+	elif "loop_mode" in stream:
+		stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	music_player = AudioStreamPlayer.new()
+	music_player.stream = stream
+	add_child(music_player)
+	music_player.play()
 
 
 func _load_audio_stream(rel: String) -> AudioStream:
@@ -2300,6 +2351,10 @@ func _process(delta: float) -> void:
 		level_time = 0.0
 		return
 	level_time += delta
+
+	# Live music switch: crossing into/out of a user music_section swaps the
+	# track (gated, cosmetic — never touches physics). Mirrors platformer_play.
+	_apply_music(_music_cell(player_pos))
 
 	var volume: Variant = _volume_params(player_pos.x, player_pos.y)
 	# Volume-ENTRY edge (prev-frame latch, the was_airborne idiom): one

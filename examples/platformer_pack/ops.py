@@ -165,8 +165,11 @@ def make_ctx(
     *,
     llm: LLMClient | None = None,
     bible: Bible | None = None,
+    stats: Any = None,
 ) -> PipelineContext:
-    """A real PipelineContext over the reconstructed pack state."""
+    """A real PipelineContext over the reconstructed pack state. ``stats`` is
+    the same GenerationStats wired into ``llm`` (build_llm), so the op can read
+    back the REAL token cost of the calls it just made."""
     if bible is None:
         bible = Bible.empty(info.seed)
         bible.world = info.world
@@ -180,6 +183,7 @@ def make_ctx(
         config=config,
         rng=random.Random(0),
         llm=llm,
+        stats=stats,
         prompts=PlatformerPrompts(),
         artifacts={"palettes": info.palettes, "warnings": []},
         adapter=_pack_adapter(info.pack),
@@ -195,14 +199,21 @@ def _warnings(ctx: PipelineContext) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def build_llm(kind: str | None, model: str | None = None) -> LLMClient | None:
+def build_llm(
+    kind: str | None, model: str | None = None, stats: Any = None
+) -> LLMClient | None:
+    """Build the op's LLM client. ``stats`` (a GenerationStats) is wired in so
+    every real call records its token cost — the op reads it back to report the
+    ACTUAL spend (fake backend records $0, having no usage)."""
     if not kind or kind == "none":
         return None
     if kind == "fake":
         from canon.backends.testing import FakeLLMBackend
         from examples.run_platformer_slice import make_fake_responder
 
-        return LLMClient(backend=FakeLLMBackend(make_fake_responder()))
+        return LLMClient(
+            backend=FakeLLMBackend(make_fake_responder()), stats=stats
+        )
     if kind == "anthropic":
         import os
 
@@ -220,7 +231,9 @@ def build_llm(kind: str | None, model: str | None = None) -> LLMClient | None:
             resolver = load_models().resolve
         except Exception:  # noqa: BLE001 — table optional
             resolver = None
-        return LLMClient(backend=backend, model_resolver=resolver)
+        return LLMClient(
+            backend=backend, model_resolver=resolver, stats=stats
+        )
     raise ValueError(f"unknown llm backend {kind!r} (fake|anthropic).")
 
 
@@ -1360,8 +1373,11 @@ def _level_gen_ctx(
     load_pack/make_ctx don't set the enemy roster or item pool (the placement
     generators read them from the bible) — do it here, plus the artifact slots
     the generators consult (level_briefs, level_overrides)."""
+    from canon.pipeline.stats import GenerationStats
+
     info = load_pack(pack_dir)
-    ctx = make_ctx(info, llm=build_llm(backend, model))
+    stats = GenerationStats(llm_backend=backend or "none")
+    ctx = make_ctx(info, llm=build_llm(backend, model, stats=stats), stats=stats)
     ctx.bible.enemy_definitions.update(_load_defs(Path(pack_dir), "enemy"))
     ctx.bible.items.update(_load_defs(Path(pack_dir), "item"))
     ctx.artifacts.setdefault("level_briefs", {})
@@ -1421,7 +1437,51 @@ def _level_gen_result(
         "repair_count": v.get("repair_count", 0),
         "layout_fallback": bool(layout_fallback),
         "seed": seed,
+        "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
+    }
+
+
+def _cost_block(ctx: PipelineContext) -> dict:
+    """The ACTUAL spend of the op that owns ``ctx``: real returned-token LLM
+    cost (priced through PRICING) PLUS flat image/audio cost (Lyria/ElevenLabs/
+    diffusion per-call prices the producers report). ``usd`` is the TOTAL — for
+    an LLM-only level op image/audio are 0 so it stays the LLM figure; for an
+    audio/sprite reroll it's the media spend. Fake backends have no usage → $0.
+    This is what cradle records in its per-project ledger."""
+    s = getattr(ctx, "stats", None)
+    if s is None:
+        return {
+            "usd": 0.0, "llm_usd": 0.0, "image_usd": 0.0, "audio_usd": 0.0,
+            "input_tokens": 0, "output_tokens": 0, "calls": 0, "backend": "",
+        }
+    llm = float(getattr(s, "llm_cost_usd", 0.0))
+    image = float(getattr(s, "image_cost_usd", 0.0))
+    audio = float(getattr(s, "audio_cost_usd", 0.0))
+    return {
+        "usd": round(llm + image + audio, 6),
+        "llm_usd": round(llm, 6),
+        "image_usd": round(image, 6),
+        "audio_usd": round(audio, 6),
+        "input_tokens": int(getattr(s, "total_input_tokens", 0)),
+        "output_tokens": int(getattr(s, "total_output_tokens", 0)),
+        "calls": int(getattr(s, "llm_calls", 0)),
+        "backend": getattr(s, "llm_backend", "") or "",
+    }
+
+
+def _sum_costs(blocks: list[dict]) -> dict:
+    """Aggregate several ops' cost blocks (generate_level chains three, each on
+    its own stats) into one total for the whole-level op."""
+    backend = next(
+        (b.get("backend") for b in blocks if b.get("backend")), ""
+    )
+    return {
+        "usd": round(sum(float(b.get("usd", 0.0)) for b in blocks), 6),
+        "input_tokens": sum(int(b.get("input_tokens", 0)) for b in blocks),
+        "output_tokens": sum(int(b.get("output_tokens", 0)) for b in blocks),
+        "calls": sum(int(b.get("calls", 0)) for b in blocks),
+        "backend": backend,
     }
 
 
@@ -1582,14 +1642,20 @@ def generate_level(
     )
     lid = terrain["level_id"]
     # reuse the terrain's effective seed so the whole level is one reproducible unit
-    place_enemies(
+    enemies = place_enemies(
         pack_dir, level_id=lid, backend=backend, model=model,
         max_enemies=max_enemies, seed=terrain["seed"], actor=actor, session=session,
     )
-    return place_items(
+    result = place_items(
         pack_dir, level_id=lid, backend=backend, model=model,
         max_items=max_items, seed=terrain["seed"], actor=actor, session=session,
     )
+    # Each sub-op priced its OWN calls on its own stats — report the whole
+    # chain's real spend, not just the final place-items step.
+    result["cost"] = _sum_costs(
+        [terrain["cost"], enemies["cost"], result["cost"]]
+    )
+    return result
 
 
 def regenerate_terrain(
@@ -1663,6 +1729,102 @@ def regenerate_terrain(
     return _level_gen_result(
         pack_dir, level_id, stage_id, eff_seed, level.layout_fallback, ctx
     )
+
+
+def list_music_tracks(pack_dir: str | Path) -> dict:
+    """Every music track file in the pack (for cradle's 'assign an existing
+    track' dropdown). Output-relative paths under ``music/`` with a short
+    label. Read-only."""
+    pack = Path(pack_dir)
+    music_dir = pack / "music"
+    tracks: list[dict] = []
+    if music_dir.is_dir():
+        for f in sorted(music_dir.rglob("*")):
+            if f.is_file() and f.suffix.lower() in (".mp3", ".wav", ".ogg"):
+                rel = f.relative_to(pack).as_posix()
+                tracks.append({"path": rel, "label": rel[len("music/"):]})
+    return {"tracks": tracks}
+
+
+def generate_level_music(
+    pack_dir: str | Path,
+    *,
+    level_id: str,
+    brief: str = "",
+    section: int | None = None,
+    backend: str = "lyria",
+    music_seconds: int | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Generate ONE music track for a level (``section=None``) or one of its
+    user music sections, write it under ``music/<stage>/<level>/``, repoint the
+    level (via apply_level_edit, journaled), and return the ACTUAL cost. Paid
+    on ``--music-backend lyria``; ``fake`` is $0 deterministic bytes."""
+    from canon.adapters.platformer_write import _find_level_dir, apply_level_edit
+    from canon.pipeline.stats import GenerationStats
+    from examples.platformer_pack.audio_phases import (
+        MUSIC_SECONDS,
+        _add_audio_cost,
+        _audio_ext,
+        build_music_producer,
+    )
+
+    info = load_pack(pack_dir)
+    music = build_music_producer(backend)
+    if music is None:
+        raise ValueError(
+            "music generate needs --music-backend (fake|lyria); "
+            f"got {backend!r}"
+        )
+    stats = GenerationStats(music_backend=backend or "")
+    ctx = make_ctx(info, stats=stats)
+
+    level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
+    level = json.loads((level_dir / "level.json").read_text())
+    stage = info.stages.get(stage_id)
+    theme = getattr(stage, "theme", "") if stage else ""
+    world_title = info.world.title if info.world else ""
+    prompt = brief.strip() or (
+        f"Looping instrumental theme for a retro platformer level in a "
+        f"{theme} stage. World: {world_title}. Melodic, atmospheric, "
+        f"seamless loop, no vocals."
+    )
+    data = music.generate(prompt, int(music_seconds or MUSIC_SECONDS))
+    ext = _audio_ext(data)
+    slug = "theme" if section is None else f"sec{int(section)}"
+    rel = f"music/{stage_id}/{level_id}/{slug}{ext}"
+    music_hash = ctx.adapter.write_binary(rel, data)
+    _add_audio_cost(ctx, music)
+
+    if section is None:
+        edit: dict = {"music_path": rel, "music_hash": music_hash}
+    else:
+        sections = list(level.get("music_sections") or [])
+        if section < 0 or section >= len(sections):
+            raise ValueError(
+                f"section {section} out of range (level has {len(sections)})"
+            )
+        sections[section] = {
+            **sections[section], "music_path": rel, "music_hash": music_hash,
+        }
+        edit = {"music_sections": sections}
+    apply_level_edit(
+        pack_dir, level_id, edit, actor=actor, session=session,
+        op="edit", source="llm",
+    )
+    target = (
+        f"music:{stage_id}/{level_id}"
+        + ("" if section is None else f"/sec{int(section)}")
+    )
+    return {
+        "level_id": level_id,
+        "stage_id": stage_id,
+        "target": target,
+        "music_path": rel,
+        "cost": _cost_block(ctx),
+        "warnings": _warnings(ctx),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1739,11 +1901,20 @@ def generate_asset(
 ) -> dict:
     """(Re)generate ONE asset by running the real art/audio phase against a
     bible filtered to the target."""
+    from canon.pipeline.stats import GenerationStats
+
     info = load_pack(pack_dir)
     kind, rest = _parse_target(target)
     primary = _asset_paths(info, kind, rest)[0]
     before = provenance.snapshot_file(info.pack, info.pack / primary)
     gen: dict[str, Any] = {}
+    # Capture the reroll's ACTUAL media spend (image/audio backends report a
+    # flat per-call last_cost the art/audio phases now accumulate into stats).
+    stats = GenerationStats(
+        image_backend=image_backend or "",
+        music_backend=music_backend or "",
+        sfx_backend=sfx_backend or "",
+    )
 
     if kind in ("enemy", "item", "player"):
         from examples.platformer_pack.art_phases import SpriteArtPhase
@@ -1756,7 +1927,7 @@ def generate_asset(
             seed=info.seed, edit_kind=image_edit_backend,
         )
         bible = _sprite_bible(info, kind, rest)
-        ctx = make_ctx(info, bible=bible)
+        ctx = make_ctx(info, bible=bible, stats=stats)
         SpriteArtPhase(producer=producer, graphics=info.graphics).run(ctx)
         gen["image_model"] = str(producer.model)
     elif kind == "backdrop":
@@ -1777,7 +1948,7 @@ def generate_asset(
         bible.tilesets.update(
             {rest: info.tilesets[rest]} if rest in info.tilesets else {}
         )
-        ctx = make_ctx(info, bible=bible)
+        ctx = make_ctx(info, bible=bible, stats=stats)
         BackdropArtPhase(producer=producer, graphics=info.graphics).run(ctx)
         gen["image_model"] = str(producer.model)
     else:  # audio:<stage>
@@ -1798,7 +1969,7 @@ def generate_asset(
         bible = Bible.empty(info.seed)
         bible.world = info.world
         bible.stages[rest] = info.stages[rest]
-        ctx = make_ctx(info, bible=bible)
+        ctx = make_ctx(info, bible=bible, stats=stats)
         AudioPhase(music_producer=music, sfx_producer=sfx).run(ctx)
         if music is not None:
             gen["music_model"] = str(getattr(music, "model", type(music).__name__))
@@ -1822,6 +1993,7 @@ def generate_asset(
         "target": target,
         "generated": after is not None and after != before,
         "gen": gen,
+        "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
     }
 
@@ -1869,8 +2041,11 @@ def animate_asset(
             "animate needs --vlm-backend (or --reuse-spec with a stored spec)"
         )
 
+    from canon.pipeline.stats import GenerationStats
+
     bible = _sprite_bible(info, kind, rest)
-    ctx = make_ctx(info, bible=bible)
+    stats = GenerationStats(image_backend=image_backend or "")
+    ctx = make_ctx(info, bible=bible, stats=stats)
     phase = SpriteAnimationPhase(
         producer=producer, judge=judge, graphics=info.graphics
     )
@@ -1949,5 +2124,6 @@ def animate_asset(
         "animated": bool(manifest),
         "states": sorted((manifest.get("states") or {}).keys()),
         "gen": gen,
+        "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
     }

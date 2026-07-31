@@ -1,46 +1,70 @@
 [
   {
-    "archetype": "",
-    "name": "Iron Sentinel",
-    "description": "A heavily armored defender who holds the line.",
-    "flavor_text": null,
-    "starting_weapon": null,
+    "archetype": "warrior",
+    "name": "Ironbreaker",
+    "description": "",
+    "flavor_text": "",
+    "starting_weapon": "Iron Sword",
     "portrait_prompt": null,
     "portrait_path": null,
     "category": null,
     "stat_template": {
-      "str": 16,
-      "con": 14,
-      "dex": 8
+      "STR": 18,
+      "DEX": 14,
+      "CON": 15,
+      "INT": 10,
+      "WIS": 12,
+      "CHA": 14,
+      "LUCK": 12
     },
-    "stat_budget": null,
-    "stat_roles": {},
-    "role_tags": [
-      "tank",
-      "defender"
+    "stat_budget": 95,
+    "stat_roles": {
+      "primary": [
+        "STR",
+        "CON"
+      ],
+      "secondary": [
+        "DEX",
+        "CHA"
+      ],
+      "dump": [
+        "INT",
+        "WIS"
+      ]
+    },
+    "role_tags": [],
+    "abilities": [
+      {
+        "name": "A0",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 8
+      },
+      {
+        "name": "A1",
+        "description": "",
+        "stat": "STR",
+        "stamina_cost": 8
+      }
     ],
-    "abilities": [],
     "spells": [],
     "ability_pool": [
       {
-        "name": "shield_bash",
+        "name": "A2",
         "description": "",
         "stat": "STR",
-        "stamina_cost": 0
+        "stamina_cost": 4
       },
       {
-        "name": "taunt",
+        "name": "A3",
         "description": "",
         "stat": "STR",
-        "stamina_cost": 0
+        "stamina_cost": 4
       }
     ],
     "spell_pool": [],
-    "starting_equipment": [
-      "tower_shield",
-      "plate_armor"
-    ],
-    "lore": "Born of conflict, the Iron Sentinel embodies resilience.",
+    "starting_equipment": [],
+    "lore": null,
     "extra": {}
   }
 ]
