@@ -169,6 +169,56 @@ def test_animate_full_multiimage_path(pack: Path):
     assert ev["gen"]["vlm_model"] and ev["gen"]["image_model"]
 
 
+def test_animate_reuse_spec_skips_the_vlm_and_refuses_without_one(pack: Path, tmp_path):
+    """--reuse-spec re-renders the sheets from the STORED motion spec, so it
+    needs no VLM at all. Without a stored spec there is nothing to reuse: the
+    run would fall through to authoring and a judge-less author only fails
+    after burning its retry budget, so the op refuses up front instead."""
+    import shutil
+
+    from PIL import Image
+
+    from canon.adapters.platformer_write import replace_asset
+
+    p = tmp_path / "animate_reuse"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    target = f"enemy:{enemy_id}"
+    png = p / "red.png"
+    Image.new("RGBA", (32, 32), (200, 30, 30, 255)).save(png)
+    replace_asset(p, target, png, actor="test")
+    # Make the precondition explicit: the session-scoped fixture pack is shared,
+    # and an earlier test may already have animated this enemy into it.
+    row_path = p / "enemy" / f"{enemy_id}.json"
+    row = json.loads(row_path.read_text())
+    row["stats"].pop("animation", None)
+    row_path.write_text(json.dumps(row))
+
+    # Nothing stored yet + no VLM to author one: a named refusal, not a no-op.
+    with pytest.raises(ValueError, match="no stored motion spec to reuse"):
+        ops.animate_asset(
+            p, target, image_backend="fake", vlm_backend="none",
+            reuse_spec=True, actor="test",
+        )
+
+    first = ops.animate_asset(
+        p, target, image_backend="fake", vlm_backend="fake", actor="test"
+    )
+    assert first["animated"] is True
+    stored = json.loads((p / "enemy" / f"{enemy_id}.json").read_text())
+    stored_spec = stored["stats"]["animation"]["spec"]
+
+    again = ops.animate_asset(
+        p, target, image_backend="fake", vlm_backend="none",
+        reuse_spec=True, actor="test",
+    )
+    assert again["gen"]["reused_spec"] is True
+    assert again["gen"]["vlm_model"] == ""  # no judge was ever built
+    assert again["states"] == first["states"]
+    after = json.loads((p / "enemy" / f"{enemy_id}.json").read_text())
+    assert after["stats"]["animation"]["spec"] == stored_spec  # re-render, not re-author
+
+
 def _journal(pack: Path) -> list[dict]:
     return [
         json.loads(line)
@@ -1241,6 +1291,98 @@ def test_estimate_music_scope_is_backend_masked():
     assert estimate_cradle("music", backends={"music": "lyria"})["total_usd"]["best"] > 0.0
 
 
+def test_estimate_animate_prices_states_not_frames(pack: Path, tmp_path):
+    """THE NAMING: the animate estimate counts STATES, never FRAMES.
+
+    ``art_phases._sheet_frames`` issues exactly ONE ``ImageEditBackend.edit()``
+    per state per facing; a state's frame count only widens that state's
+    reference sheet INSIDE the same call. The intuitive "states x frames"
+    formula overcharges by ~4x (the default frame counts average ~3-4), so this
+    test pins the shape against a spec whose frame counts are deliberately
+    lopsided — if the estimate ever tracked frames, the two would diverge."""
+    import shutil
+
+    from examples.platformer_pack.estimate import estimate_cradle
+    from examples.platformer_pack.vlm_qa import enemy_animation_states
+
+    p = tmp_path / "animate_estimate"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    target = f"enemy:{enemy_id}"
+    enemy = ops._load_defs(p, "enemy")[enemy_id]
+    states = enemy_animation_states(enemy)
+
+    est = estimate_cradle(
+        "animate", pack_dir=p, target=target,
+        backends={"image": "fal", "vlm": "anthropic"},
+    )
+    assert est["assets"]["images"]["count"] == len(states)
+    per_call = 0.04  # cost_model.assets.image_usd_per_call
+    assert est["assets"]["images"]["usd"] == pytest.approx(len(states) * per_call)
+    # The authoring call is one VLM call for the whole actor, not one per state.
+    assert est["assets"]["vlm"]["animation_authoring"] == 1
+
+    # Frames are LOUD here (2 vs 6) and must not move the price by a cent.
+    row = json.loads((p / "enemy" / f"{enemy_id}.json").read_text())
+    row["stats"]["animation"] = {
+        "spec": {s: {"frames": 2, "motion": "m"} for s in states}
+    }
+    (p / "enemy" / f"{enemy_id}.json").write_text(json.dumps(row))
+    thin = estimate_cradle(
+        "animate", pack_dir=p, target=target, reuse_spec=True,
+        backends={"image": "fal", "vlm": "anthropic"},
+    )
+    row["stats"]["animation"]["spec"] = {
+        s: {"frames": 6, "motion": "m"} for s in states
+    }
+    (p / "enemy" / f"{enemy_id}.json").write_text(json.dumps(row))
+    fat = estimate_cradle(
+        "animate", pack_dir=p, target=target, reuse_spec=True,
+        backends={"image": "fal", "vlm": "anthropic"},
+    )
+    assert thin["assets"]["images"] == fat["assets"]["images"] == est["assets"]["images"]
+    # --reuse-spec skips the authoring call, so it is strictly cheaper.
+    assert not thin["assets"]["vlm"]
+    assert thin["total_usd"]["best"] < est["total_usd"]["best"]
+
+    # An asymmetric actor really does run the per-state loop twice (a second
+    # pass off the mirrored base) — the ONE multiplier that is not the states.
+    row["asymmetric"] = True
+    (p / "enemy" / f"{enemy_id}.json").write_text(json.dumps(row))
+    both = estimate_cradle(
+        "animate", pack_dir=p, target=target, reuse_spec=True,
+        backends={"image": "fal", "vlm": "anthropic"},
+    )
+    assert both["assets"]["images"]["count"] == 2 * len(states)
+
+
+def test_estimate_animate_is_backend_masked_and_actor_shaped(pack: Path):
+    from examples.platformer_pack.estimate import estimate_cradle
+    from examples.platformer_pack.vlm_qa import PLAYER_ANIMATION_STATES
+
+    enemy_id = next(iter(ops._load_defs(pack, "enemy")))
+    free = estimate_cradle(
+        "animate", pack_dir=pack, target=f"enemy:{enemy_id}",
+        backends={"image": "fake", "vlm": "fake"},
+    )
+    assert free["total_usd"]["best"] == 0.0
+    assert free["assets"]["images"]["count"] > 0  # counts survive the $0 mask
+
+    # The player carries its own (larger) state set — the estimate reads the
+    # real vocabulary rather than assuming the enemy one.
+    player = estimate_cradle(
+        "animate", pack_dir=pack, target="player",
+        backends={"image": "fal", "vlm": "anthropic"},
+    )
+    assert player["assets"]["images"]["count"] == len(PLAYER_ANIMATION_STATES)
+    assert any("state(s)" in w for w in player["warnings"])
+
+    with pytest.raises(ValueError, match="animate targets"):
+        estimate_cradle("animate", pack_dir=pack, target=f"item:{enemy_id}")
+    with pytest.raises(ValueError, match="needs pack_dir . target"):
+        estimate_cradle("animate", backends={"image": "fal"})
+
+
 # ---------------------------------------------------------------------------
 # per-call prompt override — "see the prompt, edit it, run THIS call with it"
 # ---------------------------------------------------------------------------
@@ -1286,7 +1428,11 @@ def test_preview_prompt_covers_every_kind(pack: Path):
         "item": {"target": item_id},
         "sprite": {"target": f"enemy:{enemy_id}"},
         "music": {"level_id": "l1"},
+        "animate": {"target": f"enemy:{enemy_id}"},
     }
+    # Exhaustive by construction: a new editable generator has to bring a
+    # preview case with it, or this fails instead of silently going unpreviewed.
+    assert set(cases) == set(ops.PROMPT_KINDS)
     for kind, kwargs in cases.items():
         out = ops.preview_prompt(pack, kind, **kwargs)
         assert out["label"] == ops.PROMPT_KINDS[kind]["label"]
@@ -1433,6 +1579,57 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
         prompt_override="SOLO KAZOO MARCH", actor="test",
     )
     assert prompts == ["SOLO KAZOO MARCH"]
+
+
+def test_animate_prompt_override_reaches_the_judge(pack: Path, tmp_path):
+    """The animate path's editable prompt is the motion-spec AUTHORING call —
+    the one VLM call per actor. The override replaces that text verbatim; the
+    per-state img2img sheet prompts are NOT overridable (they carry each
+    state's own silhouette contract) and must keep their built-in text."""
+    import shutil
+
+    from PIL import Image
+
+    from canon.adapters.platformer_write import replace_asset
+
+    judged: list[str] = []
+
+    class _SpyJudge:
+        """Mirrors FakeVLMBackend's surface: judge(text, images) -> str."""
+
+        model = "spy-vlm"
+
+        def judge(self, text, images):
+            judged.append(text)
+            return json.dumps(
+                {s: {"frames": 2, "motion": "spy motion"} for s in
+                 ("idle", "walk", "hurt", "death")}
+            )
+
+    p = tmp_path / "animate_override"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    png = p / "red.png"
+    Image.new("RGBA", (32, 32), (200, 30, 30, 255)).save(png)
+    replace_asset(p, f"enemy:{enemy_id}", png, actor="test")
+
+    import examples.platformer_pack.vlm_qa as vlm_qa
+
+    real_build = vlm_qa.build_vlm_judge
+    vlm_qa.build_vlm_judge = lambda kind, model=None: _SpyJudge()
+    try:
+        result = ops.animate_asset(
+            p, f"enemy:{enemy_id}", image_backend="fake", vlm_backend="fake",
+            prompt_override="AUTHOR IT AS A ROLLING BOULDER", actor="test",
+        )
+    finally:
+        vlm_qa.build_vlm_judge = real_build
+
+    assert result["animated"] is True
+    assert judged and all("AUTHOR IT AS A ROLLING BOULDER" in t for t in judged)
+    # The default authoring instructions are GONE — an override replaces, and
+    # the per-state briefs never reach the judge on this call.
+    assert not any("### TASK: plat_animate" in t for t in judged)
 
 
 def test_cli_prompt_show_and_override_round_trip(pack: Path, tmp_path):

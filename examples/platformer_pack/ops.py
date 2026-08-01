@@ -1535,6 +1535,13 @@ PROMPT_KINDS: dict[str, dict] = {
     "item": {"label": "plat:items", "mode": "llm"},
     "sprite": {"label": "plat:sprite_art", "mode": "image"},
     "music": {"label": "plat:audio", "mode": "audio"},
+    # The motion-SPEC authoring call (one VLM call per animate). Its label is
+    # the prefix retry_with_feedback already runs it under
+    # (`plat:animate:<actor>`); unlike the llm kinds the override does NOT ride
+    # LLMClient.system_overrides — the judge is a VLM, not the pipeline client
+    # — so animate_asset threads it down explicitly. The per-state img2img
+    # SHEET prompt is intentionally absent: see SpriteAnimationPhase.__init__.
+    "animate": {"label": "plat:animate", "mode": "vlm"},
 }
 
 
@@ -1676,6 +1683,43 @@ def preview_prompt(
             getattr(stage, "theme", "") if stage else "",
             info.world.title if info.world else "", info.graphics,
         )
+        return out
+
+    if kind == "animate":
+        # Resolved exactly the way animate_asset resolves it, from the same
+        # vlm_qa helpers — the previewed text IS the text the run sends.
+        from examples.platformer_pack.vlm_qa import (
+            ANIM_FRAMES_MAX,
+            ANIMATION_STATES,
+            PLAYER_ANIM_FRAMES_MAX,
+            PLAYER_ANIMATION_STATES,
+            animate_prompt,
+            enemy_animation_states,
+            enemy_animation_subject,
+            player_animation_subject,
+        )
+
+        actor_id, states, frames_max = "enemy:<id>", ANIMATION_STATES, ANIM_FRAMES_MAX
+        subject = "Creature: <the actor> — its archetype, size and flavor."
+        if target:
+            t_kind, rest = _parse_target(target)
+            if t_kind == "enemy":
+                defs = _load_defs(info.pack, "enemy")
+                if rest not in defs:
+                    raise FileNotFoundError(f"enemy {rest!r} not found")
+                enemy = defs[rest]
+                actor_id = f"enemy:{rest}"
+                subject = enemy_animation_subject(enemy)
+                states = enemy_animation_states(enemy)
+            elif t_kind == "player":
+                actor_id = "player"
+                subject = player_animation_subject()
+                states = PLAYER_ANIMATION_STATES
+                frames_max = PLAYER_ANIM_FRAMES_MAX
+            else:
+                # Same vocabulary as the op: only actors have motion.
+                raise ValueError("animate targets: enemy:<id> | player")
+        out["prompt"] = animate_prompt(actor_id, subject, states, frames_max)
         return out
 
     # music — the op builds its prompt string inline (no prompts.py method).
@@ -2398,11 +2442,17 @@ def animate_asset(
     vlm_model: str | None = None,
     reuse_spec: bool = False,
     renormalize: bool = False,
+    prompt_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """The multi-image path: VLM-authored motion spec + one img2img sheet per
     state, sliced into strips + frames.json + a packed atlas — for ONE actor.
+
+    ``prompt_override`` replaces the motion-spec AUTHORING prompt for this call
+    (the `sprite`-kind override's analogue on the animate path; see
+    ``PROMPT_KINDS["animate"]``). It is inert on the two paths that never
+    author: ``renormalize`` and a ``reuse_spec`` that finds a stored spec.
 
     ``renormalize`` instead REPAIRS the frames already on disk: it re-seats
     every state on one shared square so the actor stops changing size between
@@ -2416,6 +2466,7 @@ def animate_asset(
         build_vlm_judge,
         enemy_animation_states,
         enemy_animation_subject,
+        player_animation_subject,
     )
 
     info = load_pack(pack_dir)
@@ -2446,7 +2497,8 @@ def animate_asset(
     stats = GenerationStats(image_backend=image_backend or "")
     ctx = make_ctx(info, bible=bible, stats=stats)
     phase = SpriteAnimationPhase(
-        producer=producer, judge=judge, graphics=info.graphics
+        producer=producer, judge=judge, graphics=info.graphics,
+        prompt_override=prompt_override,
     )
 
     if kind == "enemy":
@@ -2465,18 +2517,23 @@ def animate_asset(
         actor_id = "player"
         sprite_path = player.sprite_path
         stored = (getattr(player, "animation", None) or {}).get("spec")
-        from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
-
-        subject = (
-            f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
-            f"bouncy platformer mascot, side view facing right."
-        )
+        subject = player_animation_subject()
         states = PLAYER_ANIMATION_STATES
         frames_max = PLAYER_ANIM_FRAMES_MAX
         asymmetric = bool(getattr(player, "asymmetric", False))
 
     if not sprite_path:
         raise FileNotFoundError(f"{target} has no base sprite — generate one first")
+    # --reuse-spec is only a licence to skip the VLM when there IS a spec to
+    # reuse. Without one the run falls through to authoring, and a judge-less
+    # author burns its full retry budget on `NoneType has no attribute judge`
+    # before reporting "motion spec never validated" — true, but it names the
+    # wrong cause. Say the real one, before anything is generated.
+    if reuse_spec and not stored and judge is None and not renormalize:
+        raise ValueError(
+            f"{target} has no stored motion spec to reuse — animate it once "
+            "with --vlm-backend first (or pass one now to author a spec)."
+        )
 
     before = provenance.snapshot_file(
         info.pack, info.pack / Path(sprite_path).parent / "frames.json"

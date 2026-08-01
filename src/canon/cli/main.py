@@ -1690,14 +1690,15 @@ def prompt_show(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
     kind: str = typer.Option(
         ..., "--kind",
-        help="layout | improve | enemy | item | sprite | music",
+        help="layout | improve | enemy | item | sprite | music | animate",
     ),
     level_id: str | None = typer.Option(
         None, "--level", help="Use this level's real data (layout/improve/music)."
     ),
     target: str | None = typer.Option(
         None, "--target",
-        help="Row id for enemy/item, or enemy:<id>|item:<id>|player for sprite.",
+        help="Row id for enemy/item, enemy:<id>|item:<id>|player for sprite, "
+        "or enemy:<id>|player for animate.",
     ),
     instruction: str = typer.Option(
         "", "--instruction", help="Preview an improve with this instruction."
@@ -1707,9 +1708,10 @@ def prompt_show(
     """Print the DEFAULT prompt a generator would send, WITHOUT generating.
 
     LLM kinds emit ``system`` (the editable standing instructions) plus the
-    ``user_message`` for context; image/audio kinds emit a single ``prompt``.
+    ``user_message`` for context; image/audio/vlm kinds emit a single ``prompt``.
     Feed an edited ``system`` back via --system-prompt on the gen verb (or
-    --prompt for sprite/music). Pure read: no LLM call, no cost, no journal."""
+    --prompt for sprite/music/animate). Pure read: no LLM call, no cost, no
+    journal."""
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
@@ -2081,6 +2083,15 @@ def asset_animate_cmd(
         "those were lost when each state was scaled to fill its own cell; "
         "re-animate for that.",
     ),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the motion-spec AUTHORING prompt for this call (see "
+        "`canon prompt show --kind animate`). Inert with --renormalize or a "
+        "--reuse-spec that finds a stored spec — neither authors.",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -2091,6 +2102,7 @@ def asset_animate_cmd(
     With --renormalize it instead repairs the existing frames in place (free)."""
     _load_env_file(env_file)
     ops = _pack_ops()
+    override = _prompt_text(prompt, prompt_file, "--prompt")
     try:
         result = ops.animate_asset(
             pack_dir, target,
@@ -2099,13 +2111,56 @@ def asset_animate_cmd(
             image_edit_backend=image_edit_backend,
             vlm_backend=vlm_backend, vlm_model=vlm_model,
             reuse_spec=reuse_spec, renormalize=renormalize,
-            actor=actor, session=session,
+            prompt_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)
     except Exception as e:
         _emit_error(f"asset animate failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("estimate")
+def asset_estimate_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(..., "--target", help="enemy:<id> | player"),
+    op: str = typer.Option(
+        "animate", "--op", help="animate (the only priced asset op today)."
+    ),
+    image_backend: str = typer.Option("fake", "--image-backend"),
+    vlm_backend: str = typer.Option("none", "--vlm-backend"),
+    vlm_model: str | None = typer.Option(None, "--vlm-model"),
+    reuse_spec: bool = typer.Option(
+        False, "--reuse-spec", help="Price the no-authoring path (no VLM call)."
+    ),
+) -> None:
+    """Forecast the cost of animating ONE actor, backend-aware (fake = $0).
+
+    Priced BY STATE: the animation phase issues one img2img edit per state per
+    facing, so the actor's real state set (a hopper adds `jump`; the player has
+    its own six) and its `asymmetric` flag drive the number — not the per-state
+    frame counts, which only widen each sheet. Run via `python -m canon.cli.main`
+    from the repo root (the estimator lives under examples.*)."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            op, pack_dir=pack_dir, target=target, vlm_model=vlm_model,
+            reuse_spec=reuse_spec,
+            backends={"image": image_backend, "vlm": vlm_backend},
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target, op=op)
+    except Exception as e:
+        _emit_error(f"asset estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
 
 
 @asset_app.command("replace")

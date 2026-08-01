@@ -754,10 +754,23 @@ class SpriteAnimationPhase:
         producer: Any = None,
         judge: Any = None,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        prompt_override: str | None = None,
     ) -> None:
         self.producer = producer
         self.judge = judge
         self.graphics = graphics
+        # Per-call AUTHORING-prompt override ("✎ edit prompt"), the exact
+        # analogue of SpriteArtPhase.prompt_override: only the single-actor
+        # `animate_asset` op sets it, so it can't bleed onto siblings. None =
+        # today's built prompt, byte-for-byte.
+        #
+        # This is the motion-SPEC prompt (one VLM call per actor). The per-state
+        # img2img SHEET prompt is deliberately NOT overridable: it runs 6-12x
+        # per animate (once per state per facing) and each call carries that
+        # state's own silhouette contract from _STATE_BRIEF — one textarea can
+        # neither represent the set nor edit one member, and a single shared
+        # override would flatten `jump`/`fall`/`land`/`skid` into the same pose.
+        self.prompt_override = prompt_override
 
     def owns(self, ctx: Any) -> list[str]:
         # Same ids as SpriteArtPhase — a re-rolled sprite re-rolls its
@@ -777,6 +790,7 @@ class SpriteAnimationPhase:
             PLAYER_ANIMATION_STATES,
             enemy_animation_states,
             enemy_animation_subject,
+            player_animation_subject,
         )
 
         # The ANIMATION img2img backend may differ from the sprite backend
@@ -821,12 +835,8 @@ class SpriteAnimationPhase:
         # its own state set — it jumps and never plays a death cycle.
         player = getattr(ctx.bible, "player", None)
         if player is not None and "player" not in pinned:
-            subject = (
-                f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
-                f"bouncy platformer mascot, side view facing right."
-            )
             manifest = self._animate_one(
-                ctx, "player", player.sprite_path, subject,
+                ctx, "player", player.sprite_path, player_animation_subject(),
                 PLAYER_ANIMATION_STATES, PLAYER_ANIM_FRAMES_MAX,
                 asymmetric=player.asymmetric,
             )
@@ -862,6 +872,7 @@ class SpriteAnimationPhase:
         spec = author_animation_spec(
             self.judge, actor_id, subject, base_file.read_bytes(),
             states=states, frames_max=frames_max,
+            prompt_override=self.prompt_override,
         )
         if spec is None:
             warn(

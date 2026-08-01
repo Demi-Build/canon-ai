@@ -938,6 +938,21 @@ def enemy_animation_subject(enemy: Any) -> str:
     )
 
 
+def player_animation_subject() -> str:
+    """The PLAYER's description block for :func:`animate_prompt` — the mascot
+    analogue of :func:`enemy_animation_subject`.
+
+    The phase, the single-actor op and the prompt preview all animate the same
+    hero, so the text lives here once: a preview that drifted from the string
+    the run actually sends would stop being a preview."""
+    from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+
+    return (
+        f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
+        f"bouncy platformer mascot, side view facing right."
+    )
+
+
 def enemy_animation_states(enemy: Any) -> tuple[str, ...]:
     """The state set ONE enemy authors/generates: the base vocabulary, plus
     ``jump`` for a hopper (both surfaces track its airborne arc via
@@ -1047,6 +1062,7 @@ def author_animation_spec(
     states: tuple[str, ...] = ANIMATION_STATES,
     frames_max: int = ANIM_FRAMES_MAX,
     max_retries: int = 3,
+    prompt_override: str | None = None,
 ) -> dict | None:
     """Run the VLM to author a per-state motion spec for one actor (enemy or
     player) from its ACTUAL sprite. Mirrors :meth:`VlmQaPhase._judge_level`'s
@@ -1054,8 +1070,17 @@ def author_animation_spec(
 
     Returns the sanitized spec (persist it as the actor's animation manifest),
     or ``None`` when the verdict never validates — the caller then keeps the
-    static sprite (the loud-fallback contract)."""
-    prompt = animate_prompt(actor_id, subject, states, frames_max)
+    static sprite (the loud-fallback contract).
+
+    ``prompt_override`` replaces the authoring prompt for THIS call (cradle's
+    "✎ Edit prompt" / `canon asset animate --prompt`) — the same per-call
+    override contract SpriteArtPhase gives the image prompt. The retry
+    feedback still appends to whatever text is used, and the response is
+    validated against the SAME state/frame contract either way: an override
+    edits the instructions, it does not widen what the spec may contain."""
+    prompt = prompt_override or animate_prompt(
+        actor_id, subject, states, frames_max
+    )
 
     def generate(feedback: list[str] | None = None) -> str:
         text = prompt

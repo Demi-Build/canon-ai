@@ -75,6 +75,16 @@ def _pricing_for(model: str, what: str, warnings: list[str]) -> dict:
     return pricing
 
 
+def _vlm_pricing(model: str | None, warnings: list[str]) -> tuple[str, dict]:
+    """The VLM judge's model + its PRICING row. The judge's model is NOT
+    table-driven (models.json covers the LLM agents): it comes from an explicit
+    --vlm-model, else CANON_PLAT_VLM_MODEL, else the backend default. Shared by
+    the whole-run forecast and the per-op animate scope so both price the model
+    the run will actually call."""
+    vlm_model = model or os.environ.get("CANON_PLAT_VLM_MODEL") or DEFAULT_MODEL
+    return vlm_model, _pricing_for(vlm_model, "VLM judge", warnings)
+
+
 def _actuals_by_task(output_dir: Path) -> dict[str, dict]:
     """Per-task-prefix token averages from a real tree's
     generation_stats.json (Chunk-1 wiring) — measured beats guessed."""
@@ -222,10 +232,7 @@ def _price_assets(
     vlm_best_usd = vlm_worst_usd = 0.0
     vlm_detail: dict[str, Any] = {}
     if "plat:vlm_qa" in node_ids and num_levels:
-        vlm_model = (
-            os.environ.get("CANON_PLAT_VLM_MODEL") or DEFAULT_MODEL
-        )
-        pricing = _pricing_for(vlm_model, "VLM judge", warnings)
+        vlm_model, pricing = _vlm_pricing(None, warnings)
         tokens = cost_model.get(
             "vlm_per_level", {"input_tokens": 2500, "output_tokens": 400}
         )
@@ -448,6 +455,48 @@ def _synthetic_op_bible(level_id: str, width: int, axis: str) -> Any:
     )
 
 
+def _animate_shape(
+    pack_dir: str | Path, target: str, reuse_spec: bool
+) -> tuple[list[str], int, bool]:
+    """``(states, facings, authors)`` for ONE animate op.
+
+    Resolved through the SAME helpers ``ops.animate_asset`` runs on
+    (``enemy_animation_states`` / ``PLAYER_ANIMATION_STATES`` / the stored
+    spec), so the priced shape cannot drift from the executed one — a hopper's
+    extra ``jump`` state is a real extra image, and pricing it from a fixed
+    state list would miss that.
+
+    ``facings`` is 2 for an ``asymmetric`` actor: that flag makes
+    ``_animate_actor`` run the whole per-state sheet loop a second time off the
+    mirrored base. The PLAYER is always (1 facing, authors) because it has no
+    persisted row — ``ops._sprite_bible`` rebuilds its definition fresh every
+    call, so neither an ``asymmetric`` flag nor a stored spec can reach the op.
+    """
+    from examples.platformer_pack.ops import _load_defs, _parse_target, load_pack
+    from examples.platformer_pack.vlm_qa import (
+        PLAYER_ANIMATION_STATES,
+        enemy_animation_states,
+    )
+
+    kind, rest = _parse_target(target)
+    if kind not in ("enemy", "player"):
+        raise ValueError("animate targets: enemy:<id> | player")
+    info = load_pack(pack_dir)
+    if kind == "player":
+        return list(PLAYER_ANIMATION_STATES), 1, True
+
+    defs = _load_defs(info.pack, "enemy")
+    if rest not in defs:
+        raise FileNotFoundError(f"enemy {rest!r} not found")
+    enemy = defs[rest]
+    facings = 2 if bool(getattr(enemy, "asymmetric", False)) else 1
+    stored = ((enemy.stats or {}).get("animation") or {}).get("spec") or {}
+    if reuse_spec and stored:
+        # The reuse path iterates the STORED spec's keys, not the vocabulary.
+        return sorted(stored), facings, False
+    return list(enemy_animation_states(enemy)), facings, True
+
+
 def estimate_cradle(
     scope: str,
     *,
@@ -457,13 +506,18 @@ def estimate_cradle(
     level_id: str | None = None,
     width: int | None = None,
     axis: str | None = None,
+    target: str | None = None,
+    vlm_model: str | None = None,
+    reuse_spec: bool = False,
 ) -> dict:
     """Price ONE cradle op, backend- and count-aware.
 
     ``scope="world"`` prices a fresh full run at the requested ``counts``
     (stages/levels/enemies/items) — the New Project surface. The per-op scopes
     (``generate`` / ``layout`` / ``enemies`` / ``items``) price the LLM steps a
-    single level op runs against an existing ``pack_dir``/``level_id``. In every
+    single level op runs against an existing ``pack_dir``/``level_id``.
+    ``music`` prices one track; ``animate`` prices one actor's animation from
+    ``pack_dir`` + ``target`` (+ ``reuse_spec`` / ``vlm_model``). In every
     case the returned USD reflects the chosen ``backends`` ($0 for fake/none).
     Same output schema as estimate_run plus ``scope`` + echoed ``backends``.
     """
@@ -511,10 +565,54 @@ def estimate_cradle(
         assets["music"] = {
             "count": 1, "usd": round(float(a.get("music_usd_per_track", 0.10)), 4)
         }
+    elif scope == "animate":
+        # ONE actor's animation, priced BY STATE — art_phases._sheet_frames
+        # issues exactly one ImageEditBackend.edit() per state per facing, and
+        # the per-state FRAME COUNT never adds a call: frames only widen that
+        # state's reference sheet (build_sheet_reference) inside the same edit.
+        # Pricing frames instead (states x ~4 frames) overcharges ~4x.
+        #
+        # Plus the ONE VLM call that authors the motion spec — skipped when
+        # --reuse-spec finds a stored spec, which is the whole point of the flag.
+        if not pack_dir or not target:
+            raise ValueError("scope 'animate' needs pack_dir + target")
+        states, facings, authors = _animate_shape(pack_dir, target, reuse_spec)
+        a = cost_model.get("assets", {})
+        edits = len(states) * facings
+        llm = {"by_task": {}, "calls": 0.0, "usd": {"best": 0.0, "worst": 0.0}}
+        assets = _empty_assets()
+        assets["images"] = {
+            "count": edits,
+            "usd": round(edits * float(a.get("image_usd_per_call", 0.04)), 4),
+        }
+        if authors:
+            model, pricing = _vlm_pricing(vlm_model, warnings)
+            tok = cost_model.get(
+                "vlm_per_actor", {"input_tokens": 1200, "output_tokens": 300}
+            )
+            usd = round(
+                tok["input_tokens"] * pricing["input"]
+                + tok["output_tokens"] * pricing["output"],
+                4,
+            )
+            assets["vlm"] = {
+                "model": model,
+                "animation_authoring": 1,
+                "usd": {"best": usd, "worst": usd},
+            }
+        # Not silently absorbed into the number above: on a backend without
+        # `trusted_alpha`, a state whose sheet drifts from the base sprite
+        # retries its edit ONCE (_sheet_frames), so a bad run can bill up to
+        # 2x the image count. Priced at the no-drift shape, said out loud.
+        warnings.append(
+            f"animate prices {edits} edit(s) ({len(states)} state(s) x "
+            f"{facings} facing(s)); a sprite-drift retry can add up to one "
+            f"extra edit per state."
+        )
     else:
         raise ValueError(
             f"unknown estimate scope {scope!r} "
-            f"(world|music|{'|'.join(_OP_STEPS)})"
+            f"(world|music|animate|{'|'.join(_OP_STEPS)})"
         )
 
     _apply_backend_mask(llm, assets, backends)
