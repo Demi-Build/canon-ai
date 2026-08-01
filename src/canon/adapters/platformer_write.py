@@ -255,11 +255,17 @@ def baseline_level(
     *,
     actor: str = "cradle",
     session: str | None = None,
+    op: str = "generate",
+    detail: dict | None = None,
 ) -> dict:
-    """Record ``generate`` events for a level's as-generated step artifacts.
+    """Record step-artifact events for a level's as-generated files.
 
-    Called when cradle imports a fresh generation. Idempotent — a step already
-    in the journal at its current hash is skipped, so re-opening a level is safe.
+    Called when cradle imports a fresh generation (``op="generate"``, the
+    default) or after a context-aware improve (``op="regenerate"``). Idempotent
+    — a step already in the journal at its current hash is skipped, so
+    re-opening a level is safe. ``detail`` (e.g. ``{"kind": "improve"}``) rides
+    each recorded event so consumers can tell WHICH generation op produced the
+    change (generate / improve / regenerate / place_enemies / place_items).
     """
     pack = Path(pack_dir)
     level_dir, stage_id = _find_level_dir(pack, level_id)
@@ -275,10 +281,11 @@ def baseline_level(
         provenance.record(
             pack,
             artifact_id=aid,
-            op="generate",
+            op=op,
             source="llm",
             actor=actor,
             session=session,
+            detail=detail,
             after_hash=after_hash,
         )
         recorded.append(step)

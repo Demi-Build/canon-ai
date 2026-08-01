@@ -17,9 +17,94 @@ Nothing here mutates the pack; it is a pure projection of on-disk state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+# The on-disk files whose bytes together define a level's current STATE. A
+# change to any of them is a change to the level (terrain, placements, spawn/
+# exit/music in level.json, the sparse layers). Ordered so the composite
+# revision hash is stable.
+_LEVEL_STATE_FILES = (
+    "collision.npz", "terrain.npz", "background.npz",
+    "hazards.json", "triggers.json", "foreground.json",
+    "entities.json", "items.json", "level.json",
+)
+
+# How a level last changed → a human label, keyed by the journal event's
+# detail.kind (falls back to the op). Covers every mutation path: generation
+# ops (kinds stamped by baseline_level), hand edits (apply_level_edit /
+# import_level_grids), and library/restore ops.
+_CHANGE_LABELS = {
+    "generate": "Generated",
+    "improve": "Improved",
+    "regenerate": "Regenerated layout",
+    "place_enemies": "Placed enemies",
+    "place_items": "Placed items",
+    "terrain_paint": "Hand-painted terrain",
+    "enemy_move": "Moved an enemy",
+    "item_move": "Moved an item",
+    "level_edit": "Saved edit",
+    "hazards_change": "Edited hazards",
+    "triggers_change": "Edited triggers",
+    "foreground_change": "Edited foreground",
+}
+
+
+def level_revision(level_dir: str | Path) -> dict:
+    """A content identifier for a level's CURRENT state — a composite SHA over
+    its on-disk state files. Two byte-identical levels share it; any generation,
+    improvement, or hand edit that changes bytes changes it (a no-op that writes
+    identical bytes does not). Pure read — no CAS side effects (unlike
+    ``provenance.snapshot_file``).
+
+    Returns ``{"revision": "sha256:<hex>", "short": "<10 hex>"}``.
+    """
+    d = Path(level_dir)
+    h = hashlib.sha256()
+    for name in _LEVEL_STATE_FILES:
+        p = d / name
+        if not p.is_file():
+            continue
+        h.update(name.encode("utf-8"))
+        h.update(hashlib.sha256(p.read_bytes()).hexdigest().encode("ascii"))
+        h.update(b"\n")
+    digest = h.hexdigest()
+    return {"revision": f"sha256:{digest}", "short": digest[:10]}
+
+
+def level_last_change(pack_dir: str | Path, stage_id: str, level_id: str) -> dict | None:
+    """The most recent journaled change to this level, for the "how it last
+    changed" chip: ``{op, source, kind, actor, ts, hash, label}`` (or None if the
+    level has no journal history). Reads the provenance journal — the single
+    source of truth across generation, improvement, hand-paint and save. The
+    journal is append-ordered, so the last event touching this level is the last
+    write (for a multi-step action like improve+reroll that's its final sub-step)."""
+    from canon import provenance
+
+    prefix = f"level:{stage_id}/{level_id}/"
+    best_event: dict | None = None
+    for e in provenance.all_events(pack_dir):
+        if str(e.get("artifact_id", "")).startswith(prefix):
+            best_event = e  # keep the LAST match (append order = latest write)
+    if best_event is None:
+        return None
+    op = str(best_event.get("op", ""))
+    kind = str((best_event.get("detail") or {}).get("kind", "") or "")
+    label = _CHANGE_LABELS.get(kind) or _CHANGE_LABELS.get(op) or (
+        {"create": "Created", "restore": "Restored", "edit": "Saved edit"}.get(op)
+        or (op.capitalize() if op else "Changed")
+    )
+    return {
+        "op": op,
+        "source": str(best_event.get("source", "")),
+        "kind": kind,
+        "actor": str(best_event.get("actor", "")),
+        "ts": str(best_event.get("ts", "")),
+        "hash": str(best_event.get("after_hash", "") or ""),
+        "label": label,
+    }
 
 
 def load_grid(path: str | Path) -> list[list[int]]:
@@ -186,10 +271,16 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         }
         for s in (level.get("music_sections") or [])
     ]
+    rev = level_revision(level_dir)
     return {
         "level_id": level_id,
         "stage_id": stage_id,
         "display_name": _display_name(manifest, level_id),
+        # Content identity of the CURRENT state (changes on every real edit /
+        # generation) + how it last changed (from the provenance journal).
+        "revision": rev["revision"],
+        "revision_short": rev["short"],
+        "last_change": level_last_change(pack, stage_id, level_id),
         "grid_width": level.get("grid_width"),
         "grid_height": level.get("grid_height"),
         "spawn": level.get("spawn"),

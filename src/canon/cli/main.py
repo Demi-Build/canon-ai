@@ -1425,6 +1425,42 @@ def level_regenerate(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@level_app.command("improve")
+def level_improve(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Existing level to improve in place."),
+    instruction: str = typer.Option(..., "--instruction", help="What to change (the LLM sees the current level)."),
+    fix_problems: bool = typer.Option(False, "--fix-problems", help="Also feed the level's validation problems to the LLM."),
+    reroll_placements: bool = typer.Option(False, "--reroll-placements", help="Re-roll enemies/items onto the improved terrain (default: keep)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """CONTEXT-AWARE improve: the layout LLM SEES the current level + your
+    instruction and re-authors it in place (keeps dims/axis). Unlike
+    `regenerate` this is not blind and does NOT clear placements (kept by
+    default; --reroll-placements re-adapts them). Journals op=regenerate."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.improve_terrain(
+            pack_dir, level_id=level_id, instruction=instruction,
+            fix_problems=fix_problems, reroll_placements=reroll_placements,
+            backend=llm_backend, model=llm_model, seed=seed,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level improve failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 @level_app.command("publish")
 def level_publish(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
@@ -1630,6 +1666,54 @@ def spend_list(
     except Exception as e:
         _emit_error(f"spend list failed: {e}", traceback=traceback.format_exc())
     _emit({"result": "spend_list", "spend": summary})  # type: ignore[possibly-unbound]
+
+
+jobs_app = typer.Typer(help="Per-project job ledger (background generation runs).")
+app.add_typer(jobs_app, name="jobs")
+
+
+@jobs_app.command("record")
+def jobs_record(
+    pack_dir: Path = typer.Argument(..., help="Pack root the job belongs to."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Job entry, e.g. {"job_id":"ab12","op":"improve","target":"l1",'
+        '"status":"ok","changed":true,"duration_ms":8200}.',
+    ),
+) -> None:
+    """Append one background-job entry to <pack>/.canon/jobs.jsonl. Cradle's
+    worker calls this on job completion (it never writes pack files itself)."""
+    from canon.jobs import record_job
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        entry = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(entry, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        stored = record_job(pack_dir, entry)  # type: ignore[arg-type]
+    except Exception as e:
+        _emit_error(f"jobs record failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "jobs_record", "entry": stored})  # type: ignore[possibly-unbound]
+
+
+@jobs_app.command("list")
+def jobs_list(
+    pack_dir: Path = typer.Argument(..., help="Pack root to summarize."),
+) -> None:
+    """Emit the pack's job ledger + a roll-up (count, per-op, per-status)."""
+    from canon.jobs import summarize
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        summary = summarize(pack_dir)
+    except Exception as e:
+        _emit_error(f"jobs list failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "jobs_list", "jobs": summary})  # type: ignore[possibly-unbound]
 
 
 db_app = typer.Typer(help="Generic database rows: create / LLM-complete (anchored).")

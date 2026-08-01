@@ -779,6 +779,72 @@ class PlatformerPrompts:
             max_tokens=512,
         )
 
+    def improve_layout(
+        self,
+        level_id: str,
+        brief: str,
+        knobs: dict,
+        width: int,
+        height: int,
+        movement: PlayerMovementSpec,
+        rules: GameRules = DEFAULT_RULES,
+        tiles: TileRegistry = DEFAULT_TILES,
+        *,
+        current_desc: str = "",
+        instruction: str = "",
+        problems: list[str] | None = None,
+        previous: str | None = None,
+        feedback: list[str] | None = None,
+    ) -> LLMRequest:
+        """Context-aware IMPROVE: the model SEES the current level (``current_desc``,
+        a describe_level_grid text) and applies the user's ``instruction`` (and any
+        ``problems`` to fix), re-emitting the FULL level as DSL — a positive-framing
+        re-author, not the 'rejected because' retry seam (that reads wrong for a
+        deliberate change). Retry feedback still rides ``previous``/``feedback``."""
+        volumes = tiles.named("volume")
+        ops, vocab_lines = self._ops_and_vocab(tiles, rules, height, width)
+        fix = ""
+        if problems:
+            fix = "\nAlso fix these problems:\n- " + "\n- ".join(problems) + "\n"
+        fb = self._layout_feedback(previous, feedback)
+        return LLMRequest(
+            system=_SYSTEM_LAYOUT,
+            user_message=(
+                "### TASK: improve layout\n"
+                f"### LEVEL: {level_id}\n"
+                f"Brief: {brief}\n"
+                f"Difficulty knobs (rolled, treat as targets): {json.dumps(knobs)}\n"
+                f"Grid: {width} wide x {height} tall; row 0 is the TOP; the "
+                f"ground floor row is {height - 2}; players stand one row above "
+                "the surface they walk on.\n"
+                "\nHERE IS THE CURRENT LEVEL (improve it, don't start over):\n"
+                f"{current_desc}\n"
+                f"\nAPPLY THIS CHANGE: {instruction}\n"
+                "Keep everything else about the level the same — preserve the "
+                "existing shape, spawn, exit, and features except where the "
+                "change requires otherwise.\n"
+                + fix
+                + _physics_guidance(movement)
+                + "\n".join(vocab_lines)
+                + f"\n{fb}\n"
+                "Re-emit the WHOLE improved level as DSL ops, one per line, "
+                "nothing else:\n"
+                + "  ".join(ops) + "\n"
+                "Rules: start from floor then carve; exactly one spawn() and one "
+                "exit(); place ONE checkpoint(x) on clear floor near the middle; "
+                "hazards need floor under them; volumes fill DOWN from their "
+                "surface row and need solid floor beneath"
+                + (
+                    "; every pool must be CONTAINED with wall() columns at both "
+                    "sides unless it reaches the level edge"
+                    if rules.water_containment == "contained" and volumes
+                    else ""
+                )
+                + "; keep the spawn, exit, and checkpoint columns clear."
+            ),
+            max_tokens=512,
+        )
+
     def section_layout(
         self,
         level_id: str,

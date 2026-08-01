@@ -576,6 +576,8 @@ def new_db_row(
         "row": entity.model_dump(mode="json"),
         "completed": complete,
         "warnings": _warnings(ctx),
+        "changed": after is not None,  # a brand-new row always wrote bytes
+        "changed_artifacts": [f"{entity_type}:{entity_id}"] if after is not None else [],
     }
 
 
@@ -670,11 +672,14 @@ def complete_db_row(
             ),
         },
     )
+    changed = after is not None and after != before
     return {
         "type": entity_type,
         "id": entity_id,
         "row": entity.model_dump(mode="json"),
         "warnings": _warnings(ctx),
+        "changed": changed,
+        "changed_artifacts": [f"{entity_type}:{entity_id}"] if changed else [],
     }
 
 
@@ -1423,14 +1428,35 @@ def _write_empty_placements(pack_dir: str | Path, level_id: str) -> None:
             p.write_text("[]")
 
 
+def _journal_cursor(pack_dir: str | Path) -> int:
+    """A cursor (event count) captured at op ENTRY, so a later ``_change_signal``
+    can diff only the events this op appended."""
+    return len(provenance.all_events(pack_dir))
+
+
+def _change_signal(pack_dir: str | Path, cursor: int) -> dict:
+    """Whether the op actually changed anything on disk — the job tray's 'did it
+    change?' indicator. Reads the provenance journal delta since ``cursor``: a
+    fresh event means real new bytes, because ``baseline_level`` is idempotent
+    (unchanged steps are skipped via ``already_recorded``) and ``apply_level_edit``/
+    ``import_level_grids`` suppress no-op writes. Returns the changed artifact ids
+    so the tray can say WHAT changed."""
+    delta = provenance.all_events(pack_dir)[cursor:]
+    arts = sorted({e.get("artifact_id", "") for e in delta if e.get("artifact_id")})
+    return {"changed": bool(arts), "changed_artifacts": arts}
+
+
 def _level_gen_result(
     pack_dir: str | Path, level_id: str, stage_id: str,
     seed: str, layout_fallback: bool, ctx: PipelineContext,
+    *, cursor: int | None = None,
 ) -> dict:
     """Uniform op return: the inline validation verdict (same validator the
-    play surfaces use) + provenance-relevant fields."""
+    play surfaces use) + provenance-relevant fields. When ``cursor`` (an op-entry
+    journal cursor) is given, also carries the ``changed``/``changed_artifacts``
+    signal for the job tray."""
     v = validate_level(pack_dir, level_id)
-    return {
+    result = {
         "level_id": level_id,
         "stage_id": stage_id,
         "ok": v["ok"],
@@ -1440,6 +1466,9 @@ def _level_gen_result(
         "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
     }
+    if cursor is not None:
+        result.update(_change_signal(pack_dir, cursor))
+    return result
 
 
 def _cost_block(ctx: PipelineContext) -> dict:
@@ -1512,6 +1541,7 @@ def generate_terrain(
         write_level_triggers,
     )
 
+    cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
     if stage_id not in ctx.bible.stages:
         raise ValueError(
@@ -1548,9 +1578,12 @@ def generate_terrain(
     write_level_triggers(ctx, level)
     write_level_manifest(ctx, level)
     _write_empty_placements(pack_dir, lid)
-    baseline_level(Path(pack_dir), lid, actor=actor, session=session)
+    baseline_level(
+        Path(pack_dir), lid, actor=actor, session=session,
+        detail={"kind": "generate"},
+    )
     return _level_gen_result(
-        pack_dir, lid, stage_id, eff_seed, level.layout_fallback, ctx
+        pack_dir, lid, stage_id, eff_seed, level.layout_fallback, ctx, cursor=cursor
     )
 
 
@@ -1571,6 +1604,7 @@ def place_enemies(
     from canon.adapters.platformer_write import baseline_level
     from examples.platformer_pack.level import place_level_entities
 
+    cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
     level, stage_id = _load_level_into_ctx(ctx, pack_dir, level_id)
     specs = _pack_specs(info)
@@ -1579,9 +1613,13 @@ def place_enemies(
         ctx, level, max_enemies=int(max_enemies), rules=specs.rules,
         tiles=specs.tiles, variants=specs.variants, combat=specs.combat,
     )
-    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
+    baseline_level(
+        Path(pack_dir), level_id, actor=actor, session=session,
+        detail={"kind": "place_enemies"},
+    )
     return _level_gen_result(
-        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx
+        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx,
+        cursor=cursor,
     )
 
 
@@ -1601,6 +1639,7 @@ def place_items(
     from canon.adapters.platformer_write import baseline_level
     from examples.platformer_pack.level import place_level_items
 
+    cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
     level, stage_id = _load_level_into_ctx(ctx, pack_dir, level_id)
     specs = _pack_specs(info)
@@ -1609,9 +1648,13 @@ def place_items(
         ctx, level, max_items=int(max_items), rules=specs.rules,
         tiles=specs.tiles, movement=specs.movement,
     )
-    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
+    baseline_level(
+        Path(pack_dir), level_id, actor=actor, session=session,
+        detail={"kind": "place_items"},
+    )
     return _level_gen_result(
-        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx
+        pack_dir, level_id, stage_id, ctx.config.seed, level.layout_fallback, ctx,
+        cursor=cursor,
     )
 
 
@@ -1635,6 +1678,7 @@ def generate_level(
     """Convenience: a WHOLE draft level — terrain, then enemies, then items —
     by chaining the composable ops. Shares one seed so a pinned seed fully
     reproduces the level."""
+    cursor = _journal_cursor(pack_dir)
     terrain = generate_terrain(
         pack_dir, stage_id=stage_id, brief=brief, backend=backend, model=model,
         difficulty=difficulty, width=width, height=height, axis=axis,
@@ -1655,6 +1699,9 @@ def generate_level(
     result["cost"] = _sum_costs(
         [terrain["cost"], enemies["cost"], result["cost"]]
     )
+    # The change signal spans the WHOLE chain (terrain + enemies + items), not
+    # just the final place-items step.
+    result.update(_change_signal(pack_dir, cursor))
     return result
 
 
@@ -1689,6 +1736,7 @@ def regenerate_terrain(
         write_level_triggers,
     )
 
+    cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
     level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
     prior = Level.model_validate(_read(level_dir / "level.json"))
@@ -1725,10 +1773,124 @@ def regenerate_terrain(
     # Placements were pinned to the OLD terrain — clear them (user re-runs 🎲).
     (level_dir / "entities.json").write_text("[]")
     (level_dir / "items.json").write_text("[]")
-    baseline_level(Path(pack_dir), level_id, actor=actor, session=session)
-    return _level_gen_result(
-        pack_dir, level_id, stage_id, eff_seed, level.layout_fallback, ctx
+    baseline_level(
+        Path(pack_dir), level_id, actor=actor, session=session,
+        detail={"kind": "regenerate"},
     )
+    return _level_gen_result(
+        pack_dir, level_id, stage_id, eff_seed, level.layout_fallback, ctx,
+        cursor=cursor,
+    )
+
+
+def improve_terrain(
+    pack_dir: str | Path,
+    *,
+    level_id: str,
+    instruction: str,
+    fix_problems: bool = False,
+    reroll_placements: bool = False,
+    backend: str = "fake",
+    model: str | None = None,
+    seed: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Context-aware IMPROVE: the layout LLM SEES the current level (its terrain
+    serialized to text) + a user ``instruction`` and re-authors it IN PLACE
+    (whole-level), keeping dims/axis. ``fix_problems`` also feeds the level's
+    current validation problems to the model. Placements are KEPT by default
+    (validate surfaces any that no longer fit) or re-rolled when
+    ``reroll_placements``. Journals op=regenerate."""
+    import numpy as np
+
+    from canon.adapters.platformer_write import _find_level_dir, baseline_level
+    from canon.bible.platformer import Level
+    from examples.platformer_pack.level import (
+        ImproveRequest,
+        describe_level_grid,
+        stamp_level_collision,
+        write_level_hazards,
+        write_level_manifest,
+        write_level_triggers,
+    )
+
+    cursor = _journal_cursor(pack_dir)
+    info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
+    prior = Level.model_validate(_read(level_dir / "level.json"))
+    specs = _pack_specs(info)
+
+    # Serialize the CURRENT level so the layout agent can see what it improves.
+    with np.load(level_dir / "collision.npz") as z:
+        grid = z["collision"]
+    current_desc = describe_level_grid(
+        grid, specs.tiles, prior.spawn, prior.exit, axis=prior.layout_axis,
+    )
+    problems: list[str] = []
+    if fix_problems:
+        v = validate_level(pack_dir, level_id)
+        problems = [
+            p
+            for c in v.get("checks", [])
+            if c.get("name") == "terrain"
+            for p in c.get("problems", [])
+        ]
+
+    eff_seed = _effective_seed(info, level_id, seed)
+    ctx.config.seed = eff_seed
+    stage = ctx.bible.stages[stage_id]
+    if level_id not in stage.level_ids:  # a draft isn't registered in its stage
+        stage.level_ids.append(level_id)
+    idx = stage.level_ids.index(level_id)
+    ctx.artifacts["level_briefs"][level_id] = prior.brief
+    # Improve keeps the current dims + axis (not a resize/redesign).
+    ctx.artifacts["level_overrides"][level_id] = {
+        "no_secret_rooms": True,
+        "grid_width": int(prior.grid_width),
+        "grid_height": int(prior.grid_height),
+        "axis": str(prior.layout_axis),
+    }
+
+    level = stamp_level_collision(
+        ctx, level_id, idx,
+        movement=specs.movement, rules=specs.rules, tiles=specs.tiles,
+        graphics=specs.graphics,
+        default_width=int(prior.grid_width),
+        default_height=int(prior.grid_height),
+        phase_name="plat:layout",
+        improve=ImproveRequest(current_desc, instruction, problems),
+    )
+    write_level_hazards(ctx, level)
+    write_level_triggers(ctx, level)
+    write_level_manifest(ctx, level)
+    # Journal the terrain change as an LLM regeneration (op=regenerate). NOTE:
+    # unlike regenerate_terrain, placements are NOT cleared — kept so the user's
+    # enemies/items survive (validate surfaces any that no longer fit).
+    baseline_level(
+        Path(pack_dir), level_id, actor=actor, session=session, op="regenerate",
+        detail={"kind": "improve"},
+    )
+    cost = _cost_block(ctx)
+    if reroll_placements:
+        # Re-adapt placements to the improved terrain (grid-driven place ops).
+        en = place_enemies(
+            pack_dir, level_id=level_id, backend=backend, model=model,
+            seed=eff_seed, actor=actor, session=session,
+        )
+        it = place_items(
+            pack_dir, level_id=level_id, backend=backend, model=model,
+            seed=eff_seed, actor=actor, session=session,
+        )
+        cost = _sum_costs([cost, en.get("cost", {}), it.get("cost", {})])
+    # _level_gen_result validates the FINAL on-disk level (post-placement).
+    result = _level_gen_result(
+        pack_dir, level_id, stage_id, eff_seed, level.layout_fallback, ctx,
+        cursor=cursor,
+    )
+    result["cost"] = cost
+    result["improved"] = True
+    return result
 
 
 def list_music_tracks(pack_dir: str | Path) -> dict:
@@ -1770,6 +1932,7 @@ def generate_level_music(
         build_music_producer,
     )
 
+    cursor = _journal_cursor(pack_dir)
     info = load_pack(pack_dir)
     music = build_music_producer(backend)
     if music is None:
@@ -1824,6 +1987,7 @@ def generate_level_music(
         "music_path": rel,
         "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
+        **_change_signal(pack_dir, cursor),
     }
 
 
@@ -1989,12 +2153,17 @@ def generate_asset(
         after_hash=after,
         gen=gen,
     )
+    # Asset ops ALWAYS journal (even a no-op reroll), so the change signal comes
+    # from the primary asset's before/after hash, not the journal delta.
+    changed = after is not None and after != before
     return {
         "target": target,
-        "generated": after is not None and after != before,
+        "generated": changed,
         "gen": gen,
         "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
+        "changed": changed,
+        "changed_artifacts": [target] if changed else [],
     }
 
 
@@ -2119,6 +2288,8 @@ def animate_asset(
         after_hash=after,
         gen=gen,
     )
+    # Like generate_asset, animate always journals — change = frames.json diff.
+    changed = after is not None and after != before
     return {
         "target": target,
         "animated": bool(manifest),
@@ -2126,4 +2297,6 @@ def animate_asset(
         "gen": gen,
         "cost": _cost_block(ctx),
         "warnings": _warnings(ctx),
+        "changed": changed,
+        "changed_artifacts": [target] if changed else [],
     }

@@ -805,6 +805,225 @@ def test_generate_level_honors_full_control_pins(pack: Path, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Context-aware IMPROVE: the layout LLM sees the current level + an instruction
+# and re-authors it in place, keeping dims/axis. The fake responder reacts to
+# "harder"/"easier" so the $0 path proves the improve is genuinely GUIDED.
+# ---------------------------------------------------------------------------
+
+
+def _improve_grid(pack: Path, level_id: str = "l1"):
+    import numpy as np
+
+    level_dir = next(pack.glob(f"level/*/{level_id}"))
+    with np.load(level_dir / "collision.npz") as z:
+        return z["collision"].copy()
+
+
+def test_improve_terrain_is_guided_and_preserves_dims(pack: Path, tmp_path):
+    """The same level improved 'harder' vs 'easier' yields DIFFERENT terrain
+    (the model saw the instruction), both at $0, with the grid dims/axis kept."""
+    import shutil
+
+    import numpy as np
+
+    orig = _improve_grid(pack)  # untouched module pack, read-only
+    ph = tmp_path / "harder"
+    pe = tmp_path / "easier"
+    shutil.copytree(pack, ph)
+    shutil.copytree(pack, pe)
+
+    rh = ops.improve_terrain(
+        ph, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    re_ = ops.improve_terrain(
+        pe, level_id="l1", instruction="make it easier", backend="fake",
+        seed="pin", actor="test",
+    )
+    gh, ge = _improve_grid(ph), _improve_grid(pe)
+
+    assert not np.array_equal(gh, ge), "instruction must steer the re-author"
+    assert rh["cost"]["usd"] == 0.0 and re_["cost"]["usd"] == 0.0  # fake = $0
+    assert rh["improved"] is True
+    # Improve keeps the current dims + axis (it refines, it doesn't resize).
+    assert gh.shape == ge.shape == orig.shape
+    prior_axis = json.loads(
+        next(ph.glob("level/*/l1/level.json")).read_text()
+    )["layout_axis"]
+    assert prior_axis == json.loads(
+        next(pack.glob("level/*/l1/level.json")).read_text()
+    )["layout_axis"]
+
+
+def test_improve_terrain_journals_regenerate_from_llm(pack: Path, tmp_path):
+    """Improve is an LLM iteration on an existing artifact — op=regenerate,
+    source=llm (distinct from generate/edit in the training taxonomy)."""
+    import shutil
+
+    p = tmp_path / "improve_journal"
+    shutil.copytree(pack, p)
+    ops.improve_terrain(
+        p, level_id="l1", instruction="add a bridge", backend="fake", actor="test"
+    )
+    regen = [
+        e for e in _journal(p)
+        if e.get("op") == "regenerate" and "/l1/" in e.get("artifact_id", "")
+    ]
+    assert regen, "improve must journal op=regenerate for the level"
+    assert all(e["source"] == "llm" for e in regen)
+
+
+def test_improve_terrain_placement_toggle(pack: Path, tmp_path):
+    """Keep (default) leaves entities/items.json BYTE-IDENTICAL so the user's
+    placements survive; reroll re-runs the grid-driven place steps (extra
+    calls) to re-adapt them to the improved terrain."""
+    import shutil
+
+    keep = tmp_path / "keep"
+    shutil.copytree(pack, keep)
+    ld = next(keep.glob("level/*/l1"))
+    ent_before = (ld / "entities.json").read_bytes()
+    itm_before = (ld / "items.json").read_bytes()
+    rk = ops.improve_terrain(
+        keep, level_id="l1", instruction="tweak", backend="fake",
+        reroll_placements=False, seed="pin", actor="test",
+    )
+    assert (ld / "entities.json").read_bytes() == ent_before
+    assert (ld / "items.json").read_bytes() == itm_before
+
+    reroll = tmp_path / "reroll"
+    shutil.copytree(pack, reroll)
+    rr = ops.improve_terrain(
+        reroll, level_id="l1", instruction="tweak", backend="fake",
+        reroll_placements=True, seed="pin", actor="test",
+    )
+    # Reroll folds the two extra place ops' calls into the cost block.
+    assert rr["cost"]["calls"] > rk["cost"]["calls"]
+    # ...and the re-derived placements are valid on the new grid.
+    assert isinstance(
+        json.loads((next(reroll.glob("level/*/l1")) / "entities.json").read_text()),
+        list,
+    )
+
+
+def test_improve_terrain_fix_problems_clears_a_terrain_problem(pack: Path, tmp_path):
+    """With fix_problems the level's current validation problems ride the
+    feedback list; the re-author + the standard repair tail (auto_bridge_grid
+    etc.) yields a playable level with the terrain problem gone."""
+    import shutil
+
+    import numpy as np
+
+    p = tmp_path / "improve_fix"
+    shutil.copytree(pack, p)
+    ld = next(p.glob("level/*/l1"))
+    with np.load(ld / "collision.npz") as z:
+        g = z["collision"].copy()
+    h, w = g.shape
+    g[:, w // 4:(3 * w) // 4] = 0  # punch a wide chasm → a terrain problem
+    np.savez_compressed(ld / "collision.npz", collision=g)
+
+    before = [
+        c for c in ops.validate_level(p, "l1")["checks"] if c["name"] == "terrain"
+    ][0]["problems"]
+    assert before, "the damaged grid must report a terrain problem first"
+
+    r = ops.improve_terrain(
+        p, level_id="l1", instruction="repair the level", fix_problems=True,
+        reroll_placements=True, backend="fake", seed="pin", actor="test",
+    )
+    after = [
+        c for c in ops.validate_level(p, "l1")["checks"] if c["name"] == "terrain"
+    ][0]["problems"]
+    assert r["ok"] is True
+    assert after == []
+
+
+def test_improve_terrain_pinned_seed_is_deterministic(pack: Path, tmp_path):
+    """A pinned seed + the same instruction reproduces the level byte-for-byte
+    (terrain and re-rolled placements) — reproducible for A/B and fixtures."""
+    import shutil
+
+    import numpy as np
+
+    a = tmp_path / "det_a"
+    b = tmp_path / "det_b"
+    shutil.copytree(pack, a)
+    shutil.copytree(pack, b)
+    kw = dict(
+        level_id="l1", instruction="make it harder", backend="fake",
+        seed="fixed-seed", reroll_placements=True, actor="test",
+    )
+    ops.improve_terrain(a, **kw)
+    ops.improve_terrain(b, **kw)
+    assert np.array_equal(_improve_grid(a), _improve_grid(b))
+    ea = (next(a.glob("level/*/l1")) / "entities.json").read_bytes()
+    eb = (next(b.glob("level/*/l1")) / "entities.json").read_bytes()
+    assert ea == eb
+
+
+def test_level_revision_and_last_change(pack: Path, tmp_path):
+    """The export bundle carries a content REVISION (composite hash) that changes
+    on every real edit but not on a byte-identical no-op, plus a LAST_CHANGE
+    label naming how it last changed (generate → improve)."""
+    import shutil
+
+    from canon.adapters.platformer_read import export_level_bundle
+    from canon.adapters.platformer_write import baseline_level
+
+    p = tmp_path / "revpack"
+    shutil.copytree(pack, p)
+    baseline_level(p, "l1", actor="test", detail={"kind": "generate"})
+
+    b0 = export_level_bundle(p, "l1")
+    assert b0["revision"].startswith("sha256:")
+    assert len(b0["revision_short"]) == 10
+    assert b0["last_change"]["label"] == "Generated"
+
+    ops.improve_terrain(
+        p, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    b1 = export_level_bundle(p, "l1")
+    assert b1["revision"] != b0["revision"]  # terrain changed → new identity
+    assert b1["last_change"]["label"] == "Improved"
+    assert b1["last_change"]["op"] == "regenerate"
+
+    # A byte-identical re-improve is a no-op → the revision is stable.
+    ops.improve_terrain(
+        p, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    b2 = export_level_bundle(p, "l1")
+    assert b2["revision"] == b1["revision"]
+
+
+def test_improve_terrain_change_signal(pack: Path, tmp_path):
+    """The op reports whether it actually changed anything (the job tray's 'did
+    it change?' indicator): a real improve → changed=True with the touched
+    artifacts; a byte-identical re-run → changed=False (baseline is idempotent,
+    so no new journal event)."""
+    import shutil
+
+    p = tmp_path / "improve_change"
+    shutil.copytree(pack, p)
+    r1 = ops.improve_terrain(
+        p, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    assert r1["changed"] is True
+    assert any("collision" in a for a in r1["changed_artifacts"])
+
+    # Re-authoring the exact same thing writes byte-identical files → no change.
+    r2 = ops.improve_terrain(
+        p, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    assert r2["changed"] is False
+    assert r2["changed_artifacts"] == []
+
+
+# ---------------------------------------------------------------------------
 # Cost: pre-run estimate (backend/count aware), true per-op actuals, ledger.
 # ---------------------------------------------------------------------------
 

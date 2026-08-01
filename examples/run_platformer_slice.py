@@ -737,6 +737,26 @@ def make_fake_responder():
                     }
                 }
             )
+        if task == "improve":
+            # Context-aware improve ($0, deterministic): re-author the WHOLE
+            # level and VARY on the instruction so tests can show it's guided.
+            # "harder" → a pit + hazard volumes; "easier" → a flat runway.
+            vol_match = re.search(r"Volume tiles for volume\(\): (\w+)", msg)
+            haz_match = re.search(
+                r"Hazard tiles for hazard_strip\(\): ([^\n(]+)", msg
+            )
+            grid_match = re.search(r"Grid: (\d+) wide x (\d+) tall", msg)
+            width, height = (
+                (int(grid_match.group(1)), int(grid_match.group(2)))
+                if grid_match
+                else (48, 16)
+            )
+            vol = vol_match.group(1) if vol_match else "water"
+            haz = (haz_match.group(1) if haz_match else "spike").split(",")[0].strip()
+            instr_match = re.search(r"APPLY THIS CHANGE: (.+)", msg)
+            instr = (instr_match.group(1) if instr_match else "").lower()
+            diff = 3 if "harder" in instr else (1 if "easier" in instr else 2)
+            return _fake_layout(width, height, vol=vol, haz=haz, difficulty=diff)
         if task == "layout":
             # The prompt advertises the game's registry vocabulary AND the
             # rolled grid — parse both, so the same canned generator plays
