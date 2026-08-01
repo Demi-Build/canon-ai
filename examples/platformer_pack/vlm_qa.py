@@ -1189,6 +1189,7 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
     checks: list[dict] = []
     target = actor_id
     masks: dict[str, list] = {}
+    spans: dict[str, tuple[int, int]] = {}  # state -> (max content extent, cell)
     states = animation.get("states") or {}
     for state, meta in sorted(states.items()):
         rel = str(meta.get("path", ""))
@@ -1215,6 +1216,16 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
             continue
         crops = [img.crop((i * fw, 0, (i + 1) * fw, img.height)) for i in range(n)]
         masks[state] = _silhouette_mask(crops)
+        # Widest content extent in this state — fed to the cross-state scale
+        # check below (every other check here is per state, which is exactly
+        # why the per-state sizing bug shipped unseen).
+        extents = [
+            max(b[2] - b[0], b[3] - b[1])
+            for c in crops
+            if (b := c.getchannel("A").getbbox())
+        ]
+        if extents:
+            spans[state] = (max(extents), fw)
         blank = []
         for i, frame in enumerate(crops):
             alpha = list(frame.getchannel("A").get_flattened_data())
@@ -1246,6 +1257,33 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
                     " — measured upstream of the normalize re-anchor"
                 ),
             })
+    # CROSS-STATE SCALE: the actor must be ONE size across its states. Frames
+    # are seated in a square sized from the whole actor, so at most the single
+    # LARGEST pose can reach the cell edge; every other state is strictly
+    # smaller. Several states each filling the cell means each was sized from
+    # its own crops — the character then changes size the moment its state
+    # changes (a wide idle and a tall jump both stretched to fill). Every other
+    # check here is per state and structurally cannot see this.
+    filled = sorted(
+        state for state, (extent, cell) in spans.items() if extent >= cell - 1
+    )
+    if len(spans) > 1:
+        checks.append({
+            "check": "animation_scale", "target": target, "subject": "states",
+            "passed": len(filled) <= 1,
+            "detail": (
+                f"{len(spans)} state(s) share one frame square; "
+                + (
+                    f"only {filled[0]!r} reaches the cell edge"
+                    if len(filled) == 1
+                    else "none reaches the cell edge"
+                    if not filled
+                    else f"{len(filled)} states each fill the cell "
+                    f"({', '.join(filled)}) — they were sized independently, "
+                    "so the actor changes size between states"
+                )
+            ),
+        })
     # Sibling-state silhouette near-dupes (ticket 8): transient states can
     # render as the same pose. Only NEAR-DUPE pairs are recorded (a distinct
     # set adds nothing → byte-clean), and each is advisory — it warns but

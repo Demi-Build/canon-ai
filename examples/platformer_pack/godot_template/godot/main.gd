@@ -60,7 +60,7 @@ var level_ids: Array
 var level_index := 0
 
 # --- world flow: (SPLASH ->) MAP -> START -> PLAYING -> END -> MAP ---
-enum GameState { MAP, START, PLAYING, END, SPLASH }
+enum GameState { MAP, START, PLAYING, END, SPLASH, ANIM_PREVIEW }
 var game_state: int = GameState.MAP
 var map_root: CanvasLayer
 var overlay_root: CanvasLayer
@@ -77,6 +77,14 @@ const SPLASH_FADE_S := 0.6
 var splash_root: CanvasLayer
 var splash_view: Node2D  # modulated for the fade (CanvasLayer can't be)
 var splash_t := 0.0  # counts down HOLD + FADE
+# ANIMATION VIEWER (PLAT_ANIM=<enemy:id|item:id|player>): every state of one
+# actor playing side by side instead of a level, so a sprite can be judged in
+# the surface that renders the game. Mirrors examples/platformer_play.py's
+# run_anim_preview; reuses _load_anim + _anim_index, so what it shows is what
+# the game selects. Like PLAT_LEVEL it returns from _ready before the splash.
+var anim_root: CanvasLayer
+var anim_t := 0.0
+var anim_cells: Array = []  # [{sprite, frames, durs, loop, label}]
 # Verification-only: PLAT_TRAJ=<path> dumps every enemy's world position +
 # alerted flag per PLAYING frame (the pygame harness dumps the same format),
 # so the two surfaces' movement can be diffed in world space independent of
@@ -310,6 +318,12 @@ func _ready() -> void:
 			var pair := token.split(":")
 			if pair.size() == 2:
 				_actions[int(pair[0])] = String(pair[1]).strip_edges()
+	# Animation viewer hook: PLAT_ANIM=<enemy:id|item:id|player> shows one
+	# actor's states instead of playing — no map, no level, no physics.
+	var env_anim := OS.get_environment("PLAT_ANIM")
+	if env_anim != "":
+		_enter_anim_preview(env_anim)
+		return
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
 	# DIRECTLY (no map, no start overlay — frame-capture runs verify any
 	# level without input).
@@ -399,6 +413,150 @@ func _dismiss_splash() -> void:
 		splash_root.queue_free()
 		splash_root = null
 		splash_view = null
+
+
+func _anim_preview_sprite_rel(target: String) -> String:
+	# PLAT_ANIM grammar, identical to platformer_play._anim_preview_targets:
+	# enemy:<id> | item:<id> | player.
+	if target == "player":
+		return "sprite/player/base.png"
+	var parts := target.split(":")
+	if parts.size() == 2 and (parts[0] == "enemy" or parts[0] == "item"):
+		return "sprite/%s/%s/base.png" % [parts[0], parts[1]]
+	return ""
+
+
+func _enter_anim_preview(target: String) -> void:
+	# One column per animation state, each on its own clock and loop mode, over
+	# the baseline the frames are bottom-anchored to. Frames come from
+	# _load_anim (atlas → strips → static ladder) and are selected by
+	# _anim_index, so this shows exactly what gameplay would show — the point
+	# is to judge the art, not to re-implement playback.
+	anim_root = CanvasLayer.new()
+	anim_root.layer = 30
+	add_child(anim_root)
+	var view := Node2D.new()
+	anim_root.add_child(view)
+	var vp := get_viewport_rect().size
+	var bg := ColorRect.new()
+	bg.color = Color(0.10, 0.086, 0.133)
+	bg.size = vp
+	view.add_child(bg)
+
+	var title := Label.new()
+	title.text = target
+	title.add_theme_font_size_override("font_size", 28)
+	title.position = Vector2(24.0, 16.0)
+	title.size = Vector2(vp.x, 40.0)
+	view.add_child(title)
+
+	var sprite_rel := _anim_preview_sprite_rel(target)
+	var anim := _load_anim(sprite_rel) if sprite_rel != "" else {}
+	var states: Array = []
+	if anim.has("states"):
+		states = (anim["states"] as Dictionary).keys()
+		states.sort()
+	anim_cells = []
+	if states.is_empty():
+		var miss := Label.new()
+		miss.text = (
+			"no animation for %s — 🎨 generate a sprite, then 🎬 animate" % target
+			if sprite_rel != "" else "unknown target %s" % target
+		)
+		miss.add_theme_font_size_override("font_size", 20)
+		miss.position = Vector2(24.0, 96.0)
+		miss.size = Vector2(vp.x, 40.0)
+		view.add_child(miss)
+	else:
+		# One cell per state, laid out across the viewport and centered.
+		var cell := minf(220.0, (vp.x - 48.0) / float(states.size()))
+		var box := cell - 16.0
+		var top := maxf(96.0, (vp.y - box) / 2.0 - 40.0)
+		var baseline := top + box
+		var left := (vp.x - cell * states.size()) / 2.0
+		for i in range(states.size()):
+			var state := String(states[i])
+			var frames: Array = (anim["states"] as Dictionary)[state]
+			if frames.is_empty():
+				continue
+			var x := left + i * cell
+			var pane := ColorRect.new()
+			pane.color = Color(0.157, 0.133, 0.204)
+			pane.position = Vector2(x, top)
+			pane.size = Vector2(box, box)
+			view.add_child(pane)
+			var floor_line := ColorRect.new()
+			floor_line.color = Color(0.337, 0.29, 0.408)
+			floor_line.position = Vector2(x, baseline)
+			floor_line.size = Vector2(box, 1.0)
+			view.add_child(floor_line)
+			# Zoom lives on a HOLDER, not on the Sprite2D. An atlas frame is an
+			# AtlasTexture that draws its trimmed region at a per-frame margin
+			# offset; scaling the sprite itself leaves that offset unscaled, so
+			# frames drift off the baseline (death sat ~70px high). A parent
+			# transform scales the offset and the region together. Scale comes
+			# from the NOMINAL square (CELL) — never a texture's reported size,
+			# which varies per frame — matching gameplay, where _actor_visual
+			# sets the scale ONCE from base.png and then swaps textures.
+			# Integer scale: pixel art shimmers at fractional zoom.
+			var s := maxf(1.0, floorf(box / CELL))
+			var holder := Node2D.new()
+			holder.scale = Vector2(s, s)
+			holder.position = Vector2(
+				x + (box - CELL * s) / 2.0, baseline - CELL * s
+			)
+			view.add_child(holder)
+			var sprite := Sprite2D.new()
+			sprite.centered = false
+			sprite.texture_filter = tile_filter
+			sprite.texture = frames[0]
+			holder.add_child(sprite)
+			var name_label := Label.new()
+			name_label.text = state
+			name_label.add_theme_font_size_override("font_size", 16)
+			name_label.position = Vector2(x, baseline + 8.0)
+			name_label.size = Vector2(cell, 22.0)
+			view.add_child(name_label)
+			var meta_label := Label.new()
+			meta_label.add_theme_font_size_override("font_size", 13)
+			meta_label.position = Vector2(x, baseline + 30.0)
+			meta_label.size = Vector2(cell, 20.0)
+			view.add_child(meta_label)
+			anim_cells.append({
+				"sprite": sprite,
+				"frames": frames,
+				"durs": (anim["durs"] as Dictionary).get(state, [0.12]),
+				"loop": String((anim["loops"] as Dictionary).get(state, "loop")),
+				"label": meta_label,
+				"state": state,
+			})
+
+	var help := Label.new()
+	help.text = "SPACE replay   ESC quit"
+	help.add_theme_font_size_override("font_size", 14)
+	help.position = Vector2(24.0, vp.y - 40.0)
+	help.size = Vector2(vp.x, 24.0)
+	view.add_child(help)
+	anim_t = 0.0
+	game_state = GameState.ANIM_PREVIEW
+	input_armed = false
+
+
+func _anim_preview_process(delta: float) -> void:
+	# SPACE rewinds every clock so the `once` states (jump/land/hurt/death),
+	# which hold their last frame by design, can be replayed.
+	if input_armed and Input.is_key_pressed(KEY_SPACE):
+		anim_t = 0.0
+		input_armed = false
+	anim_t += delta
+	for cell in anim_cells:
+		var frames: Array = cell["frames"]
+		var i := _anim_index(anim_t, cell["durs"], cell["loop"])
+		i = clampi(i, 0, frames.size() - 1)
+		(cell["sprite"] as Sprite2D).texture = frames[i]
+		(cell["label"] as Label).text = "%d/%d %s" % [
+			i + 1, frames.size(), cell["loop"]
+		]
 
 
 # ---------------------------------------------------------------------------
@@ -1640,23 +1798,39 @@ func _load_atlas_anim(base_dir: String) -> Dictionary:
 
 
 func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int) -> Array:
-	# AtlasTexture margin re-inflates a trimmed crop: the reported size
-	# becomes the untrimmed frame square, so scale/anchor math holds.
+	# Reconstitute each UNTRIMMED frame: blit the trimmed crop at its (ox, oy)
+	# offset onto a transparent fw x fh square. Byte-for-byte the same
+	# construction as platformer_play._atlas_frames, which is the point — both
+	# surfaces must register frames identically.
+	#
+	# This REPLACED an AtlasTexture-with-margin approach that was meant to
+	# re-inflate the crop to the full square. Measured: the vertical margin was
+	# not applied, so any frame whose content did not touch the top of its
+	# square drew exactly oy pixels too high — ember_hopper's `death` sat 12px
+	# (of 32) high, and an actor visibly hopped between poses. pygame, which
+	# always built real squares, disagreed. Real squares here too: costs a
+	# little texture memory at 32px, removes a whole class of drift.
 	var texs: Array = []
 	if typeof(rects) != TYPE_ARRAY:
+		return texs
+	var sheet_image := sheet.get_image()
+	if sheet_image == null:
 		return texs
 	for r in rects:
 		if typeof(r) != TYPE_DICTIONARY:
 			return []
 		var w := int(r.get("w", 0))
 		var h := int(r.get("h", 0))
-		var ox := int(r.get("ox", 0))
-		var oy := int(r.get("oy", 0))
-		var atlas := AtlasTexture.new()
-		atlas.atlas = sheet
-		atlas.region = Rect2(int(r.get("x", 0)), int(r.get("y", 0)), w, h)
-		atlas.margin = Rect2(ox, oy, fw - w - ox, fh - h - oy)
-		texs.append(atlas)
+		if w <= 0 or h <= 0:
+			return []
+		var frame_image := Image.create(fw, fh, false, sheet_image.get_format())
+		frame_image.fill(Color(0, 0, 0, 0))
+		frame_image.blit_rect(
+			sheet_image,
+			Rect2i(int(r.get("x", 0)), int(r.get("y", 0)), w, h),
+			Vector2i(int(r.get("ox", 0)), int(r.get("oy", 0))),
+		)
+		texs.append(ImageTexture.create_from_image(frame_image))
 	return texs
 
 
@@ -2330,6 +2504,11 @@ func _process(delta: float) -> void:
 		GameState.END:
 			if input_armed and Input.is_anything_pressed():
 				_enter_map()
+			return
+		GameState.ANIM_PREVIEW:
+			# Art review, not gameplay: no physics, no level, ESC (handled
+			# above) is the only way out.
+			_anim_preview_process(delta)
 			return
 		GameState.SPLASH:
 			# Hold, then fade (the VFX pool's countdown-modulate idiom);

@@ -519,16 +519,19 @@ def new_db_row(
     *,
     complete: bool = False,
     llm: LLMClient | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """Create one anchored row: user fields are locked constraints, the
     skeleton rolls the rest, and (with ``complete``) the LLM authors its
-    fields exactly as pipeline generation would."""
+    fields exactly as pipeline generation would. ``system_override`` replaces
+    the authoring agent's system prompt for THIS call only."""
     if entity_type not in DB_TYPES:
         raise ValueError(f"unknown db type {entity_type!r} (one of {list(DB_TYPES)})")
     info = load_pack(pack_dir)
     ctx = make_ctx(info, llm=llm)
+    _with_override(ctx, DB_TYPES[entity_type]["phase_label"], system_override)
     index = len(_load_defs(info.pack, entity_type))
     builder = _enemy_row if entity_type == "enemy" else _item_row
     entity = builder(info, ctx, index, fields or {}, complete)
@@ -589,11 +592,14 @@ def complete_db_row(
     *,
     reroll: bool = False,
     llm: LLMClient | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """LLM-complete an EXISTING row. ``locked`` fields are preserved as
-    constraints; with ``reroll`` the unlocked mechanical fields re-roll too."""
+    constraints; with ``reroll`` the unlocked mechanical fields re-roll too.
+    ``system_override`` replaces the authoring agent's system prompt for THIS
+    call only (keyed by the row type's phase label)."""
     if entity_type not in DB_TYPES:
         raise ValueError(f"unknown db type {entity_type!r} (one of {list(DB_TYPES)})")
     info = load_pack(pack_dir)
@@ -626,6 +632,7 @@ def complete_db_row(
                 fields[name] = flat[name]
 
     ctx = make_ctx(info, llm=llm)
+    _with_override(ctx, DB_TYPES[entity_type]["phase_label"], system_override)
     # Stable index: derive from position among existing ids so re-completion
     # doesn't shift the rng streams of other rows.
     existing = list(_load_defs(info.pack, entity_type))
@@ -1514,6 +1521,198 @@ def _sum_costs(blocks: list[dict]) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# prompt preview / per-call override — "see and edit the prompt before it runs"
+# ---------------------------------------------------------------------------
+
+# The agent label each editable generator's PRIMARY call runs under. An override
+# is keyed by this label so a level generate's layout edit never leaks into its
+# placement calls (LLMClient._override_for does the bounded-prefix match).
+PROMPT_KINDS: dict[str, dict] = {
+    "layout": {"label": "plat:layout", "mode": "llm"},
+    "improve": {"label": "plat:layout", "mode": "llm"},
+    "enemy": {"label": "plat:enemies", "mode": "llm"},
+    "item": {"label": "plat:items", "mode": "llm"},
+    "sprite": {"label": "plat:sprite_art", "mode": "image"},
+    "music": {"label": "plat:audio", "mode": "audio"},
+}
+
+
+def _preview_level_inputs(
+    info: SimpleNamespace, level_id: str | None
+) -> tuple[str, str, dict, int, int, str]:
+    """(level_id, brief, knobs, width, height, axis) for a layout/improve
+    preview. Uses the REAL level when one is named (so the previewed prompt is
+    the one that will actually run); otherwise representative defaults."""
+    if not level_id:
+        return "l1", "", {"difficulty": 1}, 56, 16, "horizontal"
+    from canon.adapters.platformer_write import _find_level_dir
+    from canon.bible.platformer import Level
+
+    level_dir, _ = _find_level_dir(info.pack, level_id)
+    prior = Level.model_validate(_read(level_dir / "level.json"))
+    return (
+        level_id,
+        prior.brief,
+        {"difficulty": int(getattr(prior, "difficulty", 1) or 1)},
+        int(prior.grid_width),
+        int(prior.grid_height),
+        str(prior.layout_axis),
+    )
+
+
+def preview_prompt(
+    pack_dir: str | Path,
+    kind: str,
+    *,
+    level_id: str | None = None,
+    target: str | None = None,
+    instruction: str = "",
+    brief: str = "",
+) -> dict:
+    """The DEFAULT prompt a generator would send, WITHOUT generating — what
+    cradle shows as the editable example behind "✎ Edit prompt".
+
+    LLM kinds return ``{label, mode:"llm", system, user_message}``: ``system``
+    is the editable part (the standing "how to build" instructions), while
+    ``user_message`` is shown read-only as context (it's rebuilt per call from
+    live data). Image/audio kinds have no system/user split, so they return
+    ``{label, mode:"image"|"audio", prompt}`` — the single prompt string.
+    Pure read: no LLM call, no writes, no journal."""
+    if kind not in PROMPT_KINDS:
+        raise ValueError(
+            f"unknown prompt kind {kind!r} (one of {sorted(PROMPT_KINDS)})"
+        )
+    meta = PROMPT_KINDS[kind]
+    info = load_pack(pack_dir)
+    prompts = PlatformerPrompts()
+    out: dict[str, Any] = {"kind": kind, "label": meta["label"], "mode": meta["mode"]}
+
+    if kind in ("layout", "improve"):
+        specs = _pack_specs(info)
+        lid, lv_brief, knobs, width, height, _axis = _preview_level_inputs(
+            info, level_id
+        )
+        eff_brief = brief or lv_brief
+        if kind == "layout":
+            req = prompts.layout_generation(
+                lid, eff_brief, knobs, width, height, specs.movement,
+                rules=specs.rules, tiles=specs.tiles,
+            )
+        else:
+            req = prompts.improve_layout(
+                lid, eff_brief, knobs, width, height, specs.movement,
+                rules=specs.rules, tiles=specs.tiles,
+                current_desc="<the current level's terrain, serialized at run time>",
+                instruction=instruction or "<your instruction>",
+            )
+        out.update(system=req.system, user_message=req.user_message)
+        return out
+
+    if kind in ("enemy", "item"):
+        # A representative skeleton: the target row's real mechanics when one is
+        # named, else a rolled example. Only `system` is editable, so either is
+        # a faithful preview of the standing instructions.
+        entity_type = "enemy" if kind == "enemy" else "item"
+        spec = load_skeleton_spec(_schema_path(info.pack, entity_type))
+        if target:
+            defs = _load_defs(info.pack, entity_type)
+            if target not in defs:
+                raise FileNotFoundError(f"{entity_type} {target!r} not found")
+            row = defs[target]
+            # A real call passes ONLY the rolled SPEC fields — mirror that
+            # (a whole row dump would leak artifact_id/status into the preview).
+            flat = {
+                **row.model_dump(mode="json"),
+                **(row.stats or {}),
+                **(getattr(row, "behavior", None) or {}),
+            }
+            skeleton = {k: flat[k] for k in spec.fields if k in flat}
+        else:
+            skeleton = roll_skeleton(spec, derive_rng(info.seed, "preview", 0))
+        stage = next(iter(info.stages.values()), None)
+        if kind == "enemy":
+            habitats = list(getattr(row, "habitats", None) or []) if target else []
+            habitat_desc = (
+                "roams EVERY biome of the world"
+                if habitats == ["*"]
+                else f"native to the {', '.join(habitats)} biome(s) only"
+                if habitats
+                else "native to the example biome"
+            )
+            req = prompts.enemy_generation(
+                skeleton, getattr(stage, "theme", "") if stage else "", "", 0,
+                used_names=[], rarity=str(skeleton.get("rarity", "common")),
+                habitat_desc=habitat_desc,
+            )
+        else:
+            req = prompts.item_generation(
+                skeleton, info.world.title if info.world else "", 0, used_names=[],
+            )
+        out.update(system=req.system, user_message=req.user_message)
+        return out
+
+    if kind == "sprite":
+        from examples.platformer_pack.tileset_art import sprite_prompt
+
+        name, descriptor, color = "<the actor>", "<its look>", "#ff00ff"
+        if target:
+            t_kind, rest = _parse_target(target)
+            if t_kind in ("enemy", "item"):
+                defs = _load_defs(info.pack, t_kind)
+                if rest not in defs:
+                    raise FileNotFoundError(f"{t_kind} {rest!r} not found")
+                row = defs[rest]
+                name = row.name or rest
+                color = str((row.stats or {}).get("placeholder_color", color))
+                descriptor = str((row.stats or {}).get("flavor", "")) or descriptor
+            elif t_kind == "player":
+                from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+
+                name, descriptor, color = "the player", PLAYER_DESCRIPTOR, "#f0f0f0"
+        stage = next(iter(info.stages.values()), None)
+        out["prompt"] = sprite_prompt(
+            name, descriptor, color,
+            getattr(stage, "theme", "") if stage else "",
+            info.world.title if info.world else "", info.graphics,
+        )
+        return out
+
+    # music — the op builds its prompt string inline (no prompts.py method).
+    stage = None
+    if level_id:
+        from canon.adapters.platformer_write import _find_level_dir
+
+        _, stage_id = _find_level_dir(info.pack, level_id)
+        stage = info.stages.get(stage_id)
+    if stage is None:
+        stage = next(iter(info.stages.values()), None)
+    out["prompt"] = brief.strip() or _music_prompt(
+        getattr(stage, "theme", "") if stage else "",
+        info.world.title if info.world else "",
+    )
+    return out
+
+
+def _music_prompt(theme: str, world_title: str) -> str:
+    """The default level-music prompt — shared by ``generate_level_music`` and
+    ``preview_prompt`` so the preview is the prompt that actually runs."""
+    return (
+        f"Looping instrumental theme for a retro platformer level in a "
+        f"{theme} stage. World: {world_title}. Melodic, atmospheric, "
+        f"seamless loop, no vocals."
+    )
+
+
+def _with_override(
+    ctx: PipelineContext, label: str, system_override: str | None
+) -> None:
+    """Register a per-call system-prompt override on the op's LLM client. No
+    override (None/empty) leaves the client untouched → byte-identical default."""
+    if system_override and getattr(ctx, "llm", None) is not None:
+        ctx.llm.system_overrides[label] = system_override
+
+
 def generate_terrain(
     pack_dir: str | Path,
     *,
@@ -1526,6 +1725,7 @@ def generate_terrain(
     height: int | None = None,
     axis: str | None = None,
     seed: str | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
@@ -1543,6 +1743,7 @@ def generate_terrain(
 
     cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    _with_override(ctx, "plat:layout", system_override)
     if stage_id not in ctx.bible.stages:
         raise ValueError(
             f"no stage {stage_id!r} in pack — stages: {list(ctx.bible.stages)}"
@@ -1672,17 +1873,19 @@ def generate_level(
     max_enemies: int = 4,
     max_items: int = 12,
     seed: str | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """Convenience: a WHOLE draft level — terrain, then enemies, then items —
     by chaining the composable ops. Shares one seed so a pinned seed fully
-    reproduces the level."""
+    reproduces the level. ``system_override`` edits the LAYOUT agent's system
+    prompt only — the placement sub-ops keep their own defaults."""
     cursor = _journal_cursor(pack_dir)
     terrain = generate_terrain(
         pack_dir, stage_id=stage_id, brief=brief, backend=backend, model=model,
         difficulty=difficulty, width=width, height=height, axis=axis,
-        seed=seed, actor=actor, session=session,
+        seed=seed, system_override=system_override, actor=actor, session=session,
     )
     lid = terrain["level_id"]
     # reuse the terrain's effective seed so the whole level is one reproducible unit
@@ -1717,6 +1920,7 @@ def regenerate_terrain(
     height: int | None = None,
     axis: str | None = None,
     seed: str | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
@@ -1738,6 +1942,7 @@ def regenerate_terrain(
 
     cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    _with_override(ctx, "plat:layout", system_override)
     level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
     prior = Level.model_validate(_read(level_dir / "level.json"))
     specs = _pack_specs(info)
@@ -1793,6 +1998,7 @@ def improve_terrain(
     backend: str = "fake",
     model: str | None = None,
     seed: str | None = None,
+    system_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
@@ -1817,6 +2023,7 @@ def improve_terrain(
 
     cursor = _journal_cursor(pack_dir)
     info, ctx = _level_gen_ctx(pack_dir, backend, model)
+    _with_override(ctx, "plat:layout", system_override)
     level_dir, stage_id = _find_level_dir(Path(pack_dir), level_id)
     prior = Level.model_validate(_read(level_dir / "level.json"))
     specs = _pack_specs(info)
@@ -1916,13 +2123,16 @@ def generate_level_music(
     section: int | None = None,
     backend: str = "lyria",
     music_seconds: int | None = None,
+    prompt_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """Generate ONE music track for a level (``section=None``) or one of its
     user music sections, write it under ``music/<stage>/<level>/``, repoint the
     level (via apply_level_edit, journaled), and return the ACTUAL cost. Paid
-    on ``--music-backend lyria``; ``fake`` is $0 deterministic bytes."""
+    on ``--music-backend lyria``; ``fake`` is $0 deterministic bytes.
+    ``prompt_override`` replaces the whole music prompt (music has no
+    system/user split); it wins over ``brief``."""
     from canon.adapters.platformer_write import _find_level_dir, apply_level_edit
     from canon.pipeline.stats import GenerationStats
     from examples.platformer_pack.audio_phases import (
@@ -1948,10 +2158,10 @@ def generate_level_music(
     stage = info.stages.get(stage_id)
     theme = getattr(stage, "theme", "") if stage else ""
     world_title = info.world.title if info.world else ""
-    prompt = brief.strip() or (
-        f"Looping instrumental theme for a retro platformer level in a "
-        f"{theme} stage. World: {world_title}. Melodic, atmospheric, "
-        f"seamless loop, no vocals."
+    prompt = (
+        (prompt_override or "").strip()
+        or brief.strip()
+        or _music_prompt(theme, world_title)
     )
     data = music.generate(prompt, int(music_seconds or MUSIC_SECONDS))
     ext = _audio_ext(data)
@@ -2060,11 +2270,14 @@ def generate_asset(
     image_edit_backend: str | None = None,
     music_backend: str | None = None,
     sfx_backend: str | None = None,
+    prompt_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """(Re)generate ONE asset by running the real art/audio phase against a
-    bible filtered to the target."""
+    bible filtered to the target. ``prompt_override`` replaces the image prompt
+    for sprite targets (enemy/item/player) — the bible is filtered to the one
+    target, so the override can't reach any other asset."""
     from canon.pipeline.stats import GenerationStats
 
     info = load_pack(pack_dir)
@@ -2092,7 +2305,10 @@ def generate_asset(
         )
         bible = _sprite_bible(info, kind, rest)
         ctx = make_ctx(info, bible=bible, stats=stats)
-        SpriteArtPhase(producer=producer, graphics=info.graphics).run(ctx)
+        SpriteArtPhase(
+            producer=producer, graphics=info.graphics,
+            prompt_override=prompt_override,
+        ).run(ctx)
         gen["image_model"] = str(producer.model)
     elif kind == "backdrop":
         from examples.platformer_pack.art_phases import BackdropArtPhase
@@ -2134,7 +2350,10 @@ def generate_asset(
         bible.world = info.world
         bible.stages[rest] = info.stages[rest]
         ctx = make_ctx(info, bible=bible, stats=stats)
-        AudioPhase(music_producer=music, sfx_producer=sfx).run(ctx)
+        AudioPhase(
+            music_producer=music, sfx_producer=sfx,
+            music_prompt_override=prompt_override,
+        ).run(ctx)
         if music is not None:
             gen["music_model"] = str(getattr(music, "model", type(music).__name__))
         if sfx is not None:
@@ -2178,11 +2397,16 @@ def animate_asset(
     vlm_backend: str | None = None,
     vlm_model: str | None = None,
     reuse_spec: bool = False,
+    renormalize: bool = False,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
     """The multi-image path: VLM-authored motion spec + one img2img sheet per
-    state, sliced into strips + frames.json + a packed atlas — for ONE actor."""
+    state, sliced into strips + frames.json + a packed atlas — for ONE actor.
+
+    ``renormalize`` instead REPAIRS the frames already on disk: it re-seats
+    every state on one shared square so the actor stops changing size between
+    states. No image backend, no VLM, no API keys, $0."""
     from examples.platformer_pack.art_phases import SpriteAnimationPhase
     from examples.platformer_pack.tileset_art import build_image_producer
     from examples.platformer_pack.vlm_qa import (
@@ -2198,17 +2422,23 @@ def animate_asset(
     kind, rest = _parse_target(target)
     if kind not in ("enemy", "player"):
         raise ValueError("animate targets: enemy:<id> | player")
-    if not image_backend or image_backend == "none":
-        raise ValueError("animate needs --image-backend with img2img support")
-    producer = build_image_producer(
-        image_backend, image_model, image_edit_model,
-        seed=info.seed, edit_kind=image_edit_backend,
-    )
-    judge = build_vlm_judge(vlm_backend or "none", vlm_model)
-    if judge is None and not reuse_spec:
-        raise ValueError(
-            "animate needs --vlm-backend (or --reuse-spec with a stored spec)"
+    # Renormalize is a pure local repair of frames already on disk: it neither
+    # generates nor authors, so it needs no backends and no keys.
+    if renormalize:
+        producer = build_image_producer("fake", None, None, seed=info.seed)
+        judge = None
+    else:
+        if not image_backend or image_backend == "none":
+            raise ValueError("animate needs --image-backend with img2img support")
+        producer = build_image_producer(
+            image_backend, image_model, image_edit_model,
+            seed=info.seed, edit_kind=image_edit_backend,
         )
+        judge = build_vlm_judge(vlm_backend or "none", vlm_model)
+        if judge is None and not reuse_spec:
+            raise ValueError(
+                "animate needs --vlm-backend (or --reuse-spec with a stored spec)"
+            )
 
     from canon.pipeline.stats import GenerationStats
 
@@ -2251,7 +2481,17 @@ def animate_asset(
     before = provenance.snapshot_file(
         info.pack, info.pack / Path(sprite_path).parent / "frames.json"
     )
-    if reuse_spec and stored:
+    if renormalize:
+        result = phase._renormalize_actor(ctx, sprite_path, actor_id)
+        if not result.get("states"):
+            raise FileNotFoundError(
+                f"{target} has no animation frames to renormalize — "
+                "run animate first"
+            )
+        # Keep the stored spec: renormalize re-seats pixels, it does not
+        # re-author motion.
+        manifest = {**({"spec": stored} if stored else {}), **result}
+    elif reuse_spec and stored:
         result = phase._animate_actor(ctx, sprite_path, stored, actor_id, asymmetric)
         manifest = {"spec": stored, **result} if result.get("states") else {}
     else:
@@ -2268,20 +2508,26 @@ def animate_asset(
     after = provenance.snapshot_file(
         info.pack, info.pack / Path(sprite_path).parent / "frames.json"
     )
-    gen = {
-        "image_model": str(producer.model),
-        "vlm_model": str(getattr(judge, "model", "")) if judge else "",
-        "reused_spec": bool(reuse_spec and stored),
-    }
+    gen = (
+        {"renormalized": True}
+        if renormalize
+        else {
+            "image_model": str(producer.model),
+            "vlm_model": str(getattr(judge, "model", "")) if judge else "",
+            "reused_spec": bool(reuse_spec and stored),
+        }
+    )
     provenance.record(
         info.pack,
         artifact_id=target,
-        op="regenerate" if before else "generate",
-        source="llm",
+        # A renormalize is a local repair of existing bytes, not a generation —
+        # source=code keeps it out of the LLM training pairs.
+        op="edit" if renormalize else ("regenerate" if before else "generate"),
+        source="code" if renormalize else "llm",
         actor=actor,
         session=session,
         detail={
-            "kind": "asset_animate",
+            "kind": "animation_renormalize" if renormalize else "asset_animate",
             "states": sorted((manifest.get("states") or {}).keys()),
         },
         before_hash=before,

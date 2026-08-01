@@ -1369,3 +1369,50 @@ class TestPhaseDirect:
         )
         assert "l1_skinned.png" in report["levels"]["l1"]["error"]
         assert "verdicts" in report["levels"]["l2"]  # others still judged
+
+
+class TestAnimationScaleCheck:
+    """The check whose absence let the per-state sizing bug ship: every other
+    animation check is PER STATE, so none of them could see that the actor was
+    a different size in each one. Frames share one square sized from the whole
+    actor, so at most the single largest pose may reach the cell edge."""
+
+    def _two_states(
+        self, tmp_path: Path, idle: tuple, jump: tuple
+    ) -> dict:
+        """Two states on disk, each an opaque rect of the given (w, h)
+        bottom-anchored in a 32px cell."""
+        anim: dict = {"states": {}}
+        for state, (w, h) in (("idle", idle), ("jump", jump)):
+            x0 = (32 - w) // 2
+            one = _write_strip(
+                tmp_path, [(x0, 32 - h, x0 + w - 1, 31)] * 2, state=state
+            )
+            anim["states"][state] = one["states"][state]
+        return anim
+
+    def test_flags_states_that_each_fill_the_cell(self, tmp_path: Path) -> None:
+        # The shipped pathology, measured on plat_lantern_paid: a WIDE idle
+        # (32x22) and a TALL jump (26x32) — both stretched to their own cell,
+        # so the actor grows ~45% the instant it leaves the ground.
+        anim = self._two_states(tmp_path, idle=(32, 22), jump=(26, 32))
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_scale")
+        assert rec["passed"] is False
+        assert "idle, jump" in rec["detail"]
+        assert rec["subject"] == "states"
+
+    def test_one_state_at_the_edge_is_correct(self, tmp_path: Path) -> None:
+        # Correctly sized: the largest pose defines the square, everything
+        # else is strictly smaller.
+        anim = self._two_states(tmp_path, idle=(28, 20), jump=(24, 32))
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_scale")
+        assert rec["passed"] is True
+        assert "'jump'" in rec["detail"]
+
+    def test_single_state_actors_are_not_judged(self, tmp_path: Path) -> None:
+        # One state can't be inconsistent with itself — no record at all.
+        anim = _write_strip(tmp_path, [(0, 0, 31, 31)] * 2, state="idle")
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        assert not any(c["check"] == "animation_scale" for c in checks)

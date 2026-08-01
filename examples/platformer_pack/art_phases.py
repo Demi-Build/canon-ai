@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import logging
+from pathlib import Path
 from typing import Any
 
 from canon.backends.base import ImageEditBackend
@@ -40,6 +41,7 @@ from examples.platformer_pack.tileset_art import (
     art_provenance,
     build_sheet_reference,
     dominant_hue,
+    frame_side,
     frames_to_strip,
     hue_distance,
     normalize_frames,
@@ -356,9 +358,15 @@ class SpriteArtPhase:
         self,
         producer: Any = None,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        prompt_override: str | None = None,
     ) -> None:
         self.producer = producer
         self.graphics = graphics
+        # Per-call image-prompt override ("✎ edit prompt"). Only the
+        # single-asset `generate_asset` op sets it — and only ever with a
+        # bible filtered to ONE sprite, so it can't bleed onto siblings.
+        # None = today's built prompt, byte-for-byte.
+        self.prompt_override = prompt_override
 
     def owns(self, ctx: Any) -> list[str]:
         # An explicitly-regenerated enemy/item definition gets fresh art
@@ -583,10 +591,17 @@ class SpriteArtPhase:
         theme: str, world_title: str, size: tuple[int, int],
     ) -> Any:
         """One sprite, or None after a loud fallback."""
+        # Only pass the override when set: the pipeline's call stays exactly
+        # as it was, and a producer that predates the kwarg still works.
+        extra = (
+            {"prompt_override": self.prompt_override}
+            if self.prompt_override
+            else {}
+        )
         try:
             sprite = self.producer.sprite_image(
                 name, descriptor, color_hex, theme, world_title,
-                self.graphics, size,
+                self.graphics, size, **extra,
             )
         except Exception as e:  # noqa: BLE001
             warn(
@@ -622,6 +637,31 @@ ANIM_MIN_FRAMES = 2
 #: input dims, so an extreme 9:1 canvas would come back distorted. The per-cell
 #: size shrinks as the frame count grows to keep the total near this.
 MAX_SHEET_REF_WIDTH = 2560
+
+#: The common scale every state's crops are expressed in before the actor's
+#: frame square is sized. Each state's sheet is drawn at its own ``cell_px``
+#: (which shrinks as the frame count grows), so raw crops are not comparable
+#: across states; rescaling by the sheet's own cell height puts them on one
+#: ruler. The value is arbitrary — only the ratios matter — but it stays near
+#: the largest real cell so the rescale is mostly a downscale.
+_ANIM_REF_CELL = 512
+
+
+def _to_ref_scale(crops: list, sheet_h: int) -> list:
+    """Rescale a state's crops from its sheet's cell height onto the shared
+    ``_ANIM_REF_CELL`` ruler, so crops from different states can be sized by
+    ONE frame square. Identity when the sheet is already at reference."""
+    from PIL import Image
+
+    if not crops or sheet_h <= 0 or sheet_h == _ANIM_REF_CELL:
+        return crops
+    k = _ANIM_REF_CELL / sheet_h
+    return [
+        c.resize(
+            (max(1, round(c.width * k)), max(1, round(c.height * k))), Image.LANCZOS
+        )
+        for c in crops
+    ]
 
 
 #: Character-drift ceiling (postmortem ticket 7): euclidean distance between
@@ -851,13 +891,23 @@ class SpriteAnimationPhase:
         facing: str = "right",
         kept: str = "state kept static",
     ) -> tuple[list, float] | None:
-        """One img2img sheet → ``(frames, wander_frac)`` for one state and
-        facing: content-segmented, normalized frames plus the PRE-normalize
-        baseline wander (max-min of the raw crops' content bottoms, as a
-        fraction of the sheet height — measured UPSTREAM of the normalize
-        re-anchor, the honest registration signal; postmortem ticket 6). None
-        (warned, ``kept`` naming the fallback) on a failed edit or a sheet
-        that segments below ANIM_MIN_FRAMES."""
+        """One img2img sheet → ``(crops, wander_frac)`` for one state and
+        facing.
+
+        ``crops`` are the content-segmented frames RESCALED to a common
+        reference cell (``_ANIM_REF_CELL``) — NOT yet seated in a square. Each
+        state's sheet is generated at its own ``cell_px`` (it shrinks as the
+        frame count grows), so raw crop sizes aren't comparable across states;
+        rescaling by the sheet's own cell height puts every state on one scale
+        so the caller can size ONE frame square for the whole actor. Seating
+        them per state instead is what made a wide idle and a tall jump render
+        at different scales.
+
+        Also returns the PRE-normalize baseline wander (max-min of the raw
+        crops' content bottoms, as a fraction of the sheet height — measured
+        UPSTREAM of the re-anchor, the honest registration signal; postmortem
+        ticket 6). None (warned, ``kept`` naming the fallback) on a failed edit
+        or a sheet that segments below ANIM_MIN_FRAMES."""
         from PIL import Image
 
         label = "sheet" if facing == "right" else f"{facing} sheet"
@@ -892,7 +942,7 @@ class SpriteAnimationPhase:
             )
             return None
         raw = segment_frames(sheet)
-        frames = normalize_frames(raw)
+        frames = _to_ref_scale(raw, sheet.height)
         if len(frames) < ANIM_MIN_FRAMES:
             warn(
                 ctx,
@@ -922,7 +972,7 @@ class SpriteAnimationPhase:
                 try:
                     retry_sheet = _edit(_DRIFT_NOTE)
                     retry_raw = segment_frames(retry_sheet)
-                    retry = normalize_frames(retry_raw)
+                    retry = _to_ref_scale(retry_raw, retry_sheet.height)
                     rdrift = (
                         _sprite_drift(base, retry)
                         if len(retry) >= ANIM_MIN_FRAMES
@@ -986,8 +1036,13 @@ class SpriteAnimationPhase:
         resample = (
             Image.NEAREST if self.graphics.render_filter == "crisp" else Image.LANCZOS
         )
-        states: dict[str, dict] = {}
-        frame_lists: dict[str, list] = {}  # resized PIL frames, for the atlas
+        # PASS 1 — generate + segment every state, keeping the crops on the
+        # shared reference ruler. Nothing is seated in a square yet: the square
+        # must be sized from the WHOLE actor, or each state's largest dimension
+        # gets stretched to fill the cell and the character changes size the
+        # moment its state changes (the "half the frame vanishes in the jump"
+        # bug — a wide idle and a tall jump each maxed out their own cell).
+        pending: dict[str, dict] = {}
         for state, state_spec in spec.items():
             n_frames = int(state_spec.get("frames", ANIM_MIN_FRAMES))
             # Per-cell size shrinks as the frame count grows so a many-frame
@@ -1001,16 +1056,89 @@ class SpriteAnimationPhase:
             )
             if got is None:
                 continue
-            frames, wander_frac = got
-            frames = [f.resize((size, size), resample) for f in frames]
-            strip = frames_to_strip(frames)
+            crops, wander_frac = got
+            entry: dict = {"crops": crops, "wander": wander_frac}
+            if asymmetric:
+                # Asymmetric designs (USER-set art flag) get a real left-facing
+                # strip from the mirrored base; a failed or count-mismatched
+                # left pass keeps the consumers' default horizontal flip.
+                got_left = self._sheet_frames(
+                    ctx, base.transpose(Image.Transpose.FLIP_LEFT_RIGHT), actor_id,
+                    state, motion, n_frames, cell_px, facing="left",
+                    kept="right-facing flip kept",
+                )
+                if got_left is not None:
+                    left_crops, _left_wander = got_left
+                    if len(left_crops) == len(crops):
+                        entry["crops_left"] = left_crops
+                    else:
+                        warn(
+                            ctx,
+                            f"animation: {actor_id!r} {state!r} left strip "
+                            f"segmented to {len(left_crops)} frame(s) vs "
+                            f"{len(crops)} right; right-facing flip kept.",
+                        )
+            pending[state] = entry
+        if not pending:
+            return {}
+
+        # ONE square for the whole actor, across every state and both facings.
+        actor_side = frame_side(
+            [c for e in pending.values() for c in (*e["crops"], *e.get("crops_left", []))]
+        )
+
+        # PASS 2 — seat + downscale every state against that shared square.
+        seated: dict[str, dict] = {}
+        for state, entry in pending.items():
+            frames = normalize_frames(entry["crops"], side=actor_side)
+            out: dict = {
+                "frames": [f.resize((size, size), resample) for f in frames],
+                "duration_ms": frame_ms,
+                "loop": STATE_LOOP_MODES.get(state, "loop"),
+                "raw_bottom_wander_frac": entry["wander"],
+            }
+            if "crops_left" in entry:
+                # The authored left-facing strip rides the SAME actor square as
+                # the right, so a flip and an authored facing stay one size.
+                left = normalize_frames(entry["crops_left"], side=actor_side)
+                out["frames_left"] = [
+                    f.resize((size, size), resample) for f in left
+                ]
+            seated[state] = out
+        return self._write_actor_frames(ctx, sprite_dir, actor_slug, size, seated)
+
+    def _write_actor_frames(
+        self,
+        ctx: Any,
+        sprite_dir: str,
+        actor_slug: str,
+        size: int,
+        seated: dict[str, dict],
+    ) -> dict:
+        """Write one actor's finished frames: a strip per state (plus an
+        authored left strip where present), the ``frames.json`` playback
+        manifest, and the packed ``atlas.png``/``atlas.json``. Shared by
+        generation and by ``_renormalize_actor`` so the shipped layout has ONE
+        writer. ``seated`` maps state → ``{frames, [frames_left], duration_ms,
+        loop, raw_bottom_wander_frac[, durations_ms]}`` with frames already at
+        their final ``size``."""
+        states: dict[str, dict] = {}
+        frame_lists: dict[str, list] = {}  # for the atlas
+        for state, entry in seated.items():
+            frames = entry["frames"]
+            if not frames:
+                continue
+            frame_ms = int(entry.get("duration_ms", self.graphics.anim_frame_ms))
+            durations = entry.get("durations_ms")
+            if not durations or len(durations) != len(frames):
+                durations = [frame_ms] * len(frames)
             rel = f"{sprite_dir}/{state}.png"
             states[state] = {
                 "path": rel,
                 "hash": ctx.adapter.write_binary(
                     rel,
                     _stamped_png(
-                        ctx, self.producer, self.graphics, strip,
+                        ctx, self.producer, self.graphics, frames_to_strip(frames),
                         f"strip:{actor_slug}/{state}",
                     ),
                 ),
@@ -1021,35 +1149,16 @@ class SpriteAnimationPhase:
                 # Playback keys (G4): uniform per-frame durations v1 — the
                 # per-frame list is the user's hand-edit lever — plus the
                 # state's loop mode.
-                "loop": STATE_LOOP_MODES.get(state, "loop"),
-                "durations_ms": [frame_ms] * len(frames),
+                "loop": str(entry.get("loop") or STATE_LOOP_MODES.get(state, "loop")),
+                "durations_ms": list(durations),
                 # Pre-normalize baseline wander (ticket 6): the upstream
                 # registration signal, carried to QA's animation_wander meter.
-                "raw_bottom_wander_frac": wander_frac,
+                "raw_bottom_wander_frac": entry.get("raw_bottom_wander_frac", 0.0),
             }
             frame_lists[state] = frames
-            if not asymmetric:
+            left = entry.get("frames_left")
+            if not left:
                 continue
-            # Asymmetric designs (USER-set art flag) get a real left-facing
-            # strip from the mirrored base; a failed or count-mismatched left
-            # pass keeps the consumers' default horizontal flip.
-            got_left = self._sheet_frames(
-                ctx, base.transpose(Image.Transpose.FLIP_LEFT_RIGHT), actor_id,
-                state, motion, n_frames, cell_px, facing="left",
-                kept="right-facing flip kept",
-            )
-            if got_left is None:
-                continue
-            left, _left_wander = got_left
-            if len(left) != len(frames):
-                warn(
-                    ctx,
-                    f"animation: {actor_id!r} {state!r} left strip segmented "
-                    f"to {len(left)} frame(s) vs {len(frames)} right; "
-                    f"right-facing flip kept.",
-                )
-                continue
-            left = [f.resize((size, size), resample) for f in left]
             left_rel = f"{sprite_dir}/{state}_left.png"
             states[state]["path_left"] = left_rel
             states[state]["hash_left"] = ctx.adapter.write_binary(
@@ -1106,6 +1215,105 @@ class SpriteAnimationPhase:
             },
         )
         return {"states": states, "atlas": {"path": atlas_rel, "hash": atlas_hash}}
+
+    def _renormalize_actor(
+        self, ctx: Any, base_rel: str, actor_id: str
+    ) -> dict:
+        """Re-seat an actor's EXISTING frames on one shared square, reading the
+        strips already on disk (no image backend, no VLM, no keys, $0). Trims
+        each frame back to its content, sizes ONE square across every state and
+        facing, re-seats, and re-emits through ``_write_actor_frames``. Playback
+        metadata (loop modes, per-frame durations) carries over verbatim.
+
+        WHAT THIS FIXES: framing. Art generated before the per-actor fix has
+        every state flush against its cell edge with zero headroom; afterwards
+        one shared square gives every state the same margin, and the atlas is
+        repacked consistently.
+
+        WHAT IT CANNOT FIX: the original cross-state proportions. Each state was
+        independently stretched to fill its own cell, and that discarded the
+        ratios — trimming and re-seating preserves whatever ratio was BAKED, it
+        cannot recover the true one. An actor that jumped 45% taller than it
+        idled still will. **Re-animating with the fixed pipeline is the only
+        real repair**; this is the free consolation prize.
+
+        Also lossy in the ordinary sense: it rescales already-downscaled pixels,
+        so a state that was blown up comes back slightly softer. Returns ``{}``
+        when there is nothing to read."""
+        import json as _json
+
+        from PIL import Image
+
+        sprite_dir = base_rel.rsplit("/", 1)[0]
+        actor_slug = actor_id.replace(":", "/")
+        manifest_path = ctx.adapter.resolve_path(f"{sprite_dir}/frames.json")
+        if not Path(manifest_path).is_file():
+            return {}
+        current = _json.loads(Path(manifest_path).read_text())
+        if not isinstance(current, dict) or not current:
+            return {}
+        size = self.graphics.sprite_size()
+        resample = (
+            Image.NEAREST if self.graphics.render_filter == "crisp" else Image.LANCZOS
+        )
+
+        def _crops(rel: str, n: int) -> list:
+            """Slice a strip and trim each frame back to its content — the
+            inverse of seating, giving comparable crops again."""
+            path = Path(ctx.adapter.resolve_path(rel))
+            if not path.is_file() or n < 1:
+                return []
+            sheet = Image.open(path).convert("RGBA")
+            fw = sheet.width // n
+            if fw < 1:
+                return []
+            out = []
+            for i in range(n):
+                cell = sheet.crop((i * fw, 0, (i + 1) * fw, sheet.height))
+                box = cell.getchannel("A").getbbox()
+                out.append(cell.crop(box) if box else cell)
+            return out
+
+        pending: dict[str, dict] = {}
+        for state, meta in current.items():
+            if not isinstance(meta, dict):
+                continue
+            crops = _crops(str(meta.get("path") or ""), int(meta.get("frames") or 0))
+            if not crops:
+                continue
+            entry: dict = {"crops": crops, "meta": meta}
+            left_path = str(meta.get("path_left") or "")
+            if left_path:
+                left = _crops(left_path, int(meta.get("frames_left") or 0))
+                if len(left) == len(crops):
+                    entry["crops_left"] = left
+            pending[state] = entry
+        if not pending:
+            return {}
+
+        actor_side = frame_side(
+            [c for e in pending.values() for c in (*e["crops"], *e.get("crops_left", []))]
+        )
+        seated: dict[str, dict] = {}
+        for state, entry in pending.items():
+            meta = entry["meta"]
+            frames = normalize_frames(entry["crops"], side=actor_side)
+            out: dict = {
+                "frames": [f.resize((size, size), resample) for f in frames],
+                "duration_ms": int(
+                    meta.get("duration_ms") or self.graphics.anim_frame_ms
+                ),
+                "loop": meta.get("loop"),
+                "durations_ms": meta.get("durations_ms"),
+                "raw_bottom_wander_frac": meta.get("raw_bottom_wander_frac", 0.0),
+            }
+            if "crops_left" in entry:
+                left = normalize_frames(entry["crops_left"], side=actor_side)
+                out["frames_left"] = [
+                    f.resize((size, size), resample) for f in left
+                ]
+            seated[state] = out
+        return self._write_actor_frames(ctx, sprite_dir, actor_slug, size, seated)
 
 
 class BackdropArtPhase:

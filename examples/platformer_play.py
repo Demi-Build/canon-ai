@@ -10,6 +10,16 @@ lives. Do not polish it.
     uv run --extra platformer --extra play \
         python examples/platformer_play.py <data_dir> [level_id]
 
+ANIMATION VIEWER: ``PLAT_ANIM=<enemy:id|item:id|player|all>`` boots a preview
+of the actor's animation states instead of a level — every state side by side
+on its own clock and loop mode, over a baseline the frames are anchored to. It
+reuses the game's own loaders and frame selection, so what it shows is what the
+game plays. SPACE replays the ``once`` states, arrows switch actors, and it
+composes with PLAT_CAPTURE for a headless contact strip:
+
+    PLAT_ANIM=enemy:ember_hopper PLAT_CAPTURE=shots \
+        python examples/platformer_play.py <data_dir>
+
 Controls: arrows/A-D move, space/up jumps or swims, R respawns, Esc quits.
 Combat v1: integer HEARTS (manifest "combat" block) — enemy contact costs
 stats.damage x variant mults, hazard tiles cost their params.damage,
@@ -292,6 +302,10 @@ class _Hooks:
         for token in filter(None, os.environ.get("PLAT_ACTIONS", "").split(",")):
             frame_s, _, act = token.partition(":")
             self.actions[int(frame_s)] = act.strip()
+        # PLAT_ANIM=<enemy:id|item:id|player|all> boots the ANIMATION VIEWER
+        # instead of the level: every state of an actor playing side by side in
+        # the same surface that renders the game. Composes with PLAT_CAPTURE.
+        self.anim_target = os.environ.get("PLAT_ANIM", "")
         self.headless = bool(self.cap_dir or self.traj_path)
         self.cap_i = 0
         self.frame_i = -1
@@ -305,6 +319,271 @@ class _Hooks:
         )
         if self.cap_dir:
             Path(self.cap_dir).mkdir(parents=True, exist_ok=True)
+
+
+def _slice_strip(path: Path, n: int, size: tuple) -> list:
+    import pygame
+
+    sheet = pygame.image.load(str(path)).convert_alpha()
+    fw = sheet.get_width() // n
+    return [
+        pygame.transform.smoothscale(
+            sheet.subsurface((i * fw, 0, fw, sheet.get_height())), size
+        )
+        for i in range(n)
+    ]
+
+
+def _atlas_frames(sheet, rects: list, fsize: tuple, size: tuple) -> list:
+    import pygame
+
+    # Reconstitute each UNTRIMMED frame: blit the trimmed crop at its
+    # (ox, oy) offset on a transparent frame_size square (the inline
+    # equivalent of tileset_art's reconstitute_frame), then scale.
+    frames = []
+    for r in rects:
+        frame = pygame.Surface(fsize, pygame.SRCALPHA)
+        frame.blit(
+            sheet.subsurface(
+                (
+                    int(r.get("x", 0)), int(r.get("y", 0)),
+                    int(r.get("w", 0)), int(r.get("h", 0)),
+                )
+            ),
+            (int(r.get("ox", 0)), int(r.get("oy", 0))),
+        )
+        frames.append(pygame.transform.smoothscale(frame, size))
+    return frames
+
+
+def _load_atlas_anim(data_dir: Path, sprite_dir: str, size: tuple) -> dict | None:
+    import pygame
+
+    meta_path = data_dir / (sprite_dir + "/atlas.json")
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return None
+    fsize = meta.get("frame_size") or []
+    sheet_path = data_dir / str(meta.get("path", ""))
+    if (
+        not isinstance(meta.get("states"), dict)
+        or len(fsize) != 2
+        or not str(meta.get("path", ""))
+        or not sheet_path.exists()
+    ):
+        return None
+    try:
+        sheet = pygame.image.load(str(sheet_path)).convert_alpha()
+        fsize = (int(fsize[0]), int(fsize[1]))
+        anim: dict = {}
+        for state, m in meta["states"].items():
+            rects = m.get("frames") or []
+            if not rects:
+                continue
+            left_rects = m.get("frames_left") or []
+            durs, loop = _anim_timing(m, len(rects))
+            anim[state] = {
+                "frames": _atlas_frames(sheet, rects, fsize, size),
+                "frames_left": (
+                    _atlas_frames(sheet, left_rects, fsize, size)
+                    if len(left_rects) == len(rects)
+                    else None
+                ),
+                "durs": durs,
+                "loop": loop,
+            }
+    except (AttributeError, TypeError, ValueError, pygame.error):
+        return None  # garbled states/rects → fall back to the strip path
+    return anim or None
+
+
+def _load_anim(data_dir: Path, sprite_rel: str, size: tuple) -> dict | None:
+    if _PLAIN or not sprite_rel:
+        return None
+    sprite_dir = sprite_rel.rsplit("/", 1)[0]
+    anim = _load_atlas_anim(data_dir, sprite_dir, size)
+    if anim:
+        return anim
+    meta_path = data_dir / (sprite_dir + "/frames.json")
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return None
+    anim = {}
+    for state, m in meta.items():
+        strip = data_dir / m.get("path", "")
+        n = int(m.get("frames", 0))
+        if n < 1 or not strip.exists():
+            continue
+        left_rel = str(m.get("path_left", "") or "")
+        left = None
+        if (
+            left_rel
+            and int(m.get("frames_left", 0)) == n
+            and (data_dir / left_rel).exists()
+        ):
+            left = _slice_strip(data_dir / left_rel, n, size)
+        durs, loop = _anim_timing(m, n)
+        anim[state] = {
+            "frames": _slice_strip(strip, n, size),
+            "frames_left": left,
+            "durs": durs,
+            "loop": loop,
+        }
+    return anim or None
+
+
+def _anim_preview_targets(data_dir: Path, target: str) -> list[tuple[str, str]]:
+    """``(label, base sprite path)`` for a PLAT_ANIM target. ``all`` walks every
+    animatable actor in the pack; otherwise ``enemy:<id>`` | ``item:<id>`` |
+    ``player`` names one. Items are static but resolve so a preview of one says
+    so rather than erroring."""
+    if target in ("all", "*"):
+        out = [("player", "sprite/player/base.png")]
+        enemy_dir = data_dir / "sprite" / "enemy"
+        if enemy_dir.is_dir():
+            out += [
+                (f"enemy:{d.name}", f"sprite/enemy/{d.name}/base.png")
+                for d in sorted(enemy_dir.iterdir())
+                if d.is_dir()
+            ]
+        return out
+    kind, _, rest = target.partition(":")
+    if kind == "player":
+        return [("player", "sprite/player/base.png")]
+    if kind in ("enemy", "item") and rest:
+        return [(target, f"sprite/{kind}/{rest}/base.png")]
+    raise SystemExit(
+        f"PLAT_ANIM: unknown target {target!r} "
+        "(enemy:<id> | item:<id> | player | all)"
+    )
+
+
+def run_anim_preview(data_dir: Path, target: str, hooks: _Hooks) -> None:
+    """The animation VIEWER (PLAT_ANIM): play one actor's states side by side
+    on a neutral field instead of playing the level, so an animation can be
+    judged in the SAME surface that renders the game.
+
+    Every state runs on its own clock at its own loop mode, so `once` states
+    (jump/land/hurt/death) hold their last frame — press SPACE to restart them
+    all. Reuses ``_load_anim`` (atlas → strips → static ladder) and
+    ``_anim_index`` verbatim: what you see here is what the game selects.
+    Composes with PLAT_CAPTURE for a headless contact strip; ← → switch actors
+    when the target names several."""
+    import pygame
+
+    cell = SCALE * 3
+    font = pygame.font.SysFont("monospace", 13)
+    small = pygame.font.SysFont("monospace", 11)
+    actors = _anim_preview_targets(data_dir, target)
+    idx = 0
+    clock = pygame.time.Clock()
+    t = 0.0
+    # A display mode must exist BEFORE any convert_alpha() in the loaders.
+    screen = pygame.display.set_mode((360, cell + 112))
+    while True:
+        label, sprite_rel = actors[idx]
+        anim = _load_anim(data_dir, sprite_rel, (cell - 16, cell - 16)) or {}
+        states = sorted(anim)
+        static = None
+        if not states:  # static actor (items, un-animated enemies) — say so
+            path = data_dir / sprite_rel
+            if path.exists():
+                static = pygame.transform.smoothscale(
+                    pygame.image.load(str(path)).convert_alpha(), (cell - 16, cell - 16)
+                )
+        cols = max(1, len(states) or 1)
+        width, height = max(360, cols * cell + 24), cell + 112
+        if screen.get_size() != (width, height):
+            screen = pygame.display.set_mode((width, height))
+        pygame.display.set_caption(f"canon animation preview — {label}")
+        switch = 0
+        while not switch:
+            dt = (
+                1.0 / FPS if hooks.headless else clock.tick(FPS) / 1000.0
+            )
+            t += dt
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                        return
+                    if event.key == pygame.K_SPACE:
+                        t = 0.0  # replay the `once` states
+                    if event.key == pygame.K_RIGHT:
+                        switch = 1
+                    if event.key == pygame.K_LEFT:
+                        switch = -1
+            screen.fill((26, 22, 34))
+            screen.blit(font.render(label, True, (236, 231, 245)), (12, 8))
+            baseline = 32 + cell - 12
+            for i, state in enumerate(states):
+                meta = anim[state]
+                x = 12 + i * cell
+                pygame.draw.rect(
+                    screen, (40, 34, 52), (x, 32, cell - 8, cell - 8), border_radius=6
+                )
+                # The floor line: frames are bottom-anchored, so a state whose
+                # feet drift off it is mis-registered.
+                pygame.draw.line(
+                    screen, (86, 74, 104), (x + 6, baseline), (x + cell - 14, baseline)
+                )
+                frames = meta["frames"]
+                f = _anim_index(t, meta["durs"], meta["loop"])
+                frame = frames[min(f, len(frames) - 1)]
+                screen.blit(
+                    frame, (x + 8, baseline - frame.get_height())
+                )
+                screen.blit(
+                    small.render(state, True, (236, 231, 245)),
+                    (x + 6, 32 + cell - 4),
+                )
+                screen.blit(
+                    small.render(
+                        f"{f + 1}/{len(frames)} {meta['loop']}",
+                        True, (150, 142, 168),
+                    ),
+                    (x + 6, 32 + cell + 9),
+                )
+            if static is not None:
+                screen.blit(static, (12, 40))
+                screen.blit(
+                    small.render(
+                        "static sprite — no animation", True, (216, 164, 65)
+                    ),
+                    (12, 40 + cell),
+                )
+            elif not states:
+                screen.blit(
+                    small.render(
+                        f"no sprite at {sprite_rel}", True, (224, 69, 58)
+                    ),
+                    (12, 48),
+                )
+            screen.blit(
+                small.render(
+                    "SPACE replay  <- -> actor  ESC quit", True, (138, 131, 152)
+                ),
+                (12, height - 18),
+            )
+            pygame.display.flip()
+            if hooks.cap_dir:
+                if hooks.cap_i % hooks.cap_every == 0:
+                    pygame.image.save(
+                        screen,
+                        f"{hooks.cap_dir}/anim_{hooks.cap_i:04d}.png",
+                    )
+                hooks.cap_i += 1
+                if hooks.cap_i >= hooks.cap_ticks:
+                    return
+        idx = (idx + switch) % len(actors)
+        t = 0.0
 
 
 def main() -> None:
@@ -323,6 +602,12 @@ def main() -> None:
 
     pygame.init()
     hooks = _Hooks()
+    if hooks.anim_target:
+        # Animation viewer, not a play session: no level, no physics.
+        pygame.font.init()
+        run_anim_preview(data_dir, hooks.anim_target, hooks)
+        pygame.quit()
+        return
     # The ROOM-SWITCH loop (multi-room arc): run_level runs one map until
     # quit or a room transition; the player's CARRY state (hearts, coins,
     # held power-up) crosses the switch, per-level CACHES restore what a
@@ -1088,128 +1373,16 @@ def run_level(
         for eid, spec in enemies.items()
     }
 
-    # Per-state animation frames (art track, B4/G4). atlas.json beside
-    # base.png wins: one packed sheet whose trimmed crops reconstitute to
-    # the UNTRIMMED frame_size square, so downstream draw math is unchanged.
-    # frames.json strips are the fallback; no metadata at all → the static
-    # base sprite plays (the loud fallback). Frames are pre-scaled to the
-    # display size; authored left-facing frames load as "frames_left" and
-    # play UNFLIPPED. Per-state runtime shape: {"frames", "frames_left",
-    # "durs" (per-frame seconds), "loop"} — pick_anim_frame's contract.
-    def _slice_strip(path: Path, n: int, size: tuple) -> list:
-        sheet = pygame.image.load(str(path)).convert_alpha()
-        fw = sheet.get_width() // n
-        return [
-            pygame.transform.smoothscale(
-                sheet.subsurface((i * fw, 0, fw, sheet.get_height())), size
-            )
-            for i in range(n)
-        ]
-
-    def _atlas_frames(sheet, rects: list, fsize: tuple, size: tuple) -> list:
-        # Reconstitute each UNTRIMMED frame: blit the trimmed crop at its
-        # (ox, oy) offset on a transparent frame_size square (the inline
-        # equivalent of tileset_art's reconstitute_frame), then scale.
-        frames = []
-        for r in rects:
-            frame = pygame.Surface(fsize, pygame.SRCALPHA)
-            frame.blit(
-                sheet.subsurface(
-                    (
-                        int(r.get("x", 0)), int(r.get("y", 0)),
-                        int(r.get("w", 0)), int(r.get("h", 0)),
-                    )
-                ),
-                (int(r.get("ox", 0)), int(r.get("oy", 0))),
-            )
-            frames.append(pygame.transform.smoothscale(frame, size))
-        return frames
-
-    def _load_atlas_anim(sprite_dir: str, size: tuple) -> dict | None:
-        meta_path = data_dir / (sprite_dir + "/atlas.json")
-        if not meta_path.exists():
-            return None
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
-            return None
-        fsize = meta.get("frame_size") or []
-        sheet_path = data_dir / str(meta.get("path", ""))
-        if (
-            not isinstance(meta.get("states"), dict)
-            or len(fsize) != 2
-            or not str(meta.get("path", ""))
-            or not sheet_path.exists()
-        ):
-            return None
-        try:
-            sheet = pygame.image.load(str(sheet_path)).convert_alpha()
-            fsize = (int(fsize[0]), int(fsize[1]))
-            anim: dict = {}
-            for state, m in meta["states"].items():
-                rects = m.get("frames") or []
-                if not rects:
-                    continue
-                left_rects = m.get("frames_left") or []
-                durs, loop = _anim_timing(m, len(rects))
-                anim[state] = {
-                    "frames": _atlas_frames(sheet, rects, fsize, size),
-                    "frames_left": (
-                        _atlas_frames(sheet, left_rects, fsize, size)
-                        if len(left_rects) == len(rects)
-                        else None
-                    ),
-                    "durs": durs,
-                    "loop": loop,
-                }
-        except (AttributeError, TypeError, ValueError, pygame.error):
-            return None  # garbled states/rects → fall back to the strip path
-        return anim or None
-
-    def _load_anim(sprite_rel: str, size: tuple) -> dict | None:
-        if _PLAIN or not sprite_rel:
-            return None
-        sprite_dir = sprite_rel.rsplit("/", 1)[0]
-        anim = _load_atlas_anim(sprite_dir, size)
-        if anim:
-            return anim
-        meta_path = data_dir / (sprite_dir + "/frames.json")
-        if not meta_path.exists():
-            return None
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
-            return None
-        anim = {}
-        for state, m in meta.items():
-            strip = data_dir / m.get("path", "")
-            n = int(m.get("frames", 0))
-            if n < 1 or not strip.exists():
-                continue
-            left_rel = str(m.get("path_left", "") or "")
-            left = None
-            if (
-                left_rel
-                and int(m.get("frames_left", 0)) == n
-                and (data_dir / left_rel).exists()
-            ):
-                left = _slice_strip(data_dir / left_rel, n, size)
-            durs, loop = _anim_timing(m, n)
-            anim[state] = {
-                "frames": _slice_strip(strip, n, size),
-                "frames_left": left,
-                "durs": durs,
-                "loop": loop,
-            }
-        return anim or None
-
+    # Per-state animation frames (art track, B4/G4) — see _load_anim.
     enemy_anims = {
         eid: a
         for eid, spec in enemies.items()
-        if (a := _load_anim(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4)))
+        if (a := _load_anim(data_dir, spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4)))
     }
     # The player animates too (art track): idle/walk/JUMP, smoother (~9 frames).
-    player_anim = _load_anim("sprite/player/base.png", (SCALE - 8, SCALE - 8))
+    player_anim = _load_anim(
+        data_dir, "sprite/player/base.png", (SCALE - 8, SCALE - 8)
+    )
     # Item sprites (art track): drawn in place of the colored circle when
     # the art phase produced one (loud circle fallback otherwise).
     for item in items:

@@ -140,10 +140,15 @@ class AudioPhase:
         music_producer: Any = None,
         sfx_producer: Any = None,
         music_seconds: int = MUSIC_SECONDS,
+        music_prompt_override: str | None = None,
     ) -> None:
         self.music = music_producer
         self.sfx = sfx_producer
         self.music_seconds = music_seconds
+        # Per-call MUSIC prompt override ("✎ edit prompt"); only the
+        # single-stage `generate_asset` op sets it (its bible holds one
+        # stage). SFX prompts are per-event and stay built. None = default.
+        self.music_prompt_override = music_prompt_override
 
     def owns(self, ctx: Any) -> list[str]:
         return [
@@ -172,10 +177,13 @@ class AudioPhase:
             if self.music is not None:
                 try:
                     data = self.music.generate(
-                        f"Looping instrumental level theme for a retro "
-                        f"platformer stage: {stage.theme}. World: "
-                        f"{world_title}. Melodic, atmospheric, seamless "
-                        f"loop, no vocals.",
+                        (self.music_prompt_override or "").strip()
+                        or (
+                            f"Looping instrumental level theme for a retro "
+                            f"platformer stage: {stage.theme}. World: "
+                            f"{world_title}. Melodic, atmospheric, seamless "
+                            f"loop, no vocals."
+                        ),
                         self.music_seconds,
                     )
                     rel = f"music/{stage_id}/theme{_audio_ext(data)}"

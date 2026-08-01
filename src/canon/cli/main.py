@@ -979,6 +979,14 @@ def level_music_generate(
     ),
     music_backend: str = typer.Option("lyria", "--music-backend", help="fake ($0) | lyria (paid)."),
     seconds: int | None = typer.Option(None, "--seconds", help="Track length (default 30s clip)."),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the WHOLE music prompt for this call (wins over --brief; "
+        "see `canon prompt show --kind music`).",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file", help="KEY=VALUE file (GOOGLE_API_KEY for lyria)."),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -990,11 +998,12 @@ def level_music_generate(
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(prompt, prompt_file, "--prompt")
     try:
         result = ops.generate_level_music(
             pack_dir, level_id=level_id, brief=brief, section=section,
-            backend=music_backend, music_seconds=seconds, actor=actor,
-            session=session,
+            backend=music_backend, music_seconds=seconds,
+            prompt_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
@@ -1223,6 +1232,14 @@ def level_generate(
     seed: str | None = typer.Option(None, "--seed", help="Pin for reproducibility (default: varied)."),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the LAYOUT agent's SYSTEM prompt for this call "
+        "(placements keep their defaults; see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1236,12 +1253,13 @@ def level_generate(
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         result = ops.generate_level(
             pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
             model=llm_model, difficulty=difficulty, width=width, height=height,
             axis=axis, max_enemies=enemies, max_items=items, seed=seed,
-            actor=actor, session=session,
+            system_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
@@ -1305,6 +1323,14 @@ def level_generate_terrain(
     seed: str | None = typer.Option(None, "--seed"),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1315,11 +1341,13 @@ def level_generate_terrain(
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         result = ops.generate_terrain(
             pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
             model=llm_model, difficulty=difficulty, width=width, height=height,
-            axis=axis, seed=seed, actor=actor, session=session,
+            axis=axis, seed=seed, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
@@ -1400,6 +1428,14 @@ def level_regenerate(
     seed: str | None = typer.Option(None, "--seed"),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1412,11 +1448,13 @@ def level_regenerate(
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         result = ops.regenerate_terrain(
             pack_dir, level_id=level_id, brief=brief, backend=llm_backend,
             model=llm_model, difficulty=difficulty, width=width, height=height,
-            axis=axis, seed=seed, actor=actor, session=session,
+            axis=axis, seed=seed, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
@@ -1435,6 +1473,14 @@ def level_improve(
     seed: str | None = typer.Option(None, "--seed"),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind improve`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1447,12 +1493,13 @@ def level_improve(
     ops = _pack_ops()
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         result = ops.improve_terrain(
             pack_dir, level_id=level_id, instruction=instruction,
             fix_problems=fix_problems, reroll_placements=reroll_placements,
             backend=llm_backend, model=llm_model, seed=seed,
-            actor=actor, session=session,
+            system_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
@@ -1620,6 +1667,64 @@ def _pack_ops():
     return ops
 
 
+def _prompt_text(text: str | None, path: Path | None, flag: str) -> str | None:
+    """Resolve a prompt override from an inline string or a file. Returns None
+    when neither is given (→ the built-in default runs, byte-for-byte)."""
+    if text and path:
+        _emit_error(f"Pass either {flag} or {flag}-file, not both.")
+    if path:
+        if not path.is_file():
+            _emit_error(f"Prompt file not found: {path}")
+        return path.read_text()
+    return text or None
+
+
+prompt_app = typer.Typer(
+    help="Inspect the prompts the generators send (and override them per call)."
+)
+app.add_typer(prompt_app, name="prompt")
+
+
+@prompt_app.command("show")
+def prompt_show(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    kind: str = typer.Option(
+        ..., "--kind",
+        help="layout | improve | enemy | item | sprite | music",
+    ),
+    level_id: str | None = typer.Option(
+        None, "--level", help="Use this level's real data (layout/improve/music)."
+    ),
+    target: str | None = typer.Option(
+        None, "--target",
+        help="Row id for enemy/item, or enemy:<id>|item:<id>|player for sprite.",
+    ),
+    instruction: str = typer.Option(
+        "", "--instruction", help="Preview an improve with this instruction."
+    ),
+    brief: str = typer.Option("", "--brief", help="Brief for layout/music previews."),
+) -> None:
+    """Print the DEFAULT prompt a generator would send, WITHOUT generating.
+
+    LLM kinds emit ``system`` (the editable standing instructions) plus the
+    ``user_message`` for context; image/audio kinds emit a single ``prompt``.
+    Feed an edited ``system`` back via --system-prompt on the gen verb (or
+    --prompt for sprite/music). Pure read: no LLM call, no cost, no journal."""
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.preview_prompt(
+            pack_dir, kind, level_id=level_id, target=target,
+            instruction=instruction, brief=brief,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), kind=kind)
+    except Exception as e:
+        _emit_error(f"prompt show failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 spend_app = typer.Typer(help="Per-project spend ledger (what paid ops cost).")
 app.add_typer(spend_app, name="spend")
 
@@ -1746,6 +1851,14 @@ def db_new_cmd(
     ),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the authoring agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind enemy|item`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1758,11 +1871,13 @@ def db_new_cmd(
         fields = json.loads(fields_json) if fields_json else {}
     except json.JSONDecodeError as e:
         _emit_error(f"Invalid --fields JSON: {e}")
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         llm = ops.build_llm(llm_backend if complete else None, llm_model)
         result = ops.new_db_row(
             pack_dir, entity_type, fields,
-            complete=complete, llm=llm, actor=actor, session=session,
+            complete=complete, llm=llm, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type)
@@ -1784,6 +1899,14 @@ def db_complete_cmd(
     ),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the authoring agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind enemy|item`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1791,12 +1914,14 @@ def db_complete_cmd(
     """LLM-complete an existing row, anchored by its locked fields."""
     _load_env_file(env_file)
     ops = _pack_ops()
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         llm = ops.build_llm(llm_backend, llm_model)
         result = ops.complete_db_row(
             pack_dir, entity_type, entity_id,
             [s.strip() for s in locked.split(",")] if locked else [],
-            reroll=reroll, llm=llm, actor=actor, session=session,
+            reroll=reroll, llm=llm, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), id=entity_id)
@@ -1901,6 +2026,14 @@ def asset_generate_cmd(
     image_edit_backend: str | None = typer.Option(None, "--image-edit-backend"),
     music_backend: str | None = typer.Option(None, "--music-backend"),
     sfx_backend: str | None = typer.Option(None, "--sfx-backend"),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the image prompt (sprite targets) or music prompt "
+        "(audio targets) for this call — see `canon prompt show --kind sprite`.",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1909,6 +2042,7 @@ def asset_generate_cmd(
     path). Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
     _load_env_file(env_file)
     ops = _pack_ops()
+    override = _prompt_text(prompt, prompt_file, "--prompt")
     try:
         result = ops.generate_asset(
             pack_dir, target,
@@ -1916,7 +2050,7 @@ def asset_generate_cmd(
             image_edit_model=image_edit_model,
             image_edit_backend=image_edit_backend,
             music_backend=music_backend, sfx_backend=sfx_backend,
-            actor=actor, session=session,
+            prompt_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)
@@ -1939,12 +2073,22 @@ def asset_animate_cmd(
         False, "--reuse-spec",
         help="Skip VLM authoring and reuse the stored motion spec.",
     ),
+    renormalize: bool = typer.Option(
+        False, "--renormalize",
+        help="REFRAME ONLY, $0, no backends: re-seat the frames already on "
+        "disk on one shared square, giving every state equal headroom and "
+        "repacking the atlas. It canNOT restore cross-state proportions — "
+        "those were lost when each state was scaled to fill its own cell; "
+        "re-animate for that.",
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
     """Animate ONE actor (the multi-image path): VLM-authored motion spec →
-    one img2img sheet per state → strips + frames.json + packed atlas."""
+    one img2img sheet per state → strips + frames.json + packed atlas.
+
+    With --renormalize it instead repairs the existing frames in place (free)."""
     _load_env_file(env_file)
     ops = _pack_ops()
     try:
@@ -1954,7 +2098,8 @@ def asset_animate_cmd(
             image_edit_model=image_edit_model,
             image_edit_backend=image_edit_backend,
             vlm_backend=vlm_backend, vlm_model=vlm_model,
-            reuse_spec=reuse_spec, actor=actor, session=session,
+            reuse_spec=reuse_spec, renormalize=renormalize,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)

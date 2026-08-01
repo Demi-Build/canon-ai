@@ -3975,3 +3975,48 @@ class TestSequentialHandoffPrompts:
         _run_slice(tmp_path / "run", responder=responder)
         assert regen_prompts, "no regen prompt carried the successor band"
         assert all("mesh with them" in p for p in regen_prompts)
+
+
+class TestAnimPreviewTargets:
+    """PLAT_ANIM boots the animation VIEWER instead of a play session, so an
+    animation can be judged in the same surface that renders the game. The
+    target grammar is the only part testable without a display."""
+
+    def test_named_targets_resolve_to_base_sprites(self, tmp_path) -> None:
+        from examples.platformer_play import _anim_preview_targets
+
+        assert _anim_preview_targets(tmp_path, "player") == [
+            ("player", "sprite/player/base.png")
+        ]
+        assert _anim_preview_targets(tmp_path, "enemy:blind_eel") == [
+            ("enemy:blind_eel", "sprite/enemy/blind_eel/base.png")
+        ]
+        assert _anim_preview_targets(tmp_path, "item:coin") == [
+            ("item:coin", "sprite/item/coin/base.png")
+        ]
+
+    def test_all_walks_the_player_then_every_enemy(self, tmp_path) -> None:
+        from examples.platformer_play import _anim_preview_targets
+
+        for eid in ("wisp", "aphid"):
+            (tmp_path / "sprite" / "enemy" / eid).mkdir(parents=True)
+        labels = [label for label, _ in _anim_preview_targets(tmp_path, "all")]
+        assert labels == ["player", "enemy:aphid", "enemy:wisp"]  # sorted, player first
+
+    def test_all_on_a_pack_with_no_sprites_still_offers_the_player(
+        self, tmp_path
+    ) -> None:
+        # A static-only pack must not explode — the viewer says "no sprite".
+        from examples.platformer_play import _anim_preview_targets
+
+        assert _anim_preview_targets(tmp_path, "all") == [
+            ("player", "sprite/player/base.png")
+        ]
+
+    def test_unknown_target_fails_loudly(self, tmp_path) -> None:
+        from examples.platformer_play import _anim_preview_targets
+
+        with pytest.raises(SystemExit, match="unknown target"):
+            _anim_preview_targets(tmp_path, "bogus:thing")
+        with pytest.raises(SystemExit, match="unknown target"):
+            _anim_preview_targets(tmp_path, "enemy")  # no id

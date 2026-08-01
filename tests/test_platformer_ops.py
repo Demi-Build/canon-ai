@@ -1239,3 +1239,237 @@ def test_estimate_music_scope_is_backend_masked():
 
     assert estimate_cradle("music", backends={"music": "fake"})["total_usd"]["best"] == 0.0
     assert estimate_cradle("music", backends={"music": "lyria"})["total_usd"]["best"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# per-call prompt override — "see the prompt, edit it, run THIS call with it"
+# ---------------------------------------------------------------------------
+
+
+def _systems_seen(monkeypatch) -> list[str]:
+    """Record the system prompt of every LLM request an op actually sends.
+
+    Always wraps the PRISTINE ``build_llm`` (via the marker below) so calling
+    this more than once in a test installs independent spies instead of
+    stacking them — a stacked spy would also feed the earlier test's list.
+    """
+    seen: list[str] = []
+    real_build = getattr(ops.build_llm, "_pristine", ops.build_llm)
+
+    def spy(kind, model=None, stats=None):
+        client = real_build(kind, model, stats=stats)
+        if client is None:
+            return None
+        inner = client.backend.generate
+
+        def wrapped(request):
+            seen.append(str(getattr(request, "system", "")))
+            return inner(request)
+
+        client.backend.generate = wrapped
+        return client
+
+    spy._pristine = real_build  # type: ignore[attr-defined]
+    monkeypatch.setattr(ops, "build_llm", spy)
+    return seen
+
+
+def test_preview_prompt_covers_every_kind(pack: Path):
+    """Every editable generator can show its default prompt WITHOUT generating:
+    LLM kinds split system/user, image+audio kinds return one prompt string."""
+    enemy_id = next(iter(ops._load_defs(pack, "enemy")))
+    item_id = next(iter(ops._load_defs(pack, "item")))
+    cases = {
+        "layout": {},
+        "improve": {"level_id": "l1", "instruction": "add a bridge"},
+        "enemy": {"target": enemy_id},
+        "item": {"target": item_id},
+        "sprite": {"target": f"enemy:{enemy_id}"},
+        "music": {"level_id": "l1"},
+    }
+    for kind, kwargs in cases.items():
+        out = ops.preview_prompt(pack, kind, **kwargs)
+        assert out["label"] == ops.PROMPT_KINDS[kind]["label"]
+        if out["mode"] == "llm":
+            assert out["system"].strip() and out["user_message"].strip()
+        else:
+            assert out["prompt"].strip()
+
+    # The improve preview must actually carry the instruction + level context.
+    imp = ops.preview_prompt(
+        pack, "improve", level_id="l1", instruction="widen the final gap"
+    )
+    assert "widen the final gap" in imp["user_message"]
+    # A targeted row preview shows only ROLLED spec fields (no artifact_id/status).
+    row = ops.preview_prompt(pack, "enemy", target=enemy_id)
+    assert "artifact_id" not in row["user_message"]
+    with pytest.raises(ValueError, match="unknown prompt kind"):
+        ops.preview_prompt(pack, "nonsense")
+
+
+def test_preview_prompt_is_pure_read(pack: Path, tmp_path):
+    """Previewing costs nothing and mutates nothing — no journal, no writes."""
+    import shutil
+
+    p = tmp_path / "preview_pure"
+    shutil.copytree(pack, p)
+    before_events = len(_journal(p))
+    before_tree = {
+        f.relative_to(p): f.stat().st_mtime_ns
+        for f in sorted(p.rglob("*")) if f.is_file()
+    }
+    for kind in ("layout", "improve", "music"):
+        ops.preview_prompt(p, kind, level_id="l1")
+    after_tree = {
+        f.relative_to(p): f.stat().st_mtime_ns
+        for f in sorted(p.rglob("*")) if f.is_file()
+    }
+    assert len(_journal(p)) == before_events
+    assert before_tree == after_tree
+
+
+def test_system_override_reaches_the_model_and_only_its_agent(pack: Path, tmp_path, monkeypatch):
+    """The edited system prompt is what the layout agent receives — and the
+    override is keyed by agent label, so a whole-level generate's PLACEMENT
+    calls keep their own system prompt."""
+    import shutil
+
+    p = tmp_path / "override_generate"
+    shutil.copytree(pack, p)
+    stage_id = json.loads((p / "manifest.json").read_text())["stages"][0]["stage_id"]
+    seen = _systems_seen(monkeypatch)
+    ops.generate_level(
+        p, stage_id=stage_id, brief="a test level", backend="fake", seed="pin",
+        system_override="HOUSE-RULES-ONLY", actor="test",
+    )
+    assert "HOUSE-RULES-ONLY" in seen, "layout agent must receive the override"
+    assert any(s != "HOUSE-RULES-ONLY" for s in seen), (
+        "placement agents must keep their own system prompt"
+    )
+
+
+def test_no_override_is_byte_identical(pack: Path, tmp_path, monkeypatch):
+    """The seam is ADDITIVE: absent an override, the op sends exactly today's
+    prompts and produces exactly today's bytes."""
+    import shutil
+
+    base, none_, empty = (tmp_path / n for n in ("ov_base", "ov_none", "ov_empty"))
+    for d in (base, none_, empty):
+        shutil.copytree(pack, d)
+
+    seen_default = _systems_seen(monkeypatch)
+    ops.improve_terrain(
+        base, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", actor="test",
+    )
+    seen_none = _systems_seen(monkeypatch)
+    ops.improve_terrain(
+        none_, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", system_override=None, actor="test",
+    )
+    seen_empty = _systems_seen(monkeypatch)
+    ops.improve_terrain(
+        empty, level_id="l1", instruction="make it harder", backend="fake",
+        seed="pin", system_override="", actor="test",
+    )
+    # Same prompts sent...
+    assert seen_default == seen_none == seen_empty
+    # ...and the same bytes on disk.
+    grids = [
+        (d / next(d.glob("level/*/l1")).relative_to(d) / "collision.npz").read_bytes()
+        for d in (base, none_, empty)
+    ]
+    assert grids[0] == grids[1] == grids[2]
+
+
+def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_path, monkeypatch):
+    """Image/audio generators have no system/user split — the whole prompt is
+    editable, and the override is what the producer is asked to render."""
+    import shutil
+
+    prompts: list[str] = []
+
+    class _SpyImage:
+        model = "spy-image"
+        last_cost = 0.0
+
+        def generate(self, prompt, width, height):
+            prompts.append(prompt)
+            from examples.platformer_pack.tileset_art import build_image_producer
+
+            return build_image_producer("fake").backend.generate(prompt, width, height)
+
+    class _SpyMusic:
+        model = "spy-music"
+        last_cost = 0.0
+
+        def generate(self, prompt, seconds):
+            prompts.append(prompt)
+            return b"ID3spy"
+
+    p = tmp_path / "asset_override"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+
+    monkeypatch.setattr(
+        "examples.platformer_pack.tileset_art.build_image_producer",
+        lambda *a, **k: __import__(
+            "examples.platformer_pack.tileset_art", fromlist=["DiffusionSheetProducer"]
+        ).DiffusionSheetProducer(_SpyImage()),
+    )
+    ops.generate_asset(
+        p, f"enemy:{enemy_id}", image_backend="fake",
+        prompt_override="A BRIGHT RED CUBE, nothing else", actor="test",
+    )
+    assert any("A BRIGHT RED CUBE" in s for s in prompts)
+
+    prompts.clear()
+    monkeypatch.setattr(
+        "examples.platformer_pack.audio_phases.build_music_producer",
+        lambda kind: _SpyMusic(),
+    )
+    ops.generate_level_music(
+        p, level_id="l1", backend="stub",
+        prompt_override="SOLO KAZOO MARCH", actor="test",
+    )
+    assert prompts == ["SOLO KAZOO MARCH"]
+
+
+def test_cli_prompt_show_and_override_round_trip(pack: Path, tmp_path):
+    """The user-facing loop: `prompt show` prints the default, an edited copy
+    goes back in via --system-prompt-file, and the two flags are exclusive."""
+    import shutil
+
+    p = tmp_path / "cli_prompt"
+    shutil.copytree(pack, p)
+
+    shown = json.loads(
+        subprocess.run(
+            [sys.executable, "-m", "canon.cli.main", "prompt", "show", str(p),
+             "--kind", "improve", "--level", "l1", "--instruction", "add a bridge"],
+            check=True, capture_output=True, text=True, cwd=REPO,
+        ).stdout
+    )
+    assert shown["mode"] == "llm" and shown["label"] == "plat:layout"
+
+    edited = tmp_path / "system.txt"
+    edited.write_text(shown["system"] + "\nEXTRA HOUSE RULE: leave a rest ledge.\n")
+    out = json.loads(
+        subprocess.run(
+            [sys.executable, "-m", "canon.cli.main", "level", "improve", str(p),
+             "--level", "l1", "--instruction", "make it harder", "--seed", "pin",
+             "--llm-backend", "fake", "--system-prompt-file", str(edited)],
+            check=True, capture_output=True, text=True, cwd=REPO,
+        ).stdout
+    )
+    assert out["improved"] is True
+
+    # Errors are emitted as JSON on STDERR with a non-zero exit code.
+    refused = subprocess.run(
+        [sys.executable, "-m", "canon.cli.main", "level", "improve", str(p),
+         "--level", "l1", "--instruction", "x", "--system-prompt", "A",
+         "--system-prompt-file", str(edited)],
+        capture_output=True, text=True, cwd=REPO,
+    )
+    assert refused.returncode != 0
+    assert "not both" in json.loads(refused.stderr)["error"]
