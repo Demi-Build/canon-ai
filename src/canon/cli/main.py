@@ -900,6 +900,57 @@ def world_new(
     })
 
 
+@world_app.command("map")
+def world_map_read(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+) -> None:
+    """The render-ready world map: nodes (position + display name + stage),
+    typed edges, and the AREAS levels cluster under. Pure read."""
+    try:
+        from canon.adapters.platformer_write import read_world_map
+
+        _emit(read_world_map(pack_dir))
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"world map failed: {e}", traceback=traceback.format_exc())
+
+
+@world_app.command("map-edit")
+def world_map_edit(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    edit_json: str = typer.Option(
+        ..., "--json",
+        help='Any subset of {"nodes":{"l1":{"pos":[x,y]}},"edges":[...],"locked":bool}. '
+        "A null node value hands that node back to the generator.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Hand-author the world map: place nodes, type the connections, lock the
+    layout.
+
+    The map is recomputed from the seed on every resume, so these are stored as
+    DURABLE OVERRIDES on the World bible and layered back on at compose time —
+    without that, the next run silently reverts your layout."""
+    try:
+        edit = json.loads(edit_json)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    try:
+        from canon.adapters.platformer_write import apply_world_map_edit
+
+        _emit(
+            apply_world_map_edit(
+                pack_dir, edit, actor=actor, session=session  # type: ignore[possibly-unbound]
+            )
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"world map-edit failed: {e}", traceback=traceback.format_exc())
+
+
 @world_app.command("estimate")
 def world_estimate(
     stages: int = typer.Option(3, "--stages"),

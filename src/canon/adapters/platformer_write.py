@@ -1231,3 +1231,215 @@ def assign_asset(
     return {
         "from": source, "to": to, "sprite_hash": sprite_hash, "pinned": pinned,
     }
+
+
+# ---------------------------------------------------------------------------
+# World map authoring
+# ---------------------------------------------------------------------------
+
+_EDGE_KINDS = {"path", "one", "lock", "new"}
+
+
+def apply_world_map_edit(
+    pack_dir: str | Path,
+    edit: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Persist hand-authoring of the world map onto ``world.json``.
+
+    The map itself is RECOMPUTED from the seed on every resume, so the durable
+    record is a set of overrides on the World bible — ``map_nodes`` (placed
+    positions), ``map_edges`` (typed connections) and ``map_locked``. Writing
+    them here and letting ``compose._world_map`` layer them on is what stops
+    the next run from silently reverting a human's layout.
+
+    Accepts any subset of::
+
+        {"nodes": {"l1": {"pos": [0.2, 0.4]}, "l2": null},
+         "edges": [{"a": "l1", "b": "l2", "kind": "lock", "condition": "..."}],
+         "locked": true}
+
+    A ``null`` node value REMOVES the override, handing that node back to the
+    generator. Mirrors ``db update``: validate → write → journal.
+    """
+    pack = Path(pack_dir)
+    wj = pack / "world.json"
+    if not wj.is_file():
+        raise FileNotFoundError(f"no world.json in {pack}")
+    world = json.loads(wj.read_text())
+    before = provenance.snapshot_file(pack, wj)
+
+    changed: list[str] = []
+
+    if "nodes" in edit:
+        nodes = dict(world.get("map_nodes") or {})
+        for level_id, value in (edit["nodes"] or {}).items():
+            if value is None:
+                if nodes.pop(level_id, None) is not None:
+                    changed.append(f"unplaced {level_id}")
+                continue
+            pos = (value or {}).get("pos")
+            if (
+                not isinstance(pos, (list, tuple))
+                or len(pos) != 2
+                or not all(isinstance(v, (int, float)) for v in pos)
+            ):
+                raise ValueError(f"node {level_id!r} needs pos [x, y] in 0..1")
+            # Clamp rather than reject: a drag that overshoots the canvas edge
+            # is a normal gesture, not an error.
+            clamped = [round(min(1.0, max(0.0, float(v))), 4) for v in pos]
+            if nodes.get(level_id, {}).get("pos") != clamped:
+                changed.append(f"placed {level_id}")
+            nodes[level_id] = {"pos": clamped}
+        world["map_nodes"] = nodes
+
+    if "edges" in edit:
+        specs: list[dict] = []
+        for e in edit["edges"] or []:
+            a, b = e.get("a"), e.get("b")
+            if not a or not b:
+                raise ValueError("every edge needs both 'a' and 'b'")
+            kind = e.get("kind") or "path"
+            if kind not in _EDGE_KINDS:
+                raise ValueError(
+                    f"edge kind {kind!r} not one of {sorted(_EDGE_KINDS)}"
+                )
+            spec: dict[str, Any] = {"a": a, "b": b, "kind": kind}
+            if e.get("condition"):
+                spec["condition"] = str(e["condition"])
+            if e.get("stop"):
+                spec["stop"] = str(e["stop"])
+            specs.append(spec)
+        if specs != (world.get("map_edges") or []):
+            changed.append(f"{len(specs)} edge(s)")
+        world["map_edges"] = specs
+
+    if "locked" in edit:
+        locked = bool(edit["locked"])
+        if locked != bool(world.get("map_locked")):
+            changed.append("locked" if locked else "unlocked")
+        world["map_locked"] = locked
+
+    if not changed:
+        # No-op edits must not pollute the journal (the same hygiene rule
+        # apply_level_edit follows for grab-and-release-in-place).
+        return {"world_map": "no_change", "changed": []}
+
+    wj.write_text(json.dumps(world, indent=2))
+    after = provenance.snapshot_file(pack, wj)
+    provenance.record(
+        pack,
+        artifact_id="world",
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={"kind": "world_map_edit", "changes": changed},
+        before_hash=before,
+        after_hash=after,
+    )
+    return {"world_map": "updated", "changed": changed}
+
+
+def read_world_map(pack_dir: str | Path) -> dict:
+    """The render-ready world map: nodes with positions + display names, typed
+    edges, and the AREAS (stages) they cluster under.
+
+    Areas are stages — they already carry the theme/biome/level membership the
+    design's area inspector wants, so this exposes what exists rather than
+    inventing a parallel grouping.
+    """
+    pack = Path(pack_dir)
+    manifest = json.loads((pack / "manifest.json").read_text())
+    wmap = manifest.get("world_map") or {}
+    world = {}
+    if (pack / "world.json").is_file():
+        world = json.loads((pack / "world.json").read_text())
+
+    published = {n.get("level_id") for n in wmap.get("nodes") or []}
+    placed = dict(world.get("map_nodes") or {})
+
+    # DRAFT levels — created by `level create` but not yet published into a
+    # stage's level list, so `compose._world_map` (which walks stage.level_ids)
+    # can't see them. They are the design's `planned` nodes: on the map, not
+    # yet part of the progression.
+    #
+    # SECRET ROOMS are deliberately excluded: a room is a sub-room INSIDE a
+    # level, not a stop on the world map, so it has no node here.
+    drafts: list[dict[str, Any]] = []
+    for level_json in sorted(pack.glob("level/*/*/level.json")):
+        try:
+            lv = json.loads(level_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        lid = lv.get("level_id") or level_json.parent.name
+        if lid in published or lv.get("parent_level"):
+            continue
+        pos = (placed.get(lid) or {}).get("pos") or [0.5, 0.5]
+        drafts.append(
+            {
+                "level_id": lid,
+                "display_name": None,
+                "stage_id": level_json.parent.parent.name,
+                "pos": [round(float(pos[0]), 4), round(float(pos[1]), 4)],
+                "status": "planned",
+                **({"origin": "manual"} if lid in placed else {}),
+            }
+        )
+
+    # Layer the DURABLE overrides on the manifest here too, exactly as
+    # `compose._world_map` does at compose time. Without this the editor writes
+    # world.json and reads back the pre-edit manifest — the map would appear to
+    # ignore every edit until the next full pipeline run.
+    nodes: list[dict[str, Any]] = []
+    for n in wmap.get("nodes") or []:
+        node = dict(n)
+        placed_pos = (placed.get(node.get("level_id")) or {}).get("pos")
+        if isinstance(placed_pos, (list, tuple)) and len(placed_pos) == 2:
+            node["pos"] = [round(float(placed_pos[0]), 4), round(float(placed_pos[1]), 4)]
+            node["origin"] = "manual"
+        nodes.append(node)
+
+    authored = world.get("map_edges") or []
+    specs = authored or wmap.get("edge_specs")
+    if not specs:
+        # Untyped derived chain — surface it in the same shape so the consumer
+        # has exactly one edge model to draw.
+        specs = [
+            {"a": a, "b": b, "kind": "path"} for a, b in (wmap.get("edges") or [])
+        ]
+
+    validation = {}
+    for lid in [n.get("level_id") for n in wmap.get("nodes") or []]:
+        rel = None
+        for stage in manifest.get("stages") or []:
+            if lid in (stage.get("levels") or []):
+                rel = stage.get("stage_id")
+        if rel:
+            validation[lid] = rel
+
+    areas = []
+    for i, stage in enumerate(manifest.get("stages") or []):
+        areas.append(
+            {
+                "stage_id": stage.get("stage_id"),
+                "index": i,
+                "theme": stage.get("theme", ""),
+                "biome": stage.get("biome", ""),
+                "level_ids": list(stage.get("levels") or []),
+                "music": (manifest.get("audio") or {})
+                .get(stage.get("stage_id"), {})
+                .get("music"),
+            }
+        )
+
+    return {
+        "world": manifest.get("world", ""),
+        "nodes": [*nodes, *drafts],
+        "edges": specs,
+        "areas": areas,
+        "locked": bool(world.get("map_locked")),
+        "manual_count": len(world.get("map_nodes") or {}),
+    }

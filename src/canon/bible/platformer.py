@@ -154,6 +154,24 @@ class World(ArtifactMeta):
     stage_ids: list[str] = Field(default_factory=list)
     edges: list[tuple[str, str]] = Field(default_factory=list)  # connectivity
     unlock_rules: dict[str, Any] = Field(default_factory=dict)
+    #: DURABLE world-map authoring, layered over the deterministic layout
+    #: `compose._world_map` computes from the seed. That layout is recomputed
+    #: on EVERY resume (compose is an always-node), so anything a human places
+    #: has to live here or the next run silently stomps it.
+    #:
+    #: All three default to empty, and empty means "compute everything" — so a
+    #: pack that has never been hand-authored produces byte-identical output.
+    #:
+    #: `map_nodes`: level_id -> {"pos": [x, y]} in normalized 0..1 coords.
+    #: Presence alone marks the node `manual` in the emitted map.
+    map_nodes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: `map_edges`: typed connections between LEVELS. Non-empty REPLACES the
+    #: derived linear chain (the chain is what you get before authoring).
+    #: Each: {"a", "b", "kind": path|one|lock|new, "condition"?, "stop"?}.
+    map_edges: list[dict[str, Any]] = Field(default_factory=list)
+    #: When locked, generation may ADD and CONNECT levels but must not move a
+    #: node a human placed. (Enforced by `_world_map`, not by convention.)
+    map_locked: bool = False
     #: Generated boot-splash key art (art track): splash/world.png,
     #: hash-tracked so the splash is edit-detected and pinnable.
     splash_path: str = ""  # output_dir-relative; "" = engine title card
