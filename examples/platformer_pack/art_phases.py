@@ -754,10 +754,21 @@ class SpriteAnimationPhase:
         producer: Any = None,
         judge: Any = None,
         graphics: GraphicsSpec = DEFAULT_GRAPHICS,
+        prompt_override: str | None = None,
     ) -> None:
         self.producer = producer
         self.judge = judge
         self.graphics = graphics
+        # Per-call override of the VLM's motion-spec AUTHORING prompt
+        # ("✎ edit prompt"), mirroring SpriteArtPhase.prompt_override. Only
+        # the single-actor `animate_asset` op sets it, and only with a bible
+        # filtered to ONE actor, so it can't bleed onto siblings. None =
+        # today's built prompt, byte-for-byte.
+        #
+        # Deliberately NOT the per-state img2img sheet prompt: that one is
+        # issued once per state per facing (6-12x a run) and a single override
+        # would flatten the per-state silhouette contract _STATE_BRIEF enforces.
+        self.prompt_override = prompt_override
 
     def owns(self, ctx: Any) -> list[str]:
         # Same ids as SpriteArtPhase — a re-rolled sprite re-rolls its
@@ -862,6 +873,7 @@ class SpriteAnimationPhase:
         spec = author_animation_spec(
             self.judge, actor_id, subject, base_file.read_bytes(),
             states=states, frames_max=frames_max,
+            prompt_override=self.prompt_override,
         )
         if spec is None:
             warn(

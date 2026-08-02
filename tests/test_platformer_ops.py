@@ -1276,7 +1276,8 @@ def _systems_seen(monkeypatch) -> list[str]:
 
 def test_preview_prompt_covers_every_kind(pack: Path):
     """Every editable generator can show its default prompt WITHOUT generating:
-    LLM kinds split system/user, image+audio kinds return one prompt string."""
+    LLM kinds split system/user, image/audio/vlm kinds return one prompt
+    string."""
     enemy_id = next(iter(ops._load_defs(pack, "enemy")))
     item_id = next(iter(ops._load_defs(pack, "item")))
     cases = {
@@ -1285,6 +1286,7 @@ def test_preview_prompt_covers_every_kind(pack: Path):
         "enemy": {"target": enemy_id},
         "item": {"target": item_id},
         "sprite": {"target": f"enemy:{enemy_id}"},
+        "animate": {"target": f"enemy:{enemy_id}"},
         "music": {"level_id": "l1"},
     }
     for kind, kwargs in cases.items():
@@ -1303,6 +1305,16 @@ def test_preview_prompt_covers_every_kind(pack: Path):
     # A targeted row preview shows only ROLLED spec fields (no artifact_id/status).
     row = ops.preview_prompt(pack, "enemy", target=enemy_id)
     assert "artifact_id" not in row["user_message"]
+    # The animate preview is the VLM's AUTHORING prompt, built from the same
+    # subject + state list the run derives (preview == what runs) — not the
+    # per-state img2img sheet prompt, which is issued once per state.
+    anim = ops.preview_prompt(pack, "animate", target=f"enemy:{enemy_id}")
+    assert anim["mode"] == "vlm"
+    spec_in = ops._animate_actor_spec(
+        ops._sprite_bible(ops.load_pack(pack), "enemy", enemy_id), "enemy", enemy_id
+    )
+    for state in spec_in.states:
+        assert f'"{state}"' in anim["prompt"]
     with pytest.raises(ValueError, match="unknown prompt kind"):
         ops.preview_prompt(pack, "nonsense")
 
@@ -1433,6 +1445,93 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
         prompt_override="SOLO KAZOO MARCH", actor="test",
     )
     assert prompts == ["SOLO KAZOO MARCH"]
+
+
+def _spy_animation_author(monkeypatch) -> list[str | None]:
+    """Record the prompt_override each animate run hands the VLM author."""
+    import examples.platformer_pack.vlm_qa as vq
+
+    seen: list[str | None] = []
+
+    def spy(judge, actor_id, subject, sprite_bytes, **kw):
+        seen.append(kw.get("prompt_override"))
+        return {"idle": {"frames": 2, "motion": "bob"}}
+
+    monkeypatch.setattr(vq, "author_animation_spec", spy)
+    return seen
+
+
+def test_animate_prompt_override_reaches_the_vlm_author(pack: Path, tmp_path, monkeypatch):
+    """The editable animate prompt is the VLM's motion-spec AUTHORING prompt
+    (one call per run) — deliberately NOT the per-state img2img sheet prompt,
+    which runs once per state per facing and whose per-state silhouette
+    contract a single override would flatten."""
+    import shutil
+
+    p = tmp_path / "animate_override"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    seen = _spy_animation_author(monkeypatch)
+
+    ops.animate_asset(
+        p, f"enemy:{enemy_id}", image_backend="fake", vlm_backend="fake",
+        prompt_override="MOVE LIKE A CRAB.", actor="test",
+    )
+    assert seen == ["MOVE LIKE A CRAB."]
+
+
+def test_animate_without_override_is_byte_identical(pack: Path, tmp_path, monkeypatch):
+    """ADDITIVE guarantee: no override, None, and "" all send the built prompt
+    unchanged — the same promise the sprite/system overrides make."""
+    from examples.platformer_pack.vlm_qa import animate_prompt, author_animation_spec
+
+    sent: list[str] = []
+    enemy_id = next(iter(ops._load_defs(pack, "enemy")))
+    spec_in = ops._animate_actor_spec(
+        ops._sprite_bible(ops.load_pack(pack), "enemy", enemy_id), "enemy", enemy_id
+    )
+    # A spec that VALIDATES first time: a retry would append rejection
+    # feedback to the prompt and mask the comparison.
+    valid = json.dumps({s: {"frames": 2, "motion": "bob"} for s in spec_in.states})
+
+    class _Judge:
+        model = "spy-vlm"
+
+        def judge(self, text, images):
+            sent.append(text)
+            return valid
+
+    args = (spec_in.actor_id, spec_in.subject, b"png")
+    kwargs = {"states": spec_in.states, "frames_max": spec_in.frames_max}
+    for override in (None, "", "   "):
+        author_animation_spec(_Judge(), *args, prompt_override=override, **kwargs)
+
+    built = animate_prompt(
+        spec_in.actor_id, spec_in.subject, spec_in.states, spec_in.frames_max
+    )
+    assert sent == [built, built, built]
+
+
+def test_animate_override_is_inert_for_reuse_spec(pack: Path, tmp_path, monkeypatch):
+    """--reuse-spec replays the stored motion spec, so it never authors — the
+    override has nothing to override (the CLI help says so)."""
+    import shutil
+
+    p = tmp_path / "animate_reuse"
+    shutil.copytree(pack, p)
+    enemy_id = next(iter(ops._load_defs(p, "enemy")))
+
+    # Seed a stored spec so reuse_spec has something to replay.
+    ops.animate_asset(
+        p, f"enemy:{enemy_id}", image_backend="fake", vlm_backend="fake",
+        actor="test",
+    )
+    seen = _spy_animation_author(monkeypatch)
+    ops.animate_asset(
+        p, f"enemy:{enemy_id}", image_backend="fake", vlm_backend="fake",
+        reuse_spec=True, prompt_override="IGNORED.", actor="test",
+    )
+    assert seen == []
 
 
 def test_cli_prompt_show_and_override_round_trip(pack: Path, tmp_path):

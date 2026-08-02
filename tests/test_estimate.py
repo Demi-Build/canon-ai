@@ -266,6 +266,93 @@ class TestEstimateCli:
         assert a == b
 
 
+class TestAnimateScope:
+    """The `animate` scope prices ONE actor's animation run."""
+
+    def _enemy_id(self, out: Path) -> str:
+        return sorted(p.stem for p in (out / "enemy").glob("*.json"))[0]
+
+    def test_estimate_animate_prices_by_states_not_frames(
+        self, tmp_path: Path
+    ) -> None:
+        """PRICED BY STATES, NOT FRAMES — the whole point of this test.
+
+        `_sheet_frames` (art_phases.py) issues exactly ONE
+        ImageEditBackend.edit() per state per facing; the frame count only
+        widens the reference sheet passed to that single call. The intuitive
+        `states x frames` formula therefore over-charges roughly 4x. If you
+        are here because you "fixed" the estimator to multiply by frames,
+        re-read `_animate_actor`: the frame loop is INSIDE one edit().
+        """
+        from examples.platformer_pack.estimate import estimate_cradle
+        from examples.platformer_pack.ops import (
+            _animate_actor_spec,
+            _sprite_bible,
+            load_pack,
+        )
+
+        out = tmp_path / "game"
+        _build_tree(out)
+        eid = self._enemy_id(out)
+
+        est = estimate_cradle(
+            "animate", pack_dir=out, target=f"enemy:{eid}",
+            backends={"image": "fal", "vlm": "anthropic"},
+        )
+        spec_in = _animate_actor_spec(_sprite_bible(load_pack(out), "enemy", eid),
+                                      "enemy", eid)
+        facings = 2 if spec_in.asymmetric else 1
+        assert est["assets"]["images"]["count"] == len(spec_in.states) * facings
+
+        # Inflating the stored spec's frame counts must NOT move the price.
+        row = json.loads((out / "enemy" / f"{eid}.json").read_text())
+        row.setdefault("stats", {})["animation"] = {
+            "spec": {s: {"frames": 6, "motion": "x"} for s in spec_in.states}
+        }
+        (out / "enemy" / f"{eid}.json").write_text(json.dumps(row))
+        after = estimate_cradle(
+            "animate", pack_dir=out, target=f"enemy:{eid}",
+            backends={"image": "fal", "vlm": "anthropic"},
+        )
+        assert after["assets"]["images"] == est["assets"]["images"]
+        assert after["total_usd"] == est["total_usd"]
+
+    def test_reuse_spec_drops_the_vlm_authoring_call(self, tmp_path: Path) -> None:
+        from examples.platformer_pack.estimate import estimate_cradle
+
+        out = tmp_path / "game"
+        _build_tree(out)
+        target = f"enemy:{self._enemy_id(out)}"
+        backends = {"image": "fal", "vlm": "anthropic"}
+
+        fresh = estimate_cradle("animate", pack_dir=out, target=target,
+                                backends=backends)
+        reused = estimate_cradle("animate", pack_dir=out, target=target,
+                                 backends=backends, reuse_spec=True)
+        assert fresh["assets"]["vlm"]["animation_authoring"] == 1
+        assert reused["assets"]["vlm"] == {}
+        # Same images either way; only the vision call goes away.
+        assert reused["assets"]["images"] == fresh["assets"]["images"]
+        assert reused["total_usd"]["best"] < fresh["total_usd"]["best"]
+
+    def test_unpaid_backends_zero_the_usd_but_keep_the_counts(
+        self, tmp_path: Path
+    ) -> None:
+        """The "what an upgrade costs" UX: fake/none price at $0 with the
+        image count still visible."""
+        from examples.platformer_pack.estimate import estimate_cradle
+
+        out = tmp_path / "game"
+        _build_tree(out)
+        est = estimate_cradle(
+            "animate", pack_dir=out, target=f"enemy:{self._enemy_id(out)}",
+            backends={"image": "fake", "vlm": "none"},
+        )
+        assert est["total_usd"] == {"best": 0.0, "worst": 0.0}
+        assert est["assets"]["images"]["count"] > 0
+        assert est["assets"]["images"]["usd"] == 0.0
+
+
 class TestEstimatorMutationSafety:
     def test_estimate_run_leaves_ctx_bible_alone(self, tmp_path: Path) -> None:
         bible = Bible.empty(seed="est")

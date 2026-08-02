@@ -1375,21 +1375,23 @@ class TestAnimationScaleCheck:
     """The check whose absence let the per-state sizing bug ship: every other
     animation check is PER STATE, so none of them could see that the actor was
     a different size in each one. Frames share one square sized from the whole
-    actor, so at most the single largest pose may reach the cell edge."""
+    actor, so the states reaching the cell edge are its largest pose(s) — and
+    it is EVERY state reaching the edge that means each was sized alone."""
 
-    def _two_states(
-        self, tmp_path: Path, idle: tuple, jump: tuple
-    ) -> dict:
-        """Two states on disk, each an opaque rect of the given (w, h)
+    def _states(self, tmp_path: Path, **sizes: tuple) -> dict:
+        """N states on disk, each an opaque rect of the given (w, h)
         bottom-anchored in a 32px cell."""
         anim: dict = {"states": {}}
-        for state, (w, h) in (("idle", idle), ("jump", jump)):
+        for state, (w, h) in sizes.items():
             x0 = (32 - w) // 2
             one = _write_strip(
                 tmp_path, [(x0, 32 - h, x0 + w - 1, 31)] * 2, state=state
             )
             anim["states"][state] = one["states"][state]
         return anim
+
+    def _two_states(self, tmp_path: Path, idle: tuple, jump: tuple) -> dict:
+        return self._states(tmp_path, idle=idle, jump=jump)
 
     def test_flags_states_that_each_fill_the_cell(self, tmp_path: Path) -> None:
         # The shipped pathology, measured on plat_lantern_paid: a WIDE idle
@@ -1416,3 +1418,29 @@ class TestAnimationScaleCheck:
         anim = _write_strip(tmp_path, [(0, 0, 31, 31)] * 2, state="idle")
         checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
         assert not any(c["check"] == "animation_scale" for c in checks)
+
+    def test_states_tied_for_largest_are_not_flagged(self, tmp_path: Path) -> None:
+        """Two poses can legitimately TIE for largest and then both sit on the
+        shared edge — correct output, not the bug. The bug's signature is
+        every state flush (measured on plat_lantern_paid: ember_hopper 5/5,
+        player 6/6, every actor N/N), so all-of-them is the trigger, not
+        more-than-one. An earlier `len(filled) <= 1` failed this case."""
+        anim = self._states(
+            tmp_path, idle=(16, 16), walk=(32, 30), jump=(30, 32), hurt=(20, 18)
+        )
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_scale")
+        assert rec["passed"] is True, rec["detail"]
+        assert "2 of 4 reach the cell edge" in rec["detail"]
+        assert "tied for largest" in rec["detail"]
+
+    def test_every_state_flush_still_fails(self, tmp_path: Path) -> None:
+        """The shipped pathology at more than two states — the real shape on
+        disk before the per-actor fix."""
+        anim = self._states(
+            tmp_path, idle=(32, 22), walk=(32, 28), jump=(26, 32), death=(32, 31)
+        )
+        checks = _animation_checks(_strip_ctx(tmp_path), "enemy:x", anim)
+        rec = next(c for c in checks if c["check"] == "animation_scale")
+        assert rec["passed"] is False
+        assert "all 4 fill the cell" in rec["detail"]

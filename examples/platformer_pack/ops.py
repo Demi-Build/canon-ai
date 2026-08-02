@@ -1534,6 +1534,10 @@ PROMPT_KINDS: dict[str, dict] = {
     "enemy": {"label": "plat:enemies", "mode": "llm"},
     "item": {"label": "plat:items", "mode": "llm"},
     "sprite": {"label": "plat:sprite_art", "mode": "image"},
+    # The VLM that AUTHORS the motion spec — a vision call (image in, spec
+    # out) routed through build_vlm_judge, not ctx.llm, so it has no
+    # system/user split: mode "vlm" takes the single-`prompt` shape.
+    "animate": {"label": "plat:sprite_animation", "mode": "vlm"},
     "music": {"label": "plat:audio", "mode": "audio"},
 }
 
@@ -1576,8 +1580,8 @@ def preview_prompt(
     LLM kinds return ``{label, mode:"llm", system, user_message}``: ``system``
     is the editable part (the standing "how to build" instructions), while
     ``user_message`` is shown read-only as context (it's rebuilt per call from
-    live data). Image/audio kinds have no system/user split, so they return
-    ``{label, mode:"image"|"audio", prompt}`` — the single prompt string.
+    live data). Image/audio/vlm kinds have no system/user split, so they return
+    ``{label, mode:"image"|"audio"|"vlm", prompt}`` — the single prompt string.
     Pure read: no LLM call, no writes, no journal."""
     if kind not in PROMPT_KINDS:
         raise ValueError(
@@ -1675,6 +1679,21 @@ def preview_prompt(
             name, descriptor, color,
             getattr(stage, "theme", "") if stage else "",
             info.world.title if info.world else "", info.graphics,
+        )
+        return out
+
+    if kind == "animate":
+        # The motion-spec AUTHORING prompt (one VLM call per run), built from
+        # the same subject + state list the run derives — NOT the per-state
+        # img2img sheet prompt, which is issued once per state per facing.
+        from examples.platformer_pack.vlm_qa import animate_prompt
+
+        t_kind, rest = _parse_target(target or "player")
+        if t_kind not in ("enemy", "player"):
+            raise ValueError("animate targets: enemy:<id> | player")
+        spec_in = _animate_actor_spec(_sprite_bible(info, t_kind, rest), t_kind, rest)
+        out["prompt"] = animate_prompt(
+            spec_in.actor_id, spec_in.subject, spec_in.states, spec_in.frames_max
         )
         return out
 
@@ -2386,6 +2405,55 @@ def generate_asset(
     }
 
 
+def _animate_actor_spec(bible: Any, kind: str, rest: str) -> SimpleNamespace:
+    """Everything the animate path derives about ONE actor from the bible:
+    the ``row`` itself plus ``actor_id``/``sprite_path``/``stored`` spec/
+    ``subject``/``states``/``frames_max``/``asymmetric``.
+
+    Shared by :func:`animate_asset` and :func:`preview_prompt` so the previewed
+    authoring prompt is built from the SAME subject and state list the run will
+    use — the ``_music_prompt`` doctrine (preview == what runs)."""
+    from examples.platformer_pack.vlm_qa import (
+        ANIM_FRAMES_MAX,
+        PLAYER_ANIM_FRAMES_MAX,
+        PLAYER_ANIMATION_STATES,
+        enemy_animation_states,
+        enemy_animation_subject,
+    )
+
+    if kind == "enemy":
+        enemy = bible.enemy_definitions[rest]
+        return SimpleNamespace(
+            row=enemy,
+            actor_id=f"enemy:{rest}",
+            sprite_path=enemy.sprite_path,
+            stored=(enemy.stats.get("animation") or {}).get("spec"),
+            subject=enemy_animation_subject(enemy),
+            states=enemy_animation_states(enemy),
+            frames_max=ANIM_FRAMES_MAX,
+            asymmetric=bool(getattr(enemy, "asymmetric", False)),
+        )
+
+    player = bible.player
+    if player is None or not player.sprite_path:
+        raise FileNotFoundError("no player sprite (sprite/player/base.png)")
+    from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+
+    return SimpleNamespace(
+        row=player,
+        actor_id="player",
+        sprite_path=player.sprite_path,
+        stored=(getattr(player, "animation", None) or {}).get("spec"),
+        subject=(
+            f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
+            f"bouncy platformer mascot, side view facing right."
+        ),
+        states=PLAYER_ANIMATION_STATES,
+        frames_max=PLAYER_ANIM_FRAMES_MAX,
+        asymmetric=bool(getattr(player, "asymmetric", False)),
+    )
+
+
 def animate_asset(
     pack_dir: str | Path,
     target: str,
@@ -2398,6 +2466,7 @@ def animate_asset(
     vlm_model: str | None = None,
     reuse_spec: bool = False,
     renormalize: bool = False,
+    prompt_override: str | None = None,
     actor: str = "user",
     session: str | None = None,
 ) -> dict:
@@ -2406,17 +2475,14 @@ def animate_asset(
 
     ``renormalize`` instead REPAIRS the frames already on disk: it re-seats
     every state on one shared square so the actor stops changing size between
-    states. No image backend, no VLM, no API keys, $0."""
+    states. No image backend, no VLM, no API keys, $0.
+
+    ``prompt_override`` replaces the VLM's motion-spec authoring prompt for
+    this one call. It is inert under ``reuse_spec``/``renormalize``, which
+    never author (see `canon prompt show --kind animate`)."""
     from examples.platformer_pack.art_phases import SpriteAnimationPhase
     from examples.platformer_pack.tileset_art import build_image_producer
-    from examples.platformer_pack.vlm_qa import (
-        ANIM_FRAMES_MAX,
-        PLAYER_ANIM_FRAMES_MAX,
-        PLAYER_ANIMATION_STATES,
-        build_vlm_judge,
-        enemy_animation_states,
-        enemy_animation_subject,
-    )
+    from examples.platformer_pack.vlm_qa import build_vlm_judge
 
     info = load_pack(pack_dir)
     kind, rest = _parse_target(target)
@@ -2446,34 +2512,19 @@ def animate_asset(
     stats = GenerationStats(image_backend=image_backend or "")
     ctx = make_ctx(info, bible=bible, stats=stats)
     phase = SpriteAnimationPhase(
-        producer=producer, judge=judge, graphics=info.graphics
+        producer=producer, judge=judge, graphics=info.graphics,
+        prompt_override=prompt_override,
     )
 
-    if kind == "enemy":
-        enemy = bible.enemy_definitions[rest]
-        actor_id = f"enemy:{rest}"
-        sprite_path = enemy.sprite_path
-        stored = (enemy.stats.get("animation") or {}).get("spec")
-        subject = enemy_animation_subject(enemy)
-        states = enemy_animation_states(enemy)
-        frames_max = ANIM_FRAMES_MAX
-        asymmetric = bool(getattr(enemy, "asymmetric", False))
-    else:
-        player = bible.player
-        if player is None or not player.sprite_path:
-            raise FileNotFoundError("no player sprite (sprite/player/base.png)")
-        actor_id = "player"
-        sprite_path = player.sprite_path
-        stored = (getattr(player, "animation", None) or {}).get("spec")
-        from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
-
-        subject = (
-            f"Character: the PLAYER hero — {PLAYER_DESCRIPTOR}. A small "
-            f"bouncy platformer mascot, side view facing right."
-        )
-        states = PLAYER_ANIMATION_STATES
-        frames_max = PLAYER_ANIM_FRAMES_MAX
-        asymmetric = bool(getattr(player, "asymmetric", False))
+    spec_in = _animate_actor_spec(bible, kind, rest)
+    row = spec_in.row
+    actor_id = spec_in.actor_id
+    sprite_path = spec_in.sprite_path
+    stored = spec_in.stored
+    subject = spec_in.subject
+    states = spec_in.states
+    frames_max = spec_in.frames_max
+    asymmetric = spec_in.asymmetric
 
     if not sprite_path:
         raise FileNotFoundError(f"{target} has no base sprite — generate one first")
@@ -2501,9 +2552,9 @@ def animate_asset(
         )
 
     if manifest and kind == "enemy":
-        enemy.stats["animation"] = manifest
+        row.stats["animation"] = manifest
         ctx.adapter.write_json_singleton(
-            f"enemy/{rest}.json", enemy.model_dump(mode="json")
+            f"enemy/{rest}.json", row.model_dump(mode="json")
         )
     after = provenance.snapshot_file(
         info.pack, info.pack / Path(sprite_path).parent / "frames.json"

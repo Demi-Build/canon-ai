@@ -1047,15 +1047,22 @@ def author_animation_spec(
     states: tuple[str, ...] = ANIMATION_STATES,
     frames_max: int = ANIM_FRAMES_MAX,
     max_retries: int = 3,
+    prompt_override: str | None = None,
 ) -> dict | None:
     """Run the VLM to author a per-state motion spec for one actor (enemy or
     player) from its ACTUAL sprite. Mirrors :meth:`VlmQaPhase._judge_level`'s
     retry loop.
 
+    ``prompt_override`` replaces the authoring instructions for this ONE call
+    ("✎ edit prompt"); empty/None keeps the built prompt byte-for-byte. The
+    rejection feedback still appends, so the validation loop is unchanged.
+
     Returns the sanitized spec (persist it as the actor's animation manifest),
     or ``None`` when the verdict never validates — the caller then keeps the
     static sprite (the loud-fallback contract)."""
-    prompt = animate_prompt(actor_id, subject, states, frames_max)
+    prompt = (prompt_override or "").strip() or animate_prompt(
+        actor_id, subject, states, frames_max
+    )
 
     def generate(feedback: list[str] | None = None) -> str:
         text = prompt
@@ -1258,29 +1265,38 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
                 ),
             })
     # CROSS-STATE SCALE: the actor must be ONE size across its states. Frames
-    # are seated in a square sized from the whole actor, so at most the single
-    # LARGEST pose can reach the cell edge; every other state is strictly
-    # smaller. Several states each filling the cell means each was sized from
-    # its own crops — the character then changes size the moment its state
-    # changes (a wide idle and a tall jump both stretched to fill). Every other
-    # check here is per state and structurally cannot see this.
+    # are seated in a square sized from the whole actor, so the states that
+    # reach the cell edge are the LARGEST pose(s) and every other state is
+    # strictly smaller. When EVERY state fills the cell, each was sized from
+    # its own crops instead — the character then changes size the moment its
+    # state changes (a wide idle and a tall jump both stretched to fill).
+    # Every other check here is per state and structurally cannot see this.
+    #
+    # The trigger is all-of-them, NOT more-than-one: several states can tie
+    # for largest and then legitimately share the edge. Measured — real
+    # pre-fix art is uniformly flush (ember_hopper 5/5, player 6/6, every
+    # actor N/N), post-repair art is 0/N, and correct art with a tie is 2/4.
+    # An earlier `len(filled) <= 1` failed that last case on good frames.
     filled = sorted(
         state for state, (extent, cell) in spans.items() if extent >= cell - 1
     )
     if len(spans) > 1:
         checks.append({
             "check": "animation_scale", "target": target, "subject": "states",
-            "passed": len(filled) <= 1,
+            "passed": len(filled) < len(spans),
             "detail": (
                 f"{len(spans)} state(s) share one frame square; "
                 + (
-                    f"only {filled[0]!r} reaches the cell edge"
-                    if len(filled) == 1
-                    else "none reaches the cell edge"
+                    "none reaches the cell edge"
                     if not filled
-                    else f"{len(filled)} states each fill the cell "
-                    f"({', '.join(filled)}) — they were sized independently, "
-                    "so the actor changes size between states"
+                    else f"all {len(filled)} fill the cell "
+                    f"({', '.join(filled)}) — each was sized from its own "
+                    "crops, so the actor changes size between states"
+                    if len(filled) == len(spans)
+                    else f"only {filled[0]!r} reaches the cell edge"
+                    if len(filled) == 1
+                    else f"{len(filled)} of {len(spans)} reach the cell edge "
+                    f"({', '.join(filled)}) — tied for largest pose"
                 )
             ),
         })

@@ -457,13 +457,16 @@ def estimate_cradle(
     level_id: str | None = None,
     width: int | None = None,
     axis: str | None = None,
+    target: str | None = None,
+    reuse_spec: bool = False,
 ) -> dict:
     """Price ONE cradle op, backend- and count-aware.
 
     ``scope="world"`` prices a fresh full run at the requested ``counts``
     (stages/levels/enemies/items) — the New Project surface. The per-op scopes
     (``generate`` / ``layout`` / ``enemies`` / ``items``) price the LLM steps a
-    single level op runs against an existing ``pack_dir``/``level_id``. In every
+    single level op runs against an existing ``pack_dir``/``level_id``.
+    ``animate`` prices one actor's animation run (``target``). In every
     case the returned USD reflects the chosen ``backends`` ($0 for fake/none).
     Same output schema as estimate_run plus ``scope`` + echoed ``backends``.
     """
@@ -502,6 +505,57 @@ def estimate_cradle(
             warnings,
         )
         assets = _empty_assets()
+    elif scope == "animate":
+        # ONE actor's animation run. PRICED BY STATES, NOT FRAMES:
+        # `_sheet_frames` issues exactly one ImageEditBackend.edit() per state
+        # per facing (art_phases.py `_animate_actor` calls it once per state,
+        # and once more per state only for an `asymmetric` actor). The frame
+        # count only widens the reference sheet inside that single call — so
+        # multiplying by frames would over-charge ~4x. See
+        # test_estimate_animate_prices_by_states_not_frames.
+        if not (pack_dir and target):
+            raise ValueError("scope 'animate' needs pack_dir + target")
+        from examples.platformer_pack.ops import (
+            _animate_actor_spec,
+            _parse_target,
+            _sprite_bible,
+            load_pack,
+        )
+
+        info = load_pack(pack_dir)
+        t_kind, rest = _parse_target(target)
+        if t_kind not in ("enemy", "player"):
+            raise ValueError("animate targets: enemy:<id> | player")
+        spec_in = _animate_actor_spec(_sprite_bible(info, t_kind, rest), t_kind, rest)
+        facings = 2 if spec_in.asymmetric else 1
+        edits = len(spec_in.states) * facings
+
+        a = cost_model.get("assets", {})
+        llm = {"by_task": {}, "calls": 0.0, "usd": {"best": 0.0, "worst": 0.0}}
+        assets = _empty_assets()
+        assets["images"] = {
+            "count": edits,
+            "usd": round(edits * float(a.get("image_usd_per_call", 0.04)), 4),
+        }
+        # The VLM authors the motion spec once per run — unless --reuse-spec
+        # replays the stored one, which skips the vision call entirely.
+        if not reuse_spec:
+            vlm_model = os.environ.get("CANON_PLAT_VLM_MODEL") or DEFAULT_MODEL
+            pricing = _pricing_for(vlm_model, "VLM judge", warnings)
+            tok = cost_model.get("vlm_per_actor") or cost_model.get(
+                "vlm_per_level", {"input_tokens": 1200, "output_tokens": 300}
+            )
+            per_actor = (
+                tok["input_tokens"] * pricing["input"]
+                + tok["output_tokens"] * pricing["output"]
+            )
+            assets["vlm"] = {
+                "model": vlm_model,
+                "animation_authoring": 1,
+                "usd": {
+                    "best": round(per_actor, 4), "worst": round(per_actor, 4)
+                },
+            }
     elif scope == "music":
         # A single-track (re)generation — flat per-track price, backend-masked
         # (fake = $0). No LLM. The mask recomputes assets/total.
@@ -514,7 +568,7 @@ def estimate_cradle(
     else:
         raise ValueError(
             f"unknown estimate scope {scope!r} "
-            f"(world|music|{'|'.join(_OP_STEPS)})"
+            f"(world|music|animate|{'|'.join(_OP_STEPS)})"
         )
 
     _apply_backend_mask(llm, assets, backends)
