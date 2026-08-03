@@ -59,7 +59,7 @@ _PLAIN = bool(os.environ.get("PLAT_PLAIN"))
 LAND_ANIM_S = 0.15
 
 
-def _stage_for(manifest: dict, level_id: str) -> str:
+def _stage_for(manifest: dict, level_id: str, data_dir: Path | None = None) -> str:
     """The biome stage owning ``level_id`` (manifest v2 "stages"). A
     SECRET ROOM id (multi-room arc — ``l3r1``, never in any stage's
     levels list) resolves to its parent's stage."""
@@ -68,7 +68,15 @@ def _stage_for(manifest: dict, level_id: str) -> str:
             return str(stage_entry["stage_id"])
     m = re.fullmatch(r"(.+\d)r\d+", level_id)
     if m:
-        return _stage_for(manifest, m.group(1))
+        return _stage_for(manifest, m.group(1), data_dir)
+    # DRAFT levels (`canon level create`, and the sandbox room) live on disk
+    # but are deliberately kept OUT of the manifest until `level publish`, so
+    # the manifest walk above can't see them. Fall back to disk — the same
+    # fix `export_level_bundle` needed for secret rooms.
+    if data_dir is not None:
+        for stage_dir in sorted((data_dir / "level").glob("*")):
+            if (stage_dir / level_id / "level.json").is_file():
+                return stage_dir.name
     raise SystemExit(
         f"level {level_id!r} not in this world — levels: "
         f"{manifest.get('levels')}"
@@ -93,7 +101,7 @@ def _load(data_dir: Path, level_id: str):
     import numpy as np
 
     manifest = json.loads((data_dir / "manifest.json").read_text())
-    stage_id = _stage_for(manifest, level_id)
+    stage_id = _stage_for(manifest, level_id, data_dir)
     level_dir = data_dir / "level" / stage_id / level_id
     level = json.loads((level_dir / "level.json").read_text())
     with np.load(level_dir / "collision.npz") as data:
@@ -270,6 +278,128 @@ def pick_anim_frame(
     return state, _anim_index(anim_t, info["durs"], info.get("loop", "loop"))
 
 
+# The animation vocabulary + selection ladder are DATA (animation.json per
+# pack, defaults in the pack module) so a different platformer can declare
+# `swim`, `climb` or `wall_slide` without an engine change. Importing the pack
+# module keeps ONE evaluator rather than a second copy here; the harness is run
+# as a script from examples/, so the repo root needs to be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from examples.platformer_pack.animation_spec import (  # noqa: E402
+    eval_ladder as _eval_ladder,
+    load_spec as _load_anim_spec,
+)
+
+#: Built-in spec, resolved once — the per-frame path must never touch disk.
+_DEFAULT_ANIM_SPEC = _load_anim_spec(None)
+
+
+def player_anim_candidates(
+    on_ground: bool, vy: float, dx: int, vx: float, land_t: float, spec: dict | None = None
+) -> tuple[list[str], str]:
+    """The player's state-priority ladder, plus the REASON it ranked that way.
+
+    The single place that decides which animation state gameplay wants, so the
+    game (``run_level``), the PLAT_ANIM sequence viewer (which drives scripted
+    signals through it) and the sandbox HUD (which shows the reason) agree by
+    construction rather than by three copies staying in step.
+
+    The ladder itself is DATA (``spec["ladders"]["player"]``); this function
+    owns only the translation from raw physics to the NAMED SIGNALS rules may
+    test. That split is deliberate — a new STATE is data, a new SIGNAL is
+    gameplay, and gameplay has to exist identically in both engines. Mirror of
+    main.gd's ``_player_anim_candidates``.
+    """
+    sp = spec or _DEFAULT_ANIM_SPEC
+    signals = {
+        "on_ground": on_ground,
+        "descending": vy > 0,
+        "moving": dx != 0,
+        # Compound gameplay conditions are computed HERE and exposed by name,
+        # so the rule language stays comparisons rather than an expression DSL.
+        "braking": bool(dx and _sign(vx) == -dx and abs(vx) > 0.5),
+        "landing": land_t > 0.0,
+        "submerged": False,
+        "vy": vy,
+        "vx": vx,
+    }
+    return _eval_ladder(
+        sp["ladders"]["player"], signals, sp["tails"]["player"], sp["why"]["player"]
+    )
+
+
+def enemy_anim_candidates(
+    alive: bool, hurt_t: float, grounded: bool, moving: bool,
+    submerged: bool = False, spec: dict | None = None,
+) -> tuple[list[str], str]:
+    """The enemy ladder, data-driven for the same reason as the player's. Dead
+    → the death strip, falling back through hurt/idle when no death state
+    exists; alive → hurt > mid-hop jump (every other archetype keeps
+    ``e_grounded`` True, so the candidate is safely universal) > walk. Mirror
+    of main.gd."""
+    sp = spec or _DEFAULT_ANIM_SPEC
+    signals = {
+        "alive": alive,
+        "hurt": hurt_t > 0,
+        "grounded": grounded,
+        "moving": moving,
+        "submerged": submerged,
+    }
+    return _eval_ladder(
+        sp["ladders"]["enemy"], signals, sp["tails"]["enemy"], sp["why"]["enemy"]
+    )
+
+
+#: The sequence-viewer storyboards (PLAT_ANIM_MODE=sequence): the SIGNALS a real
+#: play session would produce, walked in order, so `jump → fall → land` reads as
+#: ONE motion instead of three boxes on three clocks. Each segment is
+#: ``(seconds, *ladder args)`` and is fed through the ladder above — the viewer
+#: never names a state itself, it shows whatever the game's own selection picks.
+#: main.gd mirrors both tables.
+ANIM_SEQUENCE: list[tuple] = [
+    # (secs, on_ground, vy, dx, vx, land_t)
+    (0.8, True, 0.0, 0, 0.0, 0.0),      # at rest
+    (1.2, True, 0.0, 1, 4.0, 0.0),      # walking
+    (0.45, False, -6.0, 1, 4.0, 0.0),   # the rise
+    (0.65, False, 5.0, 1, 4.0, 0.0),    # past the peak
+    (0.25, True, 0.0, 1, 4.0, 0.12),    # the touchdown window
+    (0.5, True, 0.0, 1, 4.0, 0.0),      # walking out of it
+    (0.5, True, 0.0, -1, 4.0, 0.0),     # braking against momentum
+    (0.7, True, 0.0, 0, 0.0, 0.0),      # back to rest
+]
+
+ENEMY_SEQUENCE: list[tuple] = [
+    # (secs, alive, hurt_t, grounded, moving)
+    (0.9, True, 0.0, True, False),      # holding position
+    (1.3, True, 0.0, True, True),       # patrolling
+    (0.5, True, 0.0, False, True),      # mid-hop
+    (0.45, True, 0.2, True, True),      # struck
+    (0.7, True, 0.0, True, True),       # recovered, moving again
+    (1.3, False, 0.0, True, False),     # defeated
+]
+
+
+def sequence_at(
+    t: float, table: list | None = None, *, enemy: bool = False
+) -> tuple[list[str], str, float]:
+    """Walk a storyboard to time ``t`` (wrapping): ``(candidates, why,
+    seg_start)``. ``seg_start`` is when the current segment began — the caller
+    needs it to show progress through the chain; the animation clock itself is
+    latched on state CHANGE exactly as the game latches it, so a "once" state
+    such as ``land`` restarts from frame 0 on every pass."""
+    ladder = enemy_anim_candidates if enemy else player_anim_candidates
+    segs = table if table is not None else (ENEMY_SEQUENCE if enemy else ANIM_SEQUENCE)
+    total = sum(s[0] for s in segs)
+    u = t % total if total > 0 else 0.0
+    acc = 0.0
+    for seg in segs:
+        if u < acc + seg[0]:
+            cand, why = ladder(*seg[1:])
+            return cand, why, acc
+        acc += seg[0]
+    cand, why = ladder(*segs[-1][1:])
+    return cand, why, acc - segs[-1][0]
+
+
 class _Hooks:
     """Once-per-process verification-harness state (the PLAT_* env
     protocol). The traj file and frame counters OUTLIVE a level load —
@@ -306,6 +436,15 @@ class _Hooks:
         # instead of the level: every state of an actor playing side by side in
         # the same surface that renders the game. Composes with PLAT_CAPTURE.
         self.anim_target = os.environ.get("PLAT_ANIM", "")
+        # PLAT_ANIM_MODE=grid|sequence — grid (the default) is every state side
+        # by side on its own clock, right for judging ONE pose; sequence walks
+        # the storyboard through the game's own state ladder, which is the only
+        # way to judge a TRANSITION. TAB toggles live.
+        self.anim_mode = os.environ.get("PLAT_ANIM_MODE", "").strip() or "grid"
+        # PLAT_SANDBOX=1 — play a level with no win condition and a HUD naming
+        # the animation state the game picked and why. "How does it feel" is a
+        # question neither viewer mode can answer.
+        self.sandbox = bool(os.environ.get("PLAT_SANDBOX"))
         self.headless = bool(self.cap_dir or self.traj_path)
         self.cap_i = 0
         self.frame_i = -1
@@ -502,45 +641,71 @@ def run_anim_preview(data_dir: Path, target: str, hooks: _Hooks) -> None:
     on a neutral field instead of playing the level, so an animation can be
     judged in the SAME surface that renders the game.
 
-    Every state runs on its own clock at its own loop mode, so `once` states
-    (jump/land/hurt/death) hold their last frame — press SPACE to restart them
-    all. Reuses ``_load_anim`` (atlas → strips → static ladder) and
-    ``_anim_index`` verbatim: what you see here is what the game selects.
-    Composes with PLAT_CAPTURE for a headless contact strip; ← → switch actors
-    when the target names several."""
+    TWO MODES (PLAT_ANIM_MODE, TAB toggles live), because they answer different
+    questions:
+
+    ``grid``      every state side by side, each on its own clock at its own
+                  loop mode, so `once` states (jump/land/hurt/death) hold their
+                  last frame — SPACE restarts them all. Right for judging ONE
+                  pose, useless for judging a transition.
+    ``sequence``  the storyboard (`ANIM_SEQUENCE` / `ENEMY_SEQUENCE`) walked
+                  through the game's OWN state ladder, so `jump → fall → land`
+                  plays as the one motion it is in the player's head. The
+                  viewer never names a state itself: it shows what
+                  ``player_anim_candidates`` picks, and says why.
+
+    Reuses ``_load_anim`` (atlas → strips → static ladder) and ``_anim_index``
+    verbatim: what you see here is what the game selects. Composes with
+    PLAT_CAPTURE for a headless contact strip; ← → switch actors when the
+    target names several."""
     import pygame
 
     cell = SCALE * 3
+    big = cell * 2
     font = pygame.font.SysFont("monospace", 13)
     small = pygame.font.SysFont("monospace", 11)
     actors = _anim_preview_targets(data_dir, target)
     idx = 0
+    mode = "sequence" if hooks.anim_mode == "sequence" else "grid"
     clock = pygame.time.Clock()
     t = 0.0
     # A display mode must exist BEFORE any convert_alpha() in the loaders.
     screen = pygame.display.set_mode((360, cell + 112))
     while True:
         label, sprite_rel = actors[idx]
-        anim = _load_anim(data_dir, sprite_rel, (cell - 16, cell - 16)) or {}
+        # The enemy ladder is genuinely different from the player's (hurt/death
+        # instead of fall/land/skid), so the storyboard follows the target.
+        is_enemy = label.startswith("enemy:")
+        # Sequence mode renders ONE actor large; the grid renders every state
+        # small. Frames are scaled at LOAD, so the size is per-mode.
+        art = (big - 16, big - 16) if mode == "sequence" else (cell - 16, cell - 16)
+        anim = _load_anim(data_dir, sprite_rel, art) or {}
         states = sorted(anim)
         static = None
         if not states:  # static actor (items, un-animated enemies) — say so
             path = data_dir / sprite_rel
             if path.exists():
                 static = pygame.transform.smoothscale(
-                    pygame.image.load(str(path)).convert_alpha(), (cell - 16, cell - 16)
+                    pygame.image.load(str(path)).convert_alpha(), art
                 )
         cols = max(1, len(states) or 1)
-        width, height = max(360, cols * cell + 24), cell + 112
+        if mode == "sequence":
+            width, height = max(430, big + 24), big + 176
+        else:
+            width, height = max(360, cols * cell + 24), cell + 112
         if screen.get_size() != (width, height):
             screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption(f"canon animation preview — {label}")
-        switch = 0
-        while not switch:
+        pygame.display.set_caption(f"canon animation preview — {label} · {mode}")
+        switch, restage = 0, False
+        # The game's own state-change latch, mirrored: a "once" state restarts
+        # from frame 0 every time the chain re-enters it.
+        seq_state, seq_t = "", 0.0
+        while not switch and not restage:
             dt = (
                 1.0 / FPS if hooks.headless else clock.tick(FPS) / 1000.0
             )
             t += dt
+            seq_t += dt
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return
@@ -548,49 +713,74 @@ def run_anim_preview(data_dir: Path, target: str, hooks: _Hooks) -> None:
                     if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         return
                     if event.key == pygame.K_SPACE:
-                        t = 0.0  # replay the `once` states
+                        t = 0.0  # replay the `once` states / restart the chain
+                    if event.key == pygame.K_TAB:
+                        # Toggle, not replace: the grid is still the right tool
+                        # for judging a single pose.
+                        mode = "grid" if mode == "sequence" else "sequence"
+                        restage = True
                     if event.key == pygame.K_RIGHT:
                         switch = 1
                     if event.key == pygame.K_LEFT:
                         switch = -1
             screen.fill((26, 22, 34))
             screen.blit(font.render(label, True, (236, 231, 245)), (12, 8))
-            baseline = 32 + cell - 12
-            for i, state in enumerate(states):
-                meta = anim[state]
-                x = 12 + i * cell
-                pygame.draw.rect(
-                    screen, (40, 34, 52), (x, 32, cell - 8, cell - 8), border_radius=6
+            screen.blit(
+                small.render(mode, True, (150, 142, 168)),
+                (width - 12 - small.size(mode)[0], 11),
+            )
+            if mode == "sequence" and states:
+                _draw_anim_sequence(
+                    screen, font, small, anim, states, t, seq_state, seq_t,
+                    big, width, height, is_enemy,
                 )
-                # The floor line: frames are bottom-anchored, so a state whose
-                # feet drift off it is mis-registered.
-                pygame.draw.line(
-                    screen, (86, 74, 104), (x + 6, baseline), (x + cell - 14, baseline)
+                # Latch AFTER drawing so the frame just shown and the state the
+                # HUD names are the same pick (the game latches identically).
+                cand, _why, _seg = sequence_at(t, enemy=is_enemy)
+                picked = next(
+                    (s for s in cand if s in anim), next(iter(anim))
                 )
-                frames = meta["frames"]
-                f = _anim_index(t, meta["durs"], meta["loop"])
-                frame = frames[min(f, len(frames) - 1)]
-                screen.blit(
-                    frame, (x + 8, baseline - frame.get_height())
-                )
-                screen.blit(
-                    small.render(state, True, (236, 231, 245)),
-                    (x + 6, 32 + cell - 4),
-                )
-                screen.blit(
-                    small.render(
-                        f"{f + 1}/{len(frames)} {meta['loop']}",
-                        True, (150, 142, 168),
-                    ),
-                    (x + 6, 32 + cell + 9),
-                )
+                if picked != seq_state:
+                    seq_state, seq_t = picked, 0.0
+            else:
+                baseline = 32 + cell - 12
+                for i, state in enumerate(states):
+                    meta = anim[state]
+                    x = 12 + i * cell
+                    pygame.draw.rect(
+                        screen, (40, 34, 52), (x, 32, cell - 8, cell - 8),
+                        border_radius=6,
+                    )
+                    # The floor line: frames are bottom-anchored, so a state
+                    # whose feet drift off it is mis-registered.
+                    pygame.draw.line(
+                        screen, (86, 74, 104),
+                        (x + 6, baseline), (x + cell - 14, baseline),
+                    )
+                    frames = meta["frames"]
+                    f = _anim_index(t, meta["durs"], meta["loop"])
+                    frame = frames[min(f, len(frames) - 1)]
+                    screen.blit(
+                        frame, (x + 8, baseline - frame.get_height())
+                    )
+                    screen.blit(
+                        small.render(state, True, (236, 231, 245)),
+                        (x + 6, 32 + cell - 4),
+                    )
+                    screen.blit(
+                        small.render(
+                            f"{f + 1}/{len(frames)} {meta['loop']}",
+                            True, (150, 142, 168),
+                        ),
+                        (x + 6, 32 + cell + 9),
+                    )
             if static is not None:
                 screen.blit(static, (12, 40))
                 screen.blit(
                     small.render(
                         "static sprite — no animation", True, (216, 164, 65)
                     ),
-                    (12, 40 + cell),
+                    (12, 40 + art[1] + 6),
                 )
             elif not states:
                 screen.blit(
@@ -601,7 +791,8 @@ def run_anim_preview(data_dir: Path, target: str, hooks: _Hooks) -> None:
                 )
             screen.blit(
                 small.render(
-                    "SPACE replay  <- -> actor  ESC quit", True, (138, 131, 152)
+                    "TAB grid/sequence  SPACE replay  <- -> actor  ESC quit",
+                    True, (138, 131, 152),
                 ),
                 (12, height - 18),
             )
@@ -615,8 +806,103 @@ def run_anim_preview(data_dir: Path, target: str, hooks: _Hooks) -> None:
                 hooks.cap_i += 1
                 if hooks.cap_i >= hooks.cap_ticks:
                     return
+        if restage:
+            continue  # same actor, new layout
         idx = (idx + switch) % len(actors)
         t = 0.0
+
+
+def _draw_anim_sequence(
+    screen, font, small, anim: dict, states: list, t: float,
+    seq_state: str, seq_t: float, big: int, width: int, height: int,
+    is_enemy: bool,
+) -> None:
+    """The sequence view: ONE large actor playing the chain the game's ladder
+    picks, over a timeline of the storyboard and the ladder that produced it.
+
+    Split out purely for readability — it draws, it decides nothing. The state
+    and the frame both come from the same machinery gameplay uses
+    (``player_anim_candidates``/``enemy_anim_candidates`` → ``pick_anim_frame``)
+    so this cannot drift from what the game would show."""
+    import pygame
+
+    segs = ENEMY_SEQUENCE if is_enemy else ANIM_SEQUENCE
+    cand, why, seg_start = sequence_at(t, enemy=is_enemy)
+    total = sum(s[0] for s in segs) or 1.0
+    state, f = pick_anim_frame(cand, seq_t, anim)
+    meta = anim[state]
+    frames = meta["frames"]
+    frame = frames[min(f, len(frames) - 1)]
+
+    baseline = 32 + big - 12
+    pygame.draw.rect(
+        screen, (40, 34, 52), (12, 32, big - 8, big - 8), border_radius=6
+    )
+    pygame.draw.line(
+        screen, (86, 74, 104), (18, baseline), (big - 2, baseline)
+    )
+    screen.blit(frame, (12 + (big - 8 - frame.get_width()) // 2,
+                        baseline - frame.get_height()))
+
+    y = 32 + big + 4
+    screen.blit(font.render(state, True, (236, 231, 245)), (12, y))
+    screen.blit(
+        small.render(
+            f"{f + 1}/{len(frames)} {meta['loop']}", True, (150, 142, 168)
+        ),
+        (16 + font.size(state)[0], y + 3),
+    )
+    # WHY the game chose it — the same reason string the sandbox HUD shows.
+    screen.blit(small.render(why, True, (150, 142, 168)), (12, y + 19))
+    # The ladder that produced the pick, with the winner lit. A pick further
+    # down the ladder than the head means that state has no art — which is
+    # exactly what a viewer should make obvious.
+    x = 12
+    # The winner is the FIRST candidate that exists, so mark by INDEX — a state
+    # like `walk` appears twice in the ladder and only one occurrence won.
+    win_i = next((i for i, c in enumerate(cand) if c == state), -1)
+    for i, c in enumerate(cand):
+        lit = i == win_i
+        if i:
+            screen.blit(small.render(">", True, (86, 74, 104)), (x, y + 35))
+            x += small.size("> ")[0]
+        screen.blit(
+            small.render(
+                c, True,
+                (236, 231, 245) if lit else
+                (108, 100, 126) if c in anim else (74, 68, 88),
+            ),
+            (x, y + 35),
+        )
+        x += small.size(c)[0] + 4
+
+    # The storyboard as a bar: each segment proportional to its duration, the
+    # current one lit, so the chain reads as one motion with a playhead.
+    bar_y, bar_w = y + 54, width - 24
+    bx = 12.0
+    for seg in segs:
+        w = bar_w * seg[0] / total
+        cur = abs(seg_start - _seg_start_of(segs, seg)) < 1e-9
+        pygame.draw.rect(
+            screen, (108, 96, 132) if cur else (48, 42, 62),
+            (int(bx), bar_y, max(1, int(w) - 2), 8), border_radius=3,
+        )
+        bx += w
+    play_x = 12 + bar_w * ((t % total) / total)
+    pygame.draw.line(
+        screen, (236, 231, 245), (play_x, bar_y - 3), (play_x, bar_y + 11), 2
+    )
+
+
+def _seg_start_of(segs: list, seg: tuple) -> float:
+    """Start time of ``seg`` within ``segs`` (identity match — the storyboards
+    are literal tuples, so duplicates by value are still distinct entries)."""
+    acc = 0.0
+    for s in segs:
+        if s is seg:
+            return acc
+        acc += s[0]
+    return acc
 
 
 def main() -> None:
@@ -1324,6 +1610,9 @@ def run_level(
     )
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 28)
+    # The sandbox HUD reads a lot of text per frame, so it gets its own
+    # smaller face rather than shrinking the gameplay one.
+    hud_font = pygame.font.SysFont("monospace", 13) if hooks.sandbox else None
 
     # Real tile textures for the ART view (blocks view stays flat colors):
     # one representative crop per tile TYPE, blitted by the draw loop in
@@ -1348,7 +1637,7 @@ def run_level(
     audio_ok = False
     # Music resolves by POSITION: a user music_section > the level's own track
     # > the stage default theme. SFX stay per-stage (shared across a biome).
-    audio_stage = _stage_for(manifest, level_id)
+    audio_stage = _stage_for(manifest, level_id, data_dir)
     stage_audio = (manifest.get("audio") or {}).get(audio_stage, {})
     stage_music = stage_audio.get("music") or ""
     try:
@@ -1399,7 +1688,7 @@ def run_level(
             pygame.image.load(str(path)).convert_alpha(), size
         )
 
-    stage_id = _stage_for(manifest, level_id)
+    stage_id = _stage_for(manifest, level_id, data_dir)
     player_sprite = _sprite("sprite/player/base.png", (SCALE - 8, SCALE - 8))
     enemy_sprites = {
         eid: _sprite(spec.get("sprite_path", ""), (SCALE - 4, SCALE - 4))
@@ -1431,19 +1720,12 @@ def run_level(
         state change restarts the clock so "once" states play from frame 0
         (main.gd mirrors the latch at each of its swap sites). Authored
         left-facing frames play UNFLIPPED."""
-        if not enemy.alive:
-            # Death linger: the death strip, falling back through hurt/idle
-            # when no death state exists. Order mirrors main.gd.
-            candidates = ["death", "hurt", "idle"]
-        else:
-            candidates = (
-                (["hurt"] if enemy.hurt_t > 0 else [])
-                # Hopper mid-hop (every other archetype keeps e_grounded
-                # True, so the candidate is safely universal).
-                + (["jump"] if not enemy.e_grounded else [])
-                + (["walk"] if getattr(enemy, "_anim_moving", False) else [])
-                + ["idle", "walk", "hurt", "death"]
-            )
+        candidates, _why = enemy_anim_candidates(
+            enemy.alive,
+            enemy.hurt_t,
+            enemy.e_grounded,
+            bool(getattr(enemy, "_anim_moving", False)),
+        )
         anim = enemy_anims.get(enemy.spec.get("enemy_id", ""))
         if not anim:
             return None, enemy.direction < 0
@@ -2220,7 +2502,10 @@ def run_level(
         # WIN SUPPRESSION inside a secret room: its exit cell is the
         # return PORTAL, not a goal — nearing it must not complete the
         # level (main.gd gates identically, or the PARENT gets beaten).
-        if not won and reached_exit and not in_room:
+        # The SANDBOX has no win condition (PLAT_SANDBOX): the exit is just
+        # another cell, so you can keep moving and keep feeling the movement
+        # instead of the run ending the moment you touch it.
+        if not won and reached_exit and not in_room and not hooks.sandbox:
             won = True
             play_sfx("win")
 
@@ -2392,20 +2677,12 @@ def run_level(
         ) and int(blink_t * 8) % 2 == 0
         # Candidate build + pick + latch run EVERY frame (blink only hides
         # the draw) so the "once"/clock semantics stay in step with main.gd,
-        # which picks while invisible too. Airborne → fall past the peak,
-        # jump on the rise; grounded → skid (braking against carried
-        # momentum, inert without accel specs) > land (the one-shot window)
-        # > walk; idle/walk tail (loud fallback to the static base sprite
-        # when there's no animation).
-        if not on_ground:
-            p_candidates = ["fall", "jump"] if vy > 0 else ["jump"]
-        else:
-            p_candidates = (
-                (["skid"] if dx and _sign(vx) == -dx and abs(vx) > 0.5 else [])
-                + (["land"] if land_t > 0.0 else [])
-                + (["walk"] if dx else [])
-            )
-        p_candidates += ["idle", "walk"]
+        # which picks while invisible too. The ladder itself lives in
+        # `player_anim_candidates` — shared with the sequence viewer and the
+        # sandbox HUD so all three agree by construction.
+        p_candidates, p_why = player_anim_candidates(
+            on_ground, vy, dx, vx, land_t
+        )
         p_frame, p_flip = None, player_facing < 0
         if player_anim:
             pstate, pidx = pick_anim_frame(
@@ -2486,6 +2763,51 @@ def run_level(
             screen.blit(
                 font.render("LEVEL COMPLETE — R to reset", True, (64, 255, 112)),
                 (16, 36),
+            )
+        if hud_font is not None:
+            # SANDBOX HUD — name the animation state the game just picked and
+            # WHY it picked it. Both come from `player_anim_candidates`, the
+            # same ladder gameplay uses, so the HUD cannot describe a decision
+            # the game didn't make. It rides on a translucent panel because
+            # small text over a parallax backdrop is unreadable without one.
+            st = player_anim_state or "—"
+            panel = pygame.Surface((330, 92), pygame.SRCALPHA)
+            panel.fill((18, 15, 24, 208))
+            screen.blit(panel, (10, 34))
+            screen.blit(
+                hud_font.render(f"state  {st}", True, (240, 236, 248)), (20, 41)
+            )
+            screen.blit(
+                hud_font.render(p_why, True, (176, 168, 194)), (20, 59)
+            )
+            # The ladder, winner lit. A pick below the head means that state
+            # has no art and the game fell through to this one.
+            lx = 20
+            win_i = next(
+                (i for i, c in enumerate(p_candidates) if c == st), -1
+            )
+            for i, c in enumerate(p_candidates):
+                if i:
+                    screen.blit(
+                        hud_font.render("›", True, (118, 110, 136)), (lx, 77)
+                    )
+                    lx += hud_font.size("› ")[0]
+                screen.blit(
+                    hud_font.render(
+                        c, True,
+                        (128, 226, 160) if i == win_i else
+                        (158, 150, 176) if c in (player_anim or {})
+                        else (100, 94, 114),
+                    ),
+                    (lx, 77),
+                )
+                lx += hud_font.size(c)[0] + 4
+            screen.blit(
+                hud_font.render(
+                    "sandbox · no win condition · R reset · ESC quit",
+                    True, (140, 133, 156),
+                ),
+                (20, 100),
             )
         pygame.display.flip()
 

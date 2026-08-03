@@ -367,9 +367,14 @@ class TestLyriaMusicBackendRegister:
 
         BackendRegistry.reset()
         try:
+            # `register` stores a FACTORY, so the backend — and its genai
+            # client — is built on `.music()`, not on registration. Both calls
+            # therefore have to sit inside the patch; resolving outside it
+            # constructed a real client and failed on any machine without
+            # GOOGLE_API_KEY set in the environment (pytest does not read .env).
             with patch("google.genai.Client"):
                 register()
-            backend = BackendRegistry.music("lyria")
+                backend = BackendRegistry.music("lyria")
             assert isinstance(backend, LyriaMusicBackend)
         finally:
             BackendRegistry.reset()

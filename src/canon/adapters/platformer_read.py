@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 # The on-disk files whose bytes together define a level's current STATE. A
@@ -169,6 +170,78 @@ def _sprite_dir_for(pack: Path, target: str) -> tuple[str, str]:
     )
 
 
+def _pack_vlm_qa():
+    """The platformer pack's ``vlm_qa`` module, or ``None``.
+
+    The state vocabulary and the per-state motion briefs are PACK data (they
+    describe this game's animation contract), but they live under ``examples/``
+    rather than in the installed package — same repo-root import the CLI
+    already uses for ``examples.platformer_pack.ops``. Returns None rather than
+    raising: an installed-without-examples canon still reads animations fine,
+    it just can't offer the briefs.
+    """
+    import sys
+
+    import canon as _canon
+
+    root = Path(_canon.__file__).resolve().parents[2]
+    if (root / "examples").is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from examples.platformer_pack import vlm_qa
+    except ImportError:  # pragma: no cover — env-specific
+        return None
+    return vlm_qa
+
+
+def _animation_plan(pack: Path, target: str) -> tuple[list[str], dict]:
+    """``(states this actor would animate, brief per state)``.
+
+    The player has its own richer ladder (jump/fall/land/skid); an enemy takes
+    the base vocabulary plus ``jump`` when it's a hopper — the same lookup
+    generation itself uses, so the dialog promises exactly what a run delivers.
+    """
+    vq = _pack_vlm_qa()
+    if vq is None:
+        return [], {}
+    if target == "player":
+        planned = list(vq.PLAYER_ANIMATION_STATES)
+    else:
+        planned = list(vq.ANIMATION_STATES)
+        kind, _, ident = target.partition(":")
+        if kind == "enemy" and ident:
+            rp = pack / "enemy" / f"{ident}.json"
+            row = (_read_json(rp) if rp.is_file() else {}) or {}
+            if str(row.get("archetype") or "") == "hopper":
+                planned = list(vq.enemy_animation_states(SimpleNamespace(archetype="hopper")))
+    briefs = {s: vq._STATE_BRIEF[s] for s in planned if s in vq._STATE_BRIEF}
+    return planned, briefs
+
+
+def _stored_motion_spec(pack: Path, target: str) -> dict:
+    """The motion spec a previous animate run stored on THIS actor, if any.
+
+    Actor-specific and therefore truer than the generic brief — it describes
+    how this particular drawing moves. Enemies and items carry it on their row
+    (`stats.animation.spec`); the player's lives in the Bible, which the
+    sequential runner's packs don't ship, so it simply reads empty there.
+    """
+    kind, _, ident = (target or "").partition(":")
+    if kind in ("enemy", "item") and ident:
+        rp = pack / kind / f"{ident}.json"
+        row = (_read_json(rp) if rp.is_file() else {}) or {}
+        spec = ((row.get("stats") or {}).get("animation") or {}).get("spec")
+        return spec if isinstance(spec, dict) else {}
+    if target == "player":
+        # The sequential runner's packs ship no bible.json — read empty.
+        bp = pack / "bible.json"
+        bible = (_read_json(bp) if bp.is_file() else {}) or {}
+        player = bible.get("player") or {}
+        spec = ((player.get("animation") or {})).get("spec")
+        return spec if isinstance(spec, dict) else {}
+    return {}
+
+
 def _frame_boxes(strip_path: Path, count: int, fw: int, fh: int) -> list[dict]:
     """The opaque content box of every frame in a strip, in FRAME pixel space.
 
@@ -268,10 +341,21 @@ def read_animation(pack_dir: str | Path, target: str) -> dict:
         )
 
     flush = [s["state"] for s in states if s["flush"]]
+    planned, briefs = _animation_plan(pack, target)
+    spec = _stored_motion_spec(pack, target)
     return {
         "target": target,
         "label": label,
         "sprite_dir": sprite_dir,
+        # What an animate run WORKS FROM, so the generate dialog can show its
+        # real inputs instead of only backend dropdowns: the base sprite it
+        # edits, the states it will author, the per-state motion brief, and any
+        # spec a previous run already stored for THIS actor.
+        "base_sprite": f"{sprite_dir}/base.png",
+        "base_sprite_abs": _abs(pack, f"{sprite_dir}/base.png"),
+        "planned_states": planned,
+        "briefs": briefs,
+        "spec": spec,
         "has_atlas": bool(atlas),
         "atlas_path_abs": _abs(pack, str(atlas.get("path", "") or "")) if atlas else None,
         "states": states,

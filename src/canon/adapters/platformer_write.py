@@ -730,6 +730,56 @@ def create_level(
     return {"level_id": lid, "stage_id": stage_id, "dims": [width, height], "draft": True}
 
 
+#: Reserved id for the game-feel sandbox room. A FIXED id is what makes
+#: `ensure_sandbox_level` idempotent — opening the sandbox twice reuses the same
+#: draft instead of scaffolding (and journaling) a fresh level every launch.
+SANDBOX_LEVEL_ID = "sandbox"
+
+
+def ensure_sandbox_level(
+    pack_dir: str | Path,
+    stage_id: str | None = None,
+    *,
+    width: int = 40,
+    height: int = 16,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Create-or-reuse the flat room the movement sandbox plays in.
+
+    The sandbox needs somewhere obstacle-free to judge how the player FEELS,
+    and ``create_level`` already scaffolds exactly that — flat floor, spawn
+    left, exit right, and crucially a DRAFT, so it stays out of the manifest
+    and world map and never leaks into the playable progression. This is
+    therefore id selection + an existence check on top of it, not a second
+    scaffolder.
+
+    ``stage_id`` defaults to the pack's first stage (the sandbox only needs a
+    tileset to draw with; which biome it borrows doesn't matter).
+    """
+    pack = Path(pack_dir)
+    if stage_id is None:
+        manifest = json.loads((pack / "manifest.json").read_text())
+        stages = manifest.get("stages") or []
+        if not stages:
+            raise ValueError(f"no stages in {pack}/manifest.json")
+        stage_id = str(stages[0].get("stage_id"))
+    existing = pack / "level" / stage_id / SANDBOX_LEVEL_ID
+    if existing.is_dir():
+        return {
+            "level_id": SANDBOX_LEVEL_ID,
+            "stage_id": stage_id,
+            "created": False,
+            "draft": True,
+        }
+    out = create_level(
+        pack, stage_id, width, height, SANDBOX_LEVEL_ID,
+        actor=actor, session=session,
+    )
+    out["created"] = True
+    return out
+
+
 def _rebuild_world_map(manifest: dict) -> None:
     """Recompute world_map nodes/edges + display names from the stage lists.
 

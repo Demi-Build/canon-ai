@@ -104,40 +104,29 @@ NOTES_MAX_CHARS = 300
 #: The closed animation-state vocabulary. Both play surfaces ALREADY track
 #: each of these: ``walk`` while moving, ``hurt`` while hurt_t>0, ``death``
 #: when !alive, else ``idle``. The VLM spec and frames.json share these keys.
+# The animation VOCABULARY lives in animation_spec (one source of truth,
+# overridable per pack via animation.json). These module constants stay as
+# the built-in DEFAULTS every existing call site already reads.
+from examples.platformer_pack.animation_spec import (  # noqa: E402
+    DEFAULT_SETS as _ANIM_SPEC_DEFAULT_SETS,
+    DEFAULT_STATES as _ANIM_SPEC_DEFAULT_STATES,
+)
+
 #: This is the BASE enemy set — :func:`enemy_animation_states` widens it per
 #: archetype (a hopper adds ``jump`` for its airborne arc).
-ANIMATION_STATES: tuple[str, ...] = ("idle", "walk", "hurt", "death")
+ANIMATION_STATES: tuple[str, ...] = tuple(_ANIM_SPEC_DEFAULT_SETS["enemy"])
 
 #: The PLAYER's states. The player jumps (enemies don't) and never plays a
 #: death cycle (it respawns), so its set differs from the enemy set. Both
 #: surfaces track: rising airborne → ``jump``, descending → ``fall``, the
 #: brief touch-down window → ``land``, braking against carried momentum →
 #: ``skid``, moving on ground → ``walk``, else idle.
-PLAYER_ANIMATION_STATES: tuple[str, ...] = (
-    "idle", "walk", "jump", "fall", "land", "skid",
-)
+PLAYER_ANIMATION_STATES: tuple[str, ...] = tuple(_ANIM_SPEC_DEFAULT_SETS["player"])
 
 #: One-line meaning of each state, woven into the authoring prompt so motion
 #: is grounded in what the state actually is (a flyer's ``walk`` is flight).
 _STATE_BRIEF: dict[str, str] = {
-    "idle": "at rest / holding position (a flyer hovers, a sentry barely stirs)",
-    "walk": "actively moving along its path (for a flyer/swimmer: flight/swim)",
-    "hurt": "recoiling from a hit — a brief flinch",
-    "death": "defeated — collapse, tumble, or fade",
-    # Transient states carry an explicit SILHOUETTE contract so a generator
-    # can't collapse them into near-identical standing frames (postmortem
-    # ticket 8): each names a distinct outline the others don't share.
-    "jump": "the RISING launch — a compact crouch then push-off, body "
-            "gathered and tucked, moving UP; a rounded rising silhouette, "
-            "clearly NOT the stretched trailing-limb fall",
-    "fall": "the DESCENT past the peak — body stretched tall and vertical, "
-            "arms, limbs and hair trailing UPWARD; a tall narrow silhouette",
-    "land": "the touchdown SQUASH — body compressed low and WIDE, legs fully "
-            "folded, an implied dust puff; a short wide silhouette, clearly "
-            "flatter than idle",
-    "skid": "braking against carried momentum — torso leaned BACK, legs "
-            "thrust FORWARD and braced; a diagonal leaning silhouette, "
-            "distinct from an upright walk",
+    k: v["brief"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: Per-state frame counts are clamped here. The image model ignores exact
@@ -151,16 +140,14 @@ PLAYER_ANIM_FRAMES_MAX = 9
 #: Fallback frame count when the model omits/garbles a state — chosen to read
 #: right: idle barely stirs, a walk/flight cycle is the fullest.
 ANIM_DEFAULT_FRAMES: dict[str, int] = {
-    "idle": 2, "walk": 4, "hurt": 2, "death": 4, "jump": 6,
-    "fall": 3, "land": 2, "skid": 2,
+    k: v["frames"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: How each state's cycle plays back on both surfaces: ``loop`` wraps
 #: forever, ``once`` holds the last frame (a death collapse must not
 #: restart mid-linger). Unknown states fall back to ``loop``.
 STATE_LOOP_MODES: dict[str, str] = {
-    "idle": "loop", "walk": "loop", "jump": "once", "fall": "loop",
-    "land": "once", "skid": "loop", "hurt": "once", "death": "once",
+    k: v["loop"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: Motion phrases are clamped like the QA notes.
@@ -938,15 +925,22 @@ def enemy_animation_subject(enemy: Any) -> str:
     )
 
 
-def enemy_animation_states(enemy: Any) -> tuple[str, ...]:
+def enemy_animation_states(
+    enemy: Any, pack_dir: Any = None
+) -> tuple[str, ...]:
     """The state set ONE enemy authors/generates: the base vocabulary, plus
     ``jump`` for a hopper (both surfaces track its airborne arc via
     ``e_grounded``). Same archetype lookup as
     :func:`enemy_animation_subject`."""
+    from examples.platformer_pack.animation_spec import load_spec, states_for
+
     archetype = enemy.archetype or "patroller"
-    if archetype == "hopper":
-        return (*ANIMATION_STATES, "jump")
-    return ANIMATION_STATES
+    # Resolution order (most specific first): this enemy's own
+    # `animation_states` field, then `enemy.<archetype>`, then the base set —
+    # all overridable per pack via animation.json. The hopper default below is
+    # the old special case, now expressed as data.
+    resolved = states_for(load_spec(pack_dir), "enemy", archetype, enemy)
+    return tuple(resolved) if resolved else ANIMATION_STATES
 
 
 def animate_prompt(

@@ -1269,6 +1269,42 @@ def level_create(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@level_app.command("sandbox")
+def level_sandbox(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str | None = typer.Option(
+        None, "--stage", help="Stage to borrow tiles from (default: the first)."
+    ),
+    width: int = typer.Option(40, "--width"),
+    height: int = typer.Option(16, "--height"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Create-or-reuse the flat DRAFT room the movement sandbox plays in.
+
+    Idempotent: the room has a reserved id, so repeat launches reuse it and
+    journal nothing. Play it with `PLAT_SANDBOX=1` for no win condition and a
+    HUD naming the animation state the game picked and why.
+    """
+    try:
+        from canon.adapters.platformer_write import ensure_sandbox_level
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ensure_sandbox_level(  # type: ignore[possibly-unbound]
+            pack_dir, stage_id, width=width, height=height,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id or "")
+    except Exception as e:
+        _emit_error(f"Sandbox failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 @level_app.command("generate")
 def level_generate(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
