@@ -1343,6 +1343,44 @@ def apply_world_map_edit(
     return {"world_map": "updated", "changed": changed}
 
 
+def _level_facts(lv: dict) -> dict[str, Any]:
+    """The per-level detail the map shows without opening the editor: how big
+    the level is, how much is placed in it, and which sub-rooms hang off it."""
+    facts: dict[str, Any] = {}
+    width, height = lv.get("grid_width"), lv.get("grid_height")
+    if isinstance(width, int) and isinstance(height, int) and width and height:
+        facts["size"] = f"{width}×{height}"
+    facts["entities"] = len(lv.get("entities") or [])
+    facts["items"] = len(lv.get("items") or [])
+    rooms = [r for r in (lv.get("secret_rooms") or []) if isinstance(r, str)]
+    if rooms:
+        facts["rooms"] = rooms
+    return facts
+
+
+def _level_overrides(lv: dict, stage: dict) -> list[str]:
+    """Which of its area's defaults a level actually departs from.
+
+    REPORTED, not configured. A level inherits its area's theme, blocks and
+    music bed today — there is no per-level field for any of them — so the only
+    real divergences are an enemy placed outside the area's roster and the
+    per-level physics overrides ``Level`` does carry.
+    """
+    out: list[str] = []
+    pool = {str(ref) for ref in (stage.get("enemy_refs") or [])}
+    if pool:
+        placed = {
+            str(e.get("ref"))
+            for e in (lv.get("entities") or [])
+            if isinstance(e, dict) and str(e.get("ref", "")).startswith("enemy:")
+        }
+        if placed - pool:
+            out.append("enemies")
+    if lv.get("rules_overrides") or lv.get("movement_overrides"):
+        out.append("physics")
+    return out
+
+
 def read_world_map(pack_dir: str | Path) -> dict:
     """The render-ready world map: nodes with positions + display names, typed
     edges, and the AREAS (stages) they cluster under.
@@ -1361,6 +1399,38 @@ def read_world_map(pack_dir: str | Path) -> dict:
     published = {n.get("level_id") for n in wmap.get("nodes") or []}
     placed = dict(world.get("map_nodes") or {})
 
+    # ONE pass over the level files on disk. Draft discovery and the per-node
+    # detail below both need them, and a pack can hold a lot of levels.
+    on_disk: dict[str, dict[str, Any]] = {}
+    for level_json in sorted(pack.glob("level/*/*/level.json")):
+        try:
+            lv = json.loads(level_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        lid = lv.get("level_id") or level_json.parent.name
+        on_disk[lid] = {"stage_id": level_json.parent.parent.name, "data": lv}
+
+    # Stage records carry the area defaults (enemy roster, tileset, boss) that
+    # the manifest's stage summary leaves out.
+    stage_recs: dict[str, dict[str, Any]] = {}
+    for stage_json in sorted(pack.glob("stage/*/stage.json")):
+        try:
+            rec = json.loads(stage_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        stage_recs[rec.get("stage_id") or stage_json.parent.name] = rec
+
+    def _detail(level_id: str) -> dict[str, Any]:
+        found = on_disk.get(level_id)
+        if not found:
+            return {}
+        lv = found["data"]
+        facts = _level_facts(lv)
+        overrides = _level_overrides(lv, stage_recs.get(found["stage_id"]) or {})
+        if overrides:
+            facts["overrides"] = overrides
+        return facts
+
     # DRAFT levels — created by `level create` but not yet published into a
     # stage's level list, so `compose._world_map` (which walks stage.level_ids)
     # can't see them. They are the design's `planned` nodes: on the map, not
@@ -1369,12 +1439,8 @@ def read_world_map(pack_dir: str | Path) -> dict:
     # SECRET ROOMS are deliberately excluded: a room is a sub-room INSIDE a
     # level, not a stop on the world map, so it has no node here.
     drafts: list[dict[str, Any]] = []
-    for level_json in sorted(pack.glob("level/*/*/level.json")):
-        try:
-            lv = json.loads(level_json.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        lid = lv.get("level_id") or level_json.parent.name
+    for lid, found in on_disk.items():
+        lv = found["data"]
         if lid in published or lv.get("parent_level"):
             continue
         pos = (placed.get(lid) or {}).get("pos") or [0.5, 0.5]
@@ -1382,12 +1448,14 @@ def read_world_map(pack_dir: str | Path) -> dict:
             {
                 "level_id": lid,
                 "display_name": None,
-                "stage_id": level_json.parent.parent.name,
+                "stage_id": found["stage_id"],
                 "pos": [round(float(pos[0]), 4), round(float(pos[1]), 4)],
                 "status": "planned",
                 **({"origin": "manual"} if lid in placed else {}),
+                **_detail(lid),
             }
         )
+    drafts.sort(key=lambda n: n["level_id"])
 
     # Layer the DURABLE overrides on the manifest here too, exactly as
     # `compose._world_map` does at compose time. Without this the editor writes
@@ -1400,6 +1468,7 @@ def read_world_map(pack_dir: str | Path) -> dict:
         if isinstance(placed_pos, (list, tuple)) and len(placed_pos) == 2:
             node["pos"] = [round(float(placed_pos[0]), 4), round(float(placed_pos[1]), 4)]
             node["origin"] = "manual"
+        node.update(_detail(str(node.get("level_id"))))
         nodes.append(node)
 
     authored = world.get("map_edges") or []
@@ -1422,16 +1491,24 @@ def read_world_map(pack_dir: str | Path) -> dict:
 
     areas = []
     for i, stage in enumerate(manifest.get("stages") or []):
+        sid = stage.get("stage_id")
+        rec = stage_recs.get(sid) or {}
+        # `blocks` is the area's tile set and `enemy_pool` its roster — the
+        # defaults every level inside inherits. Both live on the stage record;
+        # the manifest's stage summary carries only theme/biome/membership.
         areas.append(
             {
-                "stage_id": stage.get("stage_id"),
+                "stage_id": sid,
                 "index": i,
                 "theme": stage.get("theme", ""),
                 "biome": stage.get("biome", ""),
                 "level_ids": list(stage.get("levels") or []),
-                "music": (manifest.get("audio") or {})
-                .get(stage.get("stage_id"), {})
-                .get("music"),
+                "music": (manifest.get("audio") or {}).get(sid, {}).get("music"),
+                "blocks": str(rec.get("tileset_ref") or "").split(":", 1)[-1],
+                "enemy_pool": [
+                    str(ref).split(":", 1)[-1] for ref in (rec.get("enemy_refs") or [])
+                ],
+                "boss": str(rec.get("boss_ref") or "").split(":", 1)[-1],
             }
         )
 

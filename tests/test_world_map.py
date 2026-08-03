@@ -244,3 +244,86 @@ class TestWriteVerb:
         assert m["areas"][0]["level_ids"] == ["l1", "l2"]
         # An unauthored pack still reports edges in the typed shape.
         assert m["edges"] == [{"a": "l1", "b": "l2", "kind": "path"}]
+
+
+class TestNodeAndAreaDetail:
+    """What the map shows WITHOUT opening a level: size, how much is placed in
+    it, its sub-rooms, and the area defaults every level inside inherits."""
+
+    def _pack(self, tmp_path: Path) -> Path:
+        p = TestWriteVerb()._pack(tmp_path)
+        (p / "stage" / "s1").mkdir(parents=True)
+        (p / "stage" / "s1" / "stage.json").write_text(
+            json.dumps(
+                {
+                    "stage_id": "s1",
+                    "theme": "x",
+                    "biome": "forest",
+                    "tileset_ref": "tileset:s1",
+                    "enemy_refs": ["enemy:mote", "enemy:drifter"],
+                    "boss_ref": "enemy:warden",
+                }
+            )
+        )
+        levels = {
+            "l1": {
+                "grid_width": 53,
+                "grid_height": 16,
+                "entities": [{"ref": "enemy:mote", "pos": [3, 4]}],
+                "items": [{"ref": "item:coin", "pos": [5, 5]}],
+                "secret_rooms": ["l1r1"],
+            },
+            # Places an enemy the area's roster doesn't carry, and overrides
+            # its own physics — both real divergences from the area default.
+            "l2": {
+                "grid_width": 40,
+                "grid_height": 16,
+                "entities": [{"ref": "enemy:stranger", "pos": [2, 2]}],
+                "rules_overrides": {"gravity": 0.5},
+            },
+            "l1r1": {"grid_width": 12, "grid_height": 10, "parent_level": "l1"},
+        }
+        for lid, body in levels.items():
+            d = p / "level" / "s1" / lid
+            d.mkdir(parents=True)
+            (d / "level.json").write_text(json.dumps({"level_id": lid, **body}))
+        return p
+
+    def test_nodes_carry_size_counts_and_rooms(self, tmp_path: Path):
+        from canon.adapters.platformer_write import read_world_map
+
+        nodes = {n["level_id"]: n for n in read_world_map(self._pack(tmp_path))["nodes"]}
+        assert nodes["l1"]["size"] == "53×16"
+        assert nodes["l1"]["entities"] == 1
+        assert nodes["l1"]["items"] == 1
+        assert nodes["l1"]["rooms"] == ["l1r1"]
+        # A level with no sub-rooms omits the key rather than reporting [].
+        assert "rooms" not in nodes["l2"]
+
+    def test_overrides_are_reported_not_invented(self, tmp_path: Path):
+        """A level inherits its area's theme/blocks/music — there is no field
+        for any of them — so the only divergences reported are ones that
+        actually exist on disk."""
+        from canon.adapters.platformer_write import read_world_map
+
+        nodes = {n["level_id"]: n for n in read_world_map(self._pack(tmp_path))["nodes"]}
+        assert "overrides" not in nodes["l1"]
+        assert nodes["l2"]["overrides"] == ["enemies", "physics"]
+
+    def test_areas_carry_their_defaults(self, tmp_path: Path):
+        from canon.adapters.platformer_write import read_world_map
+
+        area = read_world_map(self._pack(tmp_path))["areas"][0]
+        assert area["blocks"] == "s1"
+        assert area["enemy_pool"] == ["mote", "drifter"]
+        assert area["boss"] == "warden"
+
+    def test_a_pack_with_no_stage_records_still_reads(self, tmp_path: Path):
+        """`stage/*/stage.json` is where the roster lives, but a pack that
+        predates it (or a half-written one) must degrade, not raise."""
+        from canon.adapters.platformer_write import read_world_map
+
+        m = read_world_map(TestWriteVerb()._pack(tmp_path))
+        assert m["areas"][0]["enemy_pool"] == []
+        assert m["areas"][0]["blocks"] == ""
+        assert all("size" not in n for n in m["nodes"])
