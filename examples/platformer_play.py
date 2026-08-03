@@ -321,27 +321,59 @@ class _Hooks:
             Path(self.cap_dir).mkdir(parents=True, exist_ok=True)
 
 
-def _slice_strip(path: Path, n: int, size: tuple) -> list:
+def _slice_strip(path: Path, n: int, size: tuple, offsets=None) -> list:
     import pygame
 
     sheet = pygame.image.load(str(path)).convert_alpha()
     fw = sheet.get_width() // n
-    return [
-        pygame.transform.smoothscale(
-            sheet.subsurface((i * fw, 0, fw, sheet.get_height())), size
-        )
-        for i in range(n)
-    ]
+    fh = sheet.get_height()
+    frames = []
+    for i in range(n):
+        cell = sheet.subsurface((i * fw, 0, fw, fh))
+        dx, dy = offsets[i] if offsets and i < len(offsets) else (0, 0)
+        if dx or dy:
+            # Strip frames are already seated in their square, so an authored
+            # nudge re-seats the whole cell on a fresh transparent one. Same
+            # units as the atlas path — one offset model, two loaders.
+            shifted = pygame.Surface((fw, fh), pygame.SRCALPHA)
+            shifted.blit(cell, (dx, dy))
+            cell = shifted
+        frames.append(pygame.transform.smoothscale(cell, size))
+    return frames
 
 
-def _atlas_frames(sheet, rects: list, fsize: tuple, size: tuple) -> list:
+def _anim_offsets(meta: dict, n: int) -> list:
+    """Per-frame authored nudges ``[[dx, dy], ...]`` in FRAME pixel space.
+
+    A human correction to where generation seated a frame, honored only when
+    the list matches the frame count — the same contract ``durations_ms``
+    follows, so a desynced hand-edit degrades to "no offsets" instead of
+    silently shifting the wrong frames. Absent ⇒ every offset is (0, 0) and
+    the render is byte-identical to a pack that never heard of this field.
+    Mirror of main.gd's ``_anim_offsets``.
+    """
+    raw = meta.get("offsets")
+    if not isinstance(raw, list) or len(raw) != n:
+        return [(0, 0)] * n
+    out = []
+    for pair in raw:
+        try:
+            out.append((int(pair[0]), int(pair[1])))
+        except (TypeError, ValueError, IndexError):
+            out.append((0, 0))
+    return out
+
+
+def _atlas_frames(sheet, rects: list, fsize: tuple, size: tuple, offsets=None) -> list:
     import pygame
 
     # Reconstitute each UNTRIMMED frame: blit the trimmed crop at its
     # (ox, oy) offset on a transparent frame_size square (the inline
     # equivalent of tileset_art's reconstitute_frame), then scale.
+    # An authored offset shifts that seat — same units, same square.
     frames = []
-    for r in rects:
+    for i, r in enumerate(rects):
+        dx, dy = offsets[i] if offsets and i < len(offsets) else (0, 0)
         frame = pygame.Surface(fsize, pygame.SRCALPHA)
         frame.blit(
             sheet.subsurface(
@@ -350,7 +382,7 @@ def _atlas_frames(sheet, rects: list, fsize: tuple, size: tuple) -> list:
                     int(r.get("w", 0)), int(r.get("h", 0)),
                 )
             ),
-            (int(r.get("ox", 0)), int(r.get("oy", 0))),
+            (int(r.get("ox", 0)) + dx, int(r.get("oy", 0)) + dy),
         )
         frames.append(pygame.transform.smoothscale(frame, size))
     return frames
@@ -385,10 +417,11 @@ def _load_atlas_anim(data_dir: Path, sprite_dir: str, size: tuple) -> dict | Non
                 continue
             left_rects = m.get("frames_left") or []
             durs, loop = _anim_timing(m, len(rects))
+            offs = _anim_offsets(m, len(rects))
             anim[state] = {
-                "frames": _atlas_frames(sheet, rects, fsize, size),
+                "frames": _atlas_frames(sheet, rects, fsize, size, offs),
                 "frames_left": (
-                    _atlas_frames(sheet, left_rects, fsize, size)
+                    _atlas_frames(sheet, left_rects, fsize, size, offs)
                     if len(left_rects) == len(rects)
                     else None
                 ),
@@ -427,10 +460,10 @@ def _load_anim(data_dir: Path, sprite_rel: str, size: tuple) -> dict | None:
             and int(m.get("frames_left", 0)) == n
             and (data_dir / left_rel).exists()
         ):
-            left = _slice_strip(data_dir / left_rel, n, size)
+            left = _slice_strip(data_dir / left_rel, n, size, _anim_offsets(m, n))
         durs, loop = _anim_timing(m, n)
         anim[state] = {
-            "frames": _slice_strip(strip, n, size),
+            "frames": _slice_strip(strip, n, size, _anim_offsets(m, n)),
             "frames_left": left,
             "durs": durs,
             "loop": loop,

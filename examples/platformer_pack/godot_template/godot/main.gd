@@ -1780,10 +1780,12 @@ func _load_atlas_anim(base_dir: String) -> Dictionary:
 	var loops := {}
 	for state in sdict:
 		var m: Dictionary = sdict[state]
-		var texs := _atlas_frames(sheet, m.get("frames", []), fw, fh)
+		var rects: Variant = m.get("frames", [])
+		var offs := _anim_offsets(m, (rects as Array).size() if typeof(rects) == TYPE_ARRAY else 0)
+		var texs := _atlas_frames(sheet, rects, fw, fh, offs)
 		if texs.is_empty():
 			continue
-		var left := _atlas_frames(sheet, m.get("frames_left", []), fw, fh)
+		var left := _atlas_frames(sheet, m.get("frames_left", []), fw, fh, offs)
 		if left.size() == texs.size():
 			states_left[state] = left
 		states[state] = texs
@@ -1797,7 +1799,29 @@ func _load_atlas_anim(base_dir: String) -> Dictionary:
 	}
 
 
-func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int) -> Array:
+func _anim_offsets(m: Dictionary, n: int) -> Array:
+	# Per-frame authored nudges [[dx, dy], ...] in FRAME pixel space — a human
+	# correction to where generation seated a frame. Honored only when the list
+	# matches the frame count, the same contract "durations_ms" follows, so a
+	# desynced hand-edit degrades to "no offsets" rather than silently shifting
+	# the wrong frames. Absent => every offset is (0, 0) and the render is
+	# byte-identical to a pack without the field.
+	# Mirror of platformer_play._anim_offsets.
+	var raw: Variant = m.get("offsets")
+	var offs: Array = []
+	if typeof(raw) == TYPE_ARRAY and (raw as Array).size() == n:
+		for pair in raw:
+			if typeof(pair) == TYPE_ARRAY and (pair as Array).size() >= 2:
+				offs.append(Vector2i(int(pair[0]), int(pair[1])))
+			else:
+				offs.append(Vector2i(0, 0))
+	else:
+		for i in range(n):
+			offs.append(Vector2i(0, 0))
+	return offs
+
+
+func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int, offsets: Array = []) -> Array:
 	# Reconstitute each UNTRIMMED frame: blit the trimmed crop at its (ox, oy)
 	# offset onto a transparent fw x fh square. Byte-for-byte the same
 	# construction as platformer_play._atlas_frames, which is the point — both
@@ -1825,10 +1849,13 @@ func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int) -> Array:
 			return []
 		var frame_image := Image.create(fw, fh, false, sheet_image.get_format())
 		frame_image.fill(Color(0, 0, 0, 0))
+		var nudge: Vector2i = Vector2i(0, 0)
+		if texs.size() < offsets.size():
+			nudge = offsets[texs.size()]
 		frame_image.blit_rect(
 			sheet_image,
 			Rect2i(int(r.get("x", 0)), int(r.get("y", 0)), w, h),
-			Vector2i(int(r.get("ox", 0)), int(r.get("oy", 0))),
+			Vector2i(int(r.get("ox", 0)) + nudge.x, int(r.get("oy", 0)) + nudge.y),
 		)
 		texs.append(ImageTexture.create_from_image(frame_image))
 	return texs

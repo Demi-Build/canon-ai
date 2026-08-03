@@ -1237,6 +1237,153 @@ def assign_asset(
 # World map authoring
 # ---------------------------------------------------------------------------
 
+_LOOP_MODES = {"loop", "once", "ping_pong"}
+#: Playback fields a human may correct by hand. Deliberately NOT the geometry
+#: (x/y/w/h/ox/oy) — that is generation's output; these are corrections layered
+#: on top of it, which is why re-animating clears them.
+_FRAME_EDITABLE = ("offsets", "durations_ms", "loop")
+
+
+def apply_frames_edit(
+    pack_dir: str | Path,
+    target: str,
+    state: str,
+    edit: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Hand-correct one animation state's PLAYBACK: per-frame offsets, per-frame
+    durations, loop mode.
+
+    The point is fixing a badly-seated or badly-timed animation without paying
+    to regenerate it. Offsets are `[[dx, dy], ...]` in FRAME pixel space and
+    must match the frame count — the same contract ``durations_ms`` already
+    follows, so a desynced list is refused here rather than silently shifting
+    the wrong frames at play time.
+
+    Written to BOTH ``atlas.json`` and ``frames.json``: the two loaders read
+    different manifests (atlas wins where present, strips are the fallback),
+    so writing one would leave the other rendering the un-corrected version.
+
+    Mirrors ``db update``: validate → write → rehash → journal. A no-op edit
+    does not journal.
+    """
+    from canon.adapters.platformer_read import _sprite_dir_for
+
+    pack = Path(pack_dir)
+    _label, sprite_dir = _sprite_dir_for(pack, target)
+    frames_path = pack / sprite_dir / "frames.json"
+    atlas_path = pack / sprite_dir / "atlas.json"
+    if not frames_path.is_file():
+        raise FileNotFoundError(f"{target} has no animation ({frames_path} missing)")
+
+    frames_meta = json.loads(frames_path.read_text())
+    entry = frames_meta.get(state)
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"{target} has no animation state {state!r} "
+            f"(has {', '.join(sorted(frames_meta)) or 'none'})"
+        )
+    count = int(entry.get("frames", 0) or 0)
+
+    unknown = [k for k in edit if k not in _FRAME_EDITABLE]
+    if unknown:
+        raise ValueError(
+            f"cannot edit {', '.join(sorted(unknown))} — "
+            f"frames-edit changes playback ({', '.join(_FRAME_EDITABLE)}), "
+            f"not the generated frame geometry"
+        )
+
+    patch: dict[str, Any] = {}
+    if "offsets" in edit:
+        raw = edit["offsets"]
+        if raw is None:
+            patch["offsets"] = None  # clear back to generation's seating
+        else:
+            if not isinstance(raw, list) or len(raw) != count:
+                raise ValueError(
+                    f"offsets needs one [dx, dy] per frame ({count} for {state!r}), "
+                    f"got {len(raw) if isinstance(raw, list) else type(raw).__name__}"
+                )
+            pairs = []
+            for pair in raw:
+                if (
+                    not isinstance(pair, (list, tuple))
+                    or len(pair) != 2
+                    or not all(isinstance(v, (int, float)) for v in pair)
+                ):
+                    raise ValueError(f"offsets entries must be [dx, dy]; got {pair!r}")
+                pairs.append([int(pair[0]), int(pair[1])])
+            patch["offsets"] = pairs
+    if "durations_ms" in edit:
+        raw = edit["durations_ms"]
+        if not isinstance(raw, list) or len(raw) != count:
+            raise ValueError(
+                f"durations_ms needs one value per frame ({count} for {state!r})"
+            )
+        if not all(isinstance(v, (int, float)) and v > 0 for v in raw):
+            raise ValueError("durations_ms entries must be positive numbers")
+        patch["durations_ms"] = [int(v) for v in raw]
+    if "loop" in edit:
+        if edit["loop"] not in _LOOP_MODES:
+            raise ValueError(
+                f"loop must be one of {', '.join(sorted(_LOOP_MODES))}; got {edit['loop']!r}"
+            )
+        patch["loop"] = edit["loop"]
+
+    def _apply(entry: dict) -> bool:
+        changed = False
+        for key, value in patch.items():
+            if value is None:
+                if entry.pop(key, None) is not None:
+                    changed = True
+                continue
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
+        return changed
+
+    before = provenance.snapshot_file(pack, frames_path)
+    touched = _apply(entry)
+
+    atlas_meta = None
+    if atlas_path.is_file():
+        atlas_meta = json.loads(atlas_path.read_text())
+        astate = (atlas_meta.get("states") or {}).get(state)
+        if isinstance(astate, dict) and _apply(astate):
+            touched = True
+
+    if not touched:
+        return {"frames_edit": "no_change", "target": target, "state": state}
+
+    frames_path.write_text(json.dumps(frames_meta, indent=2))
+    if atlas_meta is not None:
+        atlas_path.write_text(json.dumps(atlas_meta, indent=2))
+    after = provenance.snapshot_file(pack, frames_path)
+
+    provenance.record(
+        pack,
+        # The BARE target, matching what `asset animate` journals — animation is
+        # a facet of the actor, not a separate artifact. A different id here
+        # would fork the lineage tree the History tab reads.
+        artifact_id=target,
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={"kind": "frames_edit", "state": state, "fields": sorted(patch)},
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "frames_edit": "updated",
+        "target": target,
+        "state": state,
+        "fields": sorted(patch),
+    }
+
+
 _EDGE_KINDS = {"path", "one", "lock", "new"}
 
 

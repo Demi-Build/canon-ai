@@ -1826,6 +1826,159 @@ def spend_list(
     _emit({"result": "spend_list", "spend": summary})  # type: ignore[possibly-unbound]
 
 
+anim_app = typer.Typer(
+    help="Animation frames: inspect the geometry, correct the playback.",
+)
+app.add_typer(anim_app, name="anim")
+
+
+@anim_app.command("inspect")
+def anim_inspect_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    target: str = typer.Option(
+        ..., "--target", help="player | enemy:<id> | item:<id>."
+    ),
+) -> None:
+    """Every measurable fact about one actor's animation.
+
+    Per state: the shared frame square, playback timing, authored offsets, and
+    the measured content box of every frame — plus the two defects that are
+    invisible frame by frame (states sized independently, feet wandering
+    between frames of one state). Pure read.
+    """
+    from canon.adapters.platformer_read import read_animation
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        anim = read_animation(pack_dir, target)
+    except ValueError as e:
+        _emit_error(str(e))
+    except Exception as e:
+        _emit_error(f"anim inspect failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "anim_inspect", "animation": anim})  # type: ignore[possibly-unbound]
+
+
+@anim_app.command("edit")
+def anim_edit_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    target: str = typer.Option(..., "--target", help="player | enemy:<id> | item:<id>."),
+    state: str = typer.Option(..., "--state", help="Animation state, e.g. fall."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Playback patch, e.g. {"offsets":[[0,-2],[0,-2],[0,-1]],'
+        '"durations_ms":[120,120,90],"loop":"loop"}. offsets:null clears them.',
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who is editing (journalled)."),
+    session: str | None = typer.Option(None, "--session", help="Session id."),
+) -> None:
+    """Correct one animation state's playback by hand — per-frame offsets,
+    per-frame durations, loop mode.
+
+    Fixes a badly-seated or badly-timed animation without paying to regenerate
+    it. Frame GEOMETRY is generation's output and is not editable here; these
+    are corrections layered on top, which is why re-animating clears them.
+    """
+    from canon.adapters.platformer_write import apply_frames_edit
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        edit = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(edit, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        result = apply_frames_edit(
+            pack_dir, target, state, edit, actor=actor, session=session  # type: ignore[arg-type]
+        )
+    except (ValueError, FileNotFoundError) as e:
+        _emit_error(str(e))
+    except Exception as e:
+        _emit_error(f"anim edit failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "anim_edit", **result})  # type: ignore[possibly-unbound]
+
+
+engine_app = typer.Typer(
+    help="The game runtime inside a pack (Godot project files).",
+)
+app.add_typer(engine_app, name="engine")
+
+
+def _pack_engine():
+    """Import the platformer pack's engine-export module (same sys.path fix
+    ``_pack_ops`` needs — the pack lives under ``examples/``)."""
+    import canon as _canon
+
+    root = Path(_canon.__file__).resolve().parents[2]
+    if (root / "examples").is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from examples.platformer_pack import godot_export
+    except ImportError as e:  # pragma: no cover — env-specific
+        _emit_error(
+            f"Failed to import the platformer pack engine export ({e}); "
+            f"looked for examples/ under {root}."
+        )
+    return godot_export
+
+
+@engine_app.command("status")
+def engine_status_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root to check."),
+) -> None:
+    """Is this pack's game runtime current with canon's template?
+
+    The runtime is COPIED into a pack when it is generated, so a pack keeps
+    whatever engine code existed that day — every engine fix shipped since is
+    invisible to it. Pure read; nothing is written.
+    """
+    engine = _pack_engine()
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        status = engine.engine_status(pack_dir)
+    except Exception as e:
+        _emit_error(f"engine status failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "engine_status", "status": status})  # type: ignore[possibly-unbound]
+
+
+@engine_app.command("sync")
+def engine_sync_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root to refresh."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change; write nothing."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite hand-edited runtime files too (they are refused by default).",
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who is syncing (journalled)."),
+    session: str | None = typer.Option(None, "--session", help="Session id (journalled)."),
+) -> None:
+    """Refresh a pack's game runtime from canon's current template.
+
+    A file that differs from its OWN stamp was hand-edited, so it is REFUSED
+    by name rather than silently overwritten; pass --force to overwrite it
+    anyway. Only the runtime is touched — generated content is never rewritten.
+    """
+    engine = _pack_engine()
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = engine.engine_sync(
+            pack_dir, dry_run=dry_run, force=force, actor=actor, session=session
+        )
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"engine sync failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "engine_sync", **result})  # type: ignore[possibly-unbound]
+
+
 jobs_app = typer.Typer(help="Per-project job ledger (background generation runs).")
 app.add_typer(jobs_app, name="jobs")
 

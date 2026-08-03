@@ -148,6 +148,140 @@ def _abs(pack_dir: Path, rel: str | None) -> str | None:
     return str((pack_dir / rel).resolve())
 
 
+#: Where an animation target's sprite directory lives, by target grammar.
+def _sprite_dir_for(pack: Path, target: str) -> tuple[str, str]:
+    """``(label, sprite dir relative to the pack)`` for an animation target.
+
+    Grammar matches ``platformer_play._anim_preview_targets`` so the inspector
+    and the viewers name the same things: ``enemy:<id>`` | ``item:<id>`` |
+    ``player``.
+    """
+    t = (target or "").strip()
+    if t == "player":
+        return "player", "sprite/player"
+    if ":" in t:
+        kind, ident = t.split(":", 1)
+        if kind in ("enemy", "item") and ident:
+            return ident, f"sprite/{kind}/{ident}"
+    raise ValueError(
+        f"unknown animation target {target!r} — expected player, "
+        f"enemy:<id> or item:<id>"
+    )
+
+
+def _frame_boxes(strip_path: Path, count: int, fw: int, fh: int) -> list[dict]:
+    """The opaque content box of every frame in a strip, in FRAME pixel space.
+
+    Measured from the shipped pixels rather than read back from the atlas
+    rects: the rects are what generation *intended*, and the whole point of
+    this inspector is catching art that disagrees with the intent. Frames with
+    no opaque pixel at all report a null box instead of a zero-size one.
+    """
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover — Pillow ships with the art extra
+        return []
+    try:
+        sheet = Image.open(strip_path).convert("RGBA")
+    except (OSError, ValueError):
+        return []
+    boxes: list[dict] = []
+    for i in range(count):
+        crop = sheet.crop((i * fw, 0, (i + 1) * fw, fh))
+        bbox = crop.getbbox()
+        if bbox is None:
+            boxes.append({"index": i, "box": None})
+            continue
+        x0, y0, x1, y1 = bbox
+        boxes.append(
+            {
+                "index": i,
+                "box": {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0},
+                # How far the content's feet sit above the cell's bottom edge.
+                # A state whose feet wander between frames is the thing that
+                # makes an actor look like it hops between poses.
+                "foot_gap": fh - y1,
+            }
+        )
+    return boxes
+
+
+def read_animation(pack_dir: str | Path, target: str) -> dict:
+    """Every measurable fact about one actor's animation, for the inspector.
+
+    Pure read — no writes, no journal. Reports, per state: the shared frame
+    square, playback timing, any authored offsets, and the measured content box
+    of every frame. Also flags the two defects that are invisible frame by
+    frame:
+
+    ``flush``       the state's content touches the cell edge. With ONE shared
+                    square across all states, only the single largest pose may
+                    do this — so more than one flush state means the states
+                    were sized independently, which is the bug that made the
+                    player lose two thirds of its pixels mid-jump.
+    ``foot_wander`` the feet move between frames of one state, which reads as
+                    the actor bobbing while it should be planted.
+    """
+    pack = Path(pack_dir)
+    label, sprite_dir = _sprite_dir_for(pack, target)
+    meta = _read_json(pack / sprite_dir / "frames.json") or {}
+    atlas = _read_json(pack / sprite_dir / "atlas.json") or {}
+
+    states: list[dict] = []
+    for state, entry in sorted(meta.items()):
+        if not isinstance(entry, dict):
+            continue
+        count = int(entry.get("frames", 0) or 0)
+        fw = int(entry.get("frame_width", 0) or 0)
+        fh = int(entry.get("frame_height", 0) or 0)
+        rel = str(entry.get("path", "") or "")
+        frames = _frame_boxes(pack / rel, count, fw, fh) if (count and fw and fh) else []
+        boxes = [f["box"] for f in frames if f["box"]]
+        widest = max((b["w"] for b in boxes), default=0)
+        tallest = max((b["h"] for b in boxes), default=0)
+        foot_gaps = [f["foot_gap"] for f in frames if f["box"]]
+        durations = entry.get("durations_ms")
+        if not isinstance(durations, list) or len(durations) != count:
+            durations = [int(entry.get("duration_ms", 120) or 120)] * count
+        offsets = entry.get("offsets")
+        if not isinstance(offsets, list) or len(offsets) != count:
+            offsets = None
+        states.append(
+            {
+                "state": state,
+                "frames": count,
+                "frame_width": fw,
+                "frame_height": fh,
+                "path": rel,
+                "path_abs": _abs(pack, rel),
+                "loop": entry.get("loop", "loop"),
+                "durations_ms": durations,
+                "offsets": offsets,
+                "boxes": frames,
+                "widest": widest,
+                "tallest": tallest,
+                # Flush = the content reaches the cell edge (1px tolerance for
+                # the pad the writer leaves).
+                "flush": bool(fw and fh and (widest >= fw - 1 or tallest >= fh - 1)),
+                "foot_wander": (max(foot_gaps) - min(foot_gaps)) if foot_gaps else 0,
+            }
+        )
+
+    flush = [s["state"] for s in states if s["flush"]]
+    return {
+        "target": target,
+        "label": label,
+        "sprite_dir": sprite_dir,
+        "has_atlas": bool(atlas),
+        "atlas_path_abs": _abs(pack, str(atlas.get("path", "") or "")) if atlas else None,
+        "states": states,
+        "flush_states": flush,
+        # More than one state touching the edge means they were squared
+        # independently — the signature `animation_scale` checks for.
+        "independently_sized": len(flush) > 1,
+    }
+
+
 def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
     """Assemble a render-ready bundle for one level of a platformer pack.
 
