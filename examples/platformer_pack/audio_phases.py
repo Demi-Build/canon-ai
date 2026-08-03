@@ -49,6 +49,19 @@ SFX_MAX_SECONDS = 30.0
 MUSIC_SECONDS = 30
 
 
+def _add_audio_cost(ctx: Any, producer: Any) -> None:
+    """Accumulate a producer's most-recent per-call cost into
+    ``ctx.stats.audio_cost_usd``. The producers are SYNCHRONOUS (no gather),
+    so ``last_cost`` is unambiguously this call's — read it right after
+    ``generate``. Music/SFX are flat-billed (Lyria/ElevenLabs per-call
+    prices), so this IS the actual audio spend. No-op without stats."""
+    stats = getattr(ctx, "stats", None)
+    if stats is None:
+        return
+    cost = float(getattr(producer, "last_cost", 0.0) or 0.0)
+    stats.audio_cost_usd = float(getattr(stats, "audio_cost_usd", 0.0)) + cost
+
+
 def _audio_ext(data: bytes) -> str:
     """Extension by content sniff — backends emit whatever their API
     returns (Lyria wav/mp3, ElevenLabs mp3, fakes mp3) and consumers pick
@@ -127,10 +140,15 @@ class AudioPhase:
         music_producer: Any = None,
         sfx_producer: Any = None,
         music_seconds: int = MUSIC_SECONDS,
+        music_prompt_override: str | None = None,
     ) -> None:
         self.music = music_producer
         self.sfx = sfx_producer
         self.music_seconds = music_seconds
+        # Per-call MUSIC prompt override ("✎ edit prompt"); only the
+        # single-stage `generate_asset` op sets it (its bible holds one
+        # stage). SFX prompts are per-event and stay built. None = default.
+        self.music_prompt_override = music_prompt_override
 
     def owns(self, ctx: Any) -> list[str]:
         return [
@@ -159,15 +177,19 @@ class AudioPhase:
             if self.music is not None:
                 try:
                     data = self.music.generate(
-                        f"Looping instrumental level theme for a retro "
-                        f"platformer stage: {stage.theme}. World: "
-                        f"{world_title}. Melodic, atmospheric, seamless "
-                        f"loop, no vocals.",
+                        (self.music_prompt_override or "").strip()
+                        or (
+                            f"Looping instrumental level theme for a retro "
+                            f"platformer stage: {stage.theme}. World: "
+                            f"{world_title}. Melodic, atmospheric, seamless "
+                            f"loop, no vocals."
+                        ),
                         self.music_seconds,
                     )
                     rel = f"music/{stage_id}/theme{_audio_ext(data)}"
                     audio.music_path = rel
                     audio.music_hash = ctx.adapter.write_binary(rel, data)
+                    _add_audio_cost(ctx, self.music)
                 except Exception as e:  # noqa: BLE001
                     warn(
                         ctx,
@@ -196,6 +218,7 @@ class AudioPhase:
                     rel = f"sfx/{stage_id}/{event}{_audio_ext(data)}"
                     audio.sfx_paths[event] = rel
                     audio.sfx_hashes[rel] = ctx.adapter.write_binary(rel, data)
+                    _add_audio_cost(ctx, self.sfx)
 
             manifest_hash = ctx.adapter.write_json_singleton(
                 f"audio/{stage_id}/manifest.json",

@@ -205,10 +205,25 @@ def world_stages(ctx: Any) -> list:
 VERTICAL_FRACTION = 0.4
 
 
+def _level_override(ctx: Any, level_id: str) -> dict:
+    """Per-level generation overrides an on-demand caller (the cradle
+    create/generate flow) injects via ``ctx.artifacts["level_overrides"]``:
+    ``difficulty``/``grid_width``/``grid_height``/``axis`` pins and the
+    ``no_secret_rooms`` opt-out. Empty for full-pipeline runs, so their
+    deterministic rolls are unchanged. EVERY knob-recompute site reads it
+    here so layout/placement/items stay consistent (the recompute
+    discipline)."""
+    return dict(ctx.artifacts.get("level_overrides", {}).get(level_id, {}) or {})
+
+
 def _roll_level_axis(ctx: Any, level_id: str, phase_name: str, stage_number: int) -> str:
     """Deterministically pick a level's layout AXIS. Vertical climbs appear
     only from stage 2 on (a progression: horizontal intros, vertical variety
-    later), on a per-level roll keyed independently of the dims/plan rolls."""
+    later), on a per-level roll keyed independently of the dims/plan rolls. An
+    on-demand caller may PIN the axis via the level override (Full control)."""
+    override_axis = _level_override(ctx, level_id).get("axis")
+    if override_axis in ("horizontal", "vertical"):
+        return override_axis
     if stage_number < 2:
         return "horizontal"
     seed = str(getattr(ctx.config, "seed", ""))
@@ -245,20 +260,33 @@ def _roll_level_knobs(
     stage = _stage_for_level(ctx, level_id)
     seed = str(getattr(ctx.config, "seed", ""))
     stage_number = _stage_number(ctx, stage.stage_id)
+    override = _level_override(ctx, level_id)
+    # An on-demand caller may PIN difficulty (Full control); otherwise it
+    # escalates with world position. The schema keys difficulty AND the
+    # platform/hazard/gap counts off level_number, so the pin precedes the roll.
+    level_number = (
+        int(override["difficulty"]) if "difficulty" in override
+        else min(stage_number + index, 3)
+    )
     roll_context = {
-        "level_number": min(stage_number + index, 3),
+        "level_number": max(1, min(3, level_number)),
         "stage_number": stage_number,
     }
     knobs = roll_skeleton(
         spec, derive_rng(seed, phase_name, level_id), context=roll_context
     )
-    # Variable dims (GridDims, §4.2): schema-rolled per level; the defaults
-    # are the fallback for schemas without them.
-    width = int(knobs.get("grid_width", default_width))
-    height = int(knobs.get("grid_height", default_height))
     axis = _roll_level_axis(ctx, level_id, phase_name, stage_number)
-    if axis == "vertical":
-        width, height = _vertical_dims(width, height)
+    # Variable dims (GridDims, §4.2): schema-rolled per level (the defaults are
+    # the fallback), recast tall+narrow for a vertical climb — UNLESS the
+    # caller pinned exact dims, which are then authoritative (no recast).
+    if "grid_width" in override or "grid_height" in override:
+        width = int(override.get("grid_width", knobs.get("grid_width", default_width)))
+        height = int(override.get("grid_height", knobs.get("grid_height", default_height)))
+    else:
+        width = int(knobs.get("grid_width", default_width))
+        height = int(knobs.get("grid_height", default_height))
+        if axis == "vertical":
+            width, height = _vertical_dims(width, height)
     return knobs, width, height, axis
 
 
@@ -493,6 +521,19 @@ class _SectionState:
     res: StampResult
     fell_back: bool
     attempts: list[dict[str, Any]]
+
+
+@dataclass
+class ImproveRequest:
+    """A context-aware 'improve this level' ask. ``current_desc`` is
+    ``describe_level_grid`` of the level being improved (so the layout agent
+    SEES it); ``instruction`` is the user's change; ``problems`` are optional
+    validation problems to also fix. When present on ``stamp_level_collision``
+    it switches authoring to the whole-level re-author path."""
+
+    current_desc: str
+    instruction: str
+    problems: list[str]
 
 
 def _section_digest(idx: int, ps: PlannedSection, dsl_text: str) -> str:
@@ -1144,6 +1185,141 @@ def _generate_sectioned_level(
     return result, dsl_text, fell_back, attempts, bridges, snaps, diag
 
 
+def _author_whole_level(
+    ctx: Any,
+    *,
+    level_id: str,
+    brief: str,
+    knobs: dict,
+    width: int,
+    height: int,
+    axis: str,
+    movement: PlayerMovementSpec,
+    rules: GameRules,
+    tiles: TileRegistry,
+    seed: str,
+    phase_name: str,
+    improve: ImproveRequest,
+) -> tuple[StampResult, str, bool, list[dict], list[str], list[str], dict]:
+    """Context-aware IMPROVE authoring: re-author the WHOLE level in ONE call
+    so the layout agent SEES the current level (``improve.current_desc``) + the
+    user's instruction, then run the SAME whole-grid repairs the sectioned
+    stitch tail runs (containment, capped-oneway, place-exit, snap-spawn,
+    auto-bridge). Returns ``_generate_sectioned_level``'s exact 7-tuple so
+    ``stamp_level_collision``'s finalize block is reused byte-for-byte."""
+    difficulty = int(knobs.get("difficulty", 1))
+    # plan_level ONLY to populate diag["plan"] — the finalize block reads
+    # len(plan.sections) for a secret-room roll that no_secret_rooms discards.
+    # Authoring never uses it (this is a whole-level re-author, not sectioned).
+    level_plan = plan_level(
+        width, height, difficulty,
+        derive_rng(seed, phase_name, level_id, "plan"), axis=axis, water=None,
+    )
+    last_attempt: dict[str, str | None] = {"content": None}
+
+    def generate(
+        feedback: list[str] | None = None, max_tokens: int | None = None
+    ) -> str:
+        request = ctx.prompts.improve_layout(
+            level_id, brief, knobs, width, height, movement, rules=rules,
+            tiles=tiles, current_desc=improve.current_desc,
+            instruction=improve.instruction, problems=improve.problems,
+            previous=last_attempt["content"], feedback=feedback,
+        )
+        if max_tokens is not None:
+            request.max_tokens = max_tokens
+        content = ctx.llm.generate(request, phase=f"{phase_name}:{level_id}")
+        last_attempt["content"] = content
+        return content
+
+    def validate(content: str) -> tuple[bool, list[str]]:
+        try:
+            ops = parse_dsl(content, skipped=[])
+            if not ops:
+                return False, [
+                    "Your reply contained no valid DSL ops — emit the level as "
+                    "ops, one per line, nothing else."
+                ]
+            res = stamp(
+                content, width, height, tiles=tiles,
+                validate_markers=False, lenient=True,
+            )
+        except DslError as exc:
+            return False, list(exc.problems)
+        if res.spawn is None:
+            return False, [
+                "Declare exactly one spawn(x) on clear flat floor near the "
+                + ("bottom." if axis == "vertical" else "left.")
+            ]
+        return True, []
+
+    fallback = (
+        _section_fallback_dsl(width, height, 0, "vertical")
+        if axis == "vertical" else _fallback_dsl(width)
+    )
+    attempts: list[dict[str, Any]] = []
+    token_floor = 1024 if axis == "vertical" else 512
+    text = retry_with_feedback(
+        generate_fn=generate,
+        validate_fn=validate,
+        fallback=fallback,
+        max_retries=getattr(ctx.config, "max_retries", 3),
+        label=f"{phase_name}:{level_id}",
+        attempt_log=attempts,
+        token_escalation=default_token_escalation,
+        initial_max_tokens=max(token_floor, min(2048, width * height)),
+    )
+    whole_fallback = not any(a["outcome"] == "passed" for a in attempts)
+    result = stamp(
+        text, width, height, tiles=tiles, validate_markers=False, lenient=True
+    )
+    # The SAME whole-grid repairs _stitch_and_repair runs on its tail.
+    if rules.water_containment == "contained":
+        spilled, cont_notes = repair_containment_grid(
+            result.grid, tiles, result.free_volume
+        )
+        result.free_volume |= spilled
+        result.repairs.extend(cont_notes)
+    result.repairs.extend(
+        repair_capped_oneways_grid(
+            result.grid, tiles, hazards=result.hazards,
+            free_volume=result.free_volume,
+            protected={result.spawn} if result.spawn else frozenset(),
+        )
+    )
+    exit_ = result.exit
+    if exit_ is None:  # the DSL may omit exit — place it like the stitcher does
+        exclude = {result.spawn} if result.spawn else set()
+        exit_ = place_exit(result.grid, tiles, exclude=exclude, axis=axis)
+        result.exit = exit_
+    snaps: list[str] = []
+    bridges: list[str] = []
+    problems: list[str] = []
+    if result.spawn is not None and exit_ is not None:
+        result.spawn, snaps = snap_spawn_grid(
+            result.grid, result.spawn, exit_, tiles
+        )
+        if not snaps:
+            snaps = clear_spawn_grid(
+                result.grid, result.spawn, tiles, hazards=result.hazards
+            )
+        grid, bridges, problems = auto_bridge_grid(
+            result.grid, result.spawn, exit_, movement, rules=rules, tiles=tiles,
+            triggers=result.triggers, free_volume=result.free_volume,
+            hazards=result.hazards,
+        )
+        result.grid = grid
+    else:
+        problems = ["exit: the level has no standable cell to exit onto."]
+    diag = {
+        "whole_fallback": whole_fallback,
+        "section_fallbacks": [],
+        "stitch_rounds": [{"round": 0, "problems": problems}],
+        "plan": level_plan,
+    }
+    return result, text, whole_fallback, attempts, bridges, snaps, diag
+
+
 def stamp_level_collision(
     ctx: Any,
     level_id: str,
@@ -1157,6 +1333,7 @@ def stamp_level_collision(
     default_height: int = 16,
     phase_name: str = "plat:layout",
     room_of: str | None = None,
+    improve: ImproveRequest | None = None,
 ) -> Level:
     """Layout Agents (one per SECTION) → stitch → collision.npz; creates the
     Level entity (registered in the Bible) carrying spawn/exit/hazards/
@@ -1259,9 +1436,13 @@ def stamp_level_collision(
     # a fully-submerged level suppresses rooms. The gates here mirror
     # level_water_spec exactly (the recompute the DAG/placement share);
     # the flood OUTCOME below is baked into collision.npz.
+    # IMPROVE suppresses a fresh water topology roll: the current level's water
+    # is reported in improve.current_desc and preserved by the re-authored DSL,
+    # so we must not flood a NEW topology over it ("change as little as possible").
     water_spec: WaterSpec | None = None
     if (
-        room_of is None
+        improve is None
+        and room_of is None
         and _stage_number(ctx, stage_id)
         >= int(DEFAULT_WATER_LEVEL_CONFIG.enabled_stage_min)
         and axis == "horizontal"
@@ -1270,15 +1451,28 @@ def stamp_level_collision(
             str(getattr(stage, "biome", "") or ""),
             derive_rng(seed, phase_name, level_id, "water"),
         )
-    result, dsl_text, fell_back, attempts, bridges, snaps, diag = (
-        _generate_sectioned_level(
-            ctx, level_id=level_id, brief=brief, knobs=knobs,
-            width=width, height=height, axis=axis, movement=movement,
-            rules=rules, tiles=tiles, seed=seed, phase_name=phase_name,
-            plan_override=plan_override,
-            water=water_spec.topology if water_spec is not None else None,
+    if improve is not None:
+        # Whole-level re-author (context-aware improve): the LLM sees the current
+        # level + instruction. Returns the SAME 7-tuple, so everything below runs
+        # unchanged.
+        result, dsl_text, fell_back, attempts, bridges, snaps, diag = (
+            _author_whole_level(
+                ctx, level_id=level_id, brief=brief, knobs=knobs,
+                width=width, height=height, axis=axis, movement=movement,
+                rules=rules, tiles=tiles, seed=seed, phase_name=phase_name,
+                improve=improve,
+            )
         )
-    )
+    else:
+        result, dsl_text, fell_back, attempts, bridges, snaps, diag = (
+            _generate_sectioned_level(
+                ctx, level_id=level_id, brief=brief, knobs=knobs,
+                width=width, height=height, axis=axis, movement=movement,
+                rules=rules, tiles=tiles, seed=seed, phase_name=phase_name,
+                plan_override=plan_override,
+                water=water_spec.topology if water_spec is not None else None,
+            )
+        )
     secret_room_ids: list[str] = []
     if room_spec is not None:
         # A room's exit is a RETURN PORTAL, not a win: record it as a
@@ -1310,6 +1504,13 @@ def stamp_level_collision(
             context=str(getattr(stage, "biome", "") or ""),
         )
         if water_spec is not None and water_spec.topology == "fully_submerged":
+            specs = []
+        # On-demand single-level generation (the cradle create flow) opts OUT
+        # of auto-rolled secret rooms — a user asked for ONE level, not a
+        # hidden sub-level. The roll above still ran (rng-stream stability);
+        # discard exactly like the fully-submerged gate. Full-pipeline runs
+        # never set this override, so their room rolls are untouched.
+        if _level_override(ctx, level_id).get("no_secret_rooms"):
             specs = []
         # A waterline entrance (and its shortcut return) must sit on DRY
         # land — the consumers' verb press is gated on not-swimming.
@@ -2301,6 +2502,52 @@ def overlap_occupancy(
         f"{label}: {_cells_summary(sorted(cells))}"
         for label, cells in sorted(by_cat.items())
     )
+
+
+#: Tile category → LLM-facing label (shared by overlap_occupancy above and the
+#: whole-grid describe_level_grid below).
+_CATEGORY_LABEL = {
+    "solid": "solid (floor/ledge/wall)",
+    "one_way": "one-way platform",
+    "hazard": "hazard",
+    "volume": "liquid",
+}
+
+
+def describe_level_grid(
+    grid,
+    tiles: TileRegistry,
+    spawn: tuple[int, int] | None,
+    exit_: tuple[int, int] | None,
+    *,
+    axis: str = "horizontal",
+) -> str:
+    """A compact TEXT description of a whole current level for the improve
+    prompt — generalizes ``overlap_occupancy``'s seam-band digest to the WHOLE
+    grid: dims + spawn/exit + every non-empty cell grouped by tile category into
+    run-length ranges (``_cells_summary``). Never a raw grid dump (I3). This is
+    how the layout agent SEES the level it is asked to improve."""
+    height, width = grid.shape
+    by_cat: dict[str, list[tuple[int, int]]] = {}
+    for y in range(height):
+        for x in range(width):
+            v = int(grid[y, x])
+            if v == 0:
+                continue
+            tile = tiles.by_id.get(v)
+            cat = tile.category if tile else "?"
+            by_cat.setdefault(_CATEGORY_LABEL.get(cat, cat), []).append((x, y))
+    lines = [
+        f"Grid: {width} wide x {height} tall; row 0 is the TOP; ground floor "
+        f"row {height - 2}; axis {axis}.",
+        f"spawn at {tuple(spawn) if spawn else 'none'}; "
+        f"exit at {tuple(exit_) if exit_ else 'none'}.",
+    ]
+    for label in sorted(by_cat):
+        lines.append(f"{label}: {_cells_summary(sorted(by_cat[label]))}")
+    if not by_cat:
+        lines.append("(no terrain — an empty grid)")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

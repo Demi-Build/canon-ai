@@ -195,6 +195,31 @@ def apply_level_edit(
         updated.append(layer)
         _emit(layer, before, level_dir / f"{layer}.json", {"kind": f"{layer}_change", "count": len(entries)})
 
+    # Music override fields — level.json-only. Assigning just repoints the
+    # level (or a section) at an existing track; the track BYTES are written by
+    # the music-generate op. Both flow through here so cradle never writes
+    # pack files itself and every change is journaled.
+    music_detail: dict[str, Any] = {}
+    if "music_path" in edit:
+        music_detail["music_path"] = {
+            "from": level.get("music_path", ""), "to": str(edit["music_path"] or "")
+        }
+        level["music_path"] = str(edit["music_path"] or "")
+        level["music_hash"] = str(edit.get("music_hash", "") or "")
+        updated.append("music")
+    if "music_sections" in edit:
+        level["music_sections"] = [
+            {
+                "start": int(s["start"]), "end": int(s["end"]),
+                "music_path": str(s.get("music_path", "") or ""),
+                "music_hash": str(s.get("music_hash", "") or ""),
+                "name": str(s.get("name", "") or ""),
+            }
+            for s in edit["music_sections"]
+        ]
+        music_detail["music_sections"] = len(level["music_sections"])
+        updated.append("music_sections")
+
     # Point fields live only on level.json.
     point_detail: dict[str, Any] = {}
     for point in ("spawn", "exit"):
@@ -209,8 +234,11 @@ def apply_level_edit(
     level["status"] = "user_edited"
     before_level = provenance.snapshot_file(pack, level_dir / "level.json")
     adapter.write_json_singleton(f"{rel}/level.json", level)
-    if point_detail:
-        _emit("level", before_level, level_dir / "level.json", {"kind": "marker_move", **point_detail})
+    if point_detail or music_detail:
+        _emit(
+            "level", before_level, level_dir / "level.json",
+            {"kind": "level_edit", **point_detail, **music_detail},
+        )
 
     return {
         "level_id": level_id,
@@ -227,11 +255,17 @@ def baseline_level(
     *,
     actor: str = "cradle",
     session: str | None = None,
+    op: str = "generate",
+    detail: dict | None = None,
 ) -> dict:
-    """Record ``generate`` events for a level's as-generated step artifacts.
+    """Record step-artifact events for a level's as-generated files.
 
-    Called when cradle imports a fresh generation. Idempotent — a step already
-    in the journal at its current hash is skipped, so re-opening a level is safe.
+    Called when cradle imports a fresh generation (``op="generate"``, the
+    default) or after a context-aware improve (``op="regenerate"``). Idempotent
+    — a step already in the journal at its current hash is skipped, so
+    re-opening a level is safe. ``detail`` (e.g. ``{"kind": "improve"}``) rides
+    each recorded event so consumers can tell WHICH generation op produced the
+    change (generate / improve / regenerate / place_enemies / place_items).
     """
     pack = Path(pack_dir)
     level_dir, stage_id = _find_level_dir(pack, level_id)
@@ -247,10 +281,11 @@ def baseline_level(
         provenance.record(
             pack,
             artifact_id=aid,
-            op="generate",
+            op=op,
             source="llm",
             actor=actor,
             session=session,
+            detail=detail,
             after_hash=after_hash,
         )
         recorded.append(step)
@@ -695,6 +730,56 @@ def create_level(
     return {"level_id": lid, "stage_id": stage_id, "dims": [width, height], "draft": True}
 
 
+#: Reserved id for the game-feel sandbox room. A FIXED id is what makes
+#: `ensure_sandbox_level` idempotent — opening the sandbox twice reuses the same
+#: draft instead of scaffolding (and journaling) a fresh level every launch.
+SANDBOX_LEVEL_ID = "sandbox"
+
+
+def ensure_sandbox_level(
+    pack_dir: str | Path,
+    stage_id: str | None = None,
+    *,
+    width: int = 40,
+    height: int = 16,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Create-or-reuse the flat room the movement sandbox plays in.
+
+    The sandbox needs somewhere obstacle-free to judge how the player FEELS,
+    and ``create_level`` already scaffolds exactly that — flat floor, spawn
+    left, exit right, and crucially a DRAFT, so it stays out of the manifest
+    and world map and never leaks into the playable progression. This is
+    therefore id selection + an existence check on top of it, not a second
+    scaffolder.
+
+    ``stage_id`` defaults to the pack's first stage (the sandbox only needs a
+    tileset to draw with; which biome it borrows doesn't matter).
+    """
+    pack = Path(pack_dir)
+    if stage_id is None:
+        manifest = json.loads((pack / "manifest.json").read_text())
+        stages = manifest.get("stages") or []
+        if not stages:
+            raise ValueError(f"no stages in {pack}/manifest.json")
+        stage_id = str(stages[0].get("stage_id"))
+    existing = pack / "level" / stage_id / SANDBOX_LEVEL_ID
+    if existing.is_dir():
+        return {
+            "level_id": SANDBOX_LEVEL_ID,
+            "stage_id": stage_id,
+            "created": False,
+            "draft": True,
+        }
+    out = create_level(
+        pack, stage_id, width, height, SANDBOX_LEVEL_ID,
+        actor=actor, session=session,
+    )
+    out["created"] = True
+    return out
+
+
 def _rebuild_world_map(manifest: dict) -> None:
     """Recompute world_map nodes/edges + display names from the stage lists.
 
@@ -823,6 +908,7 @@ def replace_asset(
     *,
     actor: str = "user",
     session: str | None = None,
+    extra_detail: dict | None = None,
 ) -> dict:
     """Replace an asset's bytes with an uploaded PNG.
 
@@ -919,6 +1005,10 @@ def replace_asset(
         )
 
     pinned = _maybe_pin(pack, artifact_id)
+    if extra_detail:
+        # Callers wrapping this install (library import) fold their
+        # provenance into the ONE event instead of journaling a second.
+        detail = {**detail, **extra_detail}
     provenance.record(
         pack,
         artifact_id=artifact_id,
@@ -931,3 +1021,699 @@ def replace_asset(
         after_hash=after,
     )
     return {"target": target, "artifact_id": artifact_id, "pinned": pinned, **detail}
+
+
+def restore_asset(
+    pack_dir: str | Path,
+    target: str,
+    to_hash: str,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Make a HISTORIC version current again (Library A: lineage restore).
+
+    Nothing is deleted: newer versions keep their bytes and events; this
+    writes the chosen version's bytes back into place and journals
+    ``op:"restore"``, so the lineage grows a new branch from an old node.
+
+    Routing is by target family + the bytes themselves:
+      ``enemy:<id>`` / ``item:<id>`` — JSON bytes → the DB row; PNG bytes →
+      the sprite (hash + refs updated, like ``asset replace``)
+      ``player``                     — sprite/player/base.png
+      ``tilesheet:<stage>``          — the WHOLE tilesheet
+      ``backdrop:<stage>/<index>``   — one parallax band
+    """
+    pack = Path(pack_dir)
+    data = provenance.read_object(pack, to_hash)
+    adapter = _pack_adapter(pack)
+    kind, _, rest = target.partition(":")
+    is_png = data.startswith(_PNG_MAGIC)
+
+    # Restore only rewinds an artifact's OWN lineage — without this, any PNG
+    # in the store lands on any PNG target (fail-open). Moving bytes BETWEEN
+    # artifacts is a deliberate future op (library import/assign), not this.
+    expected_artifact = {
+        "enemy": f"enemy:{rest}",
+        "item": f"item:{rest}",
+        "player": "player",
+        "tilesheet": f"tileset:{rest}",
+        "backdrop": f"backdrop:{rest.partition('/')[0]}",
+    }.get(kind)
+    if expected_artifact is not None and not any(
+        e.get("artifact_id") == expected_artifact
+        and to_hash in (e.get("before_hash"), e.get("after_hash"))
+        for e in provenance.all_events(pack)
+    ):
+        raise ValueError(
+            f"{to_hash} is not part of {expected_artifact}'s history — "
+            "restore only rewinds an artifact's own lineage"
+        )
+
+    if kind in ("enemy", "item") and rest and not is_png:
+        entity_path = pack / kind / f"{rest}.json"
+        if not entity_path.is_file():
+            raise FileNotFoundError(f"{kind} {rest!r} not found")
+        try:
+            row = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError(
+                f"version {to_hash} is neither PNG nor JSON — wrong hash?"
+            ) from None
+        id_field = f"{kind}_id"
+        if str(row.get(id_field, "")) != rest:
+            raise ValueError(
+                f"version {to_hash} belongs to {kind} "
+                f"{row.get(id_field)!r}, not {rest!r}"
+            )
+        before = provenance.snapshot_file(pack, entity_path)
+        row["status"] = "user_edited"
+        adapter.write_json_singleton(f"{kind}/{rest}.json", row)
+        after = provenance.snapshot_file(pack, entity_path)
+        artifact_id = f"{kind}:{rest}"
+        detail: dict = {"kind": "row_restore", "to": to_hash}
+
+    elif kind in ("enemy", "item", "player") and is_png:
+        if kind == "player":
+            rel = "sprite/player/base.png"
+            artifact_id = "player"
+        else:
+            entity_path = pack / kind / f"{rest}.json"
+            if not entity_path.is_file():
+                raise FileNotFoundError(f"{kind} {rest!r} not found")
+            entity = _read(entity_path)
+            rel = entity.get("sprite_path") or f"sprite/{kind}/{rest}/base.png"
+            artifact_id = f"{kind}:{rest}"
+        before = provenance.snapshot_file(pack, pack / rel)
+        sprite_hash = adapter.write_binary(rel, data)
+        if kind != "player":
+            entity["sprite_path"] = rel
+            entity["sprite_hash"] = sprite_hash
+            entity["status"] = "user_edited"
+            adapter.write_json_singleton(f"{kind}/{rest}.json", entity)
+        after = provenance.snapshot_file(pack, pack / rel)
+        detail = {"kind": "sprite_restore", "path": rel, "to": to_hash}
+
+    elif kind == "tilesheet" and rest and is_png:
+        ts_path = pack / "tileset" / rest / "manifest.json"
+        if not ts_path.is_file():
+            raise FileNotFoundError(f"tileset for stage {rest!r} not found")
+        tileset = _read(ts_path)
+        sheet_rel = tileset["tilesheet_path"]
+        before = provenance.snapshot_file(pack, pack / sheet_rel)
+        tileset["tilesheet_hash"] = adapter.write_binary(sheet_rel, data)
+        tileset["status"] = "user_edited"
+        adapter.write_json_singleton(f"tileset/{rest}/manifest.json", tileset)
+        after = provenance.snapshot_file(pack, pack / sheet_rel)
+        artifact_id = f"tileset:{rest}"
+        detail = {"kind": "tilesheet_restore", "to": to_hash}
+
+    elif kind == "backdrop" and "/" in rest and is_png:
+        stage_id, _, idx_s = rest.partition("/")
+        bd_path = pack / "backdrop" / stage_id / "manifest.json"
+        if not bd_path.is_file():
+            raise FileNotFoundError(f"backdrop for stage {stage_id!r} not found")
+        backdrop = _read(bd_path)
+        bands = backdrop.get("band_paths", [])
+        idx = int(idx_s)
+        if not (0 <= idx < len(bands)):
+            raise ValueError(f"band index {idx} out of range (0..{len(bands) - 1})")
+        rel = bands[idx]
+        before = provenance.snapshot_file(pack, pack / rel)
+        band_hash = adapter.write_binary(rel, data)
+        backdrop.setdefault("band_hashes", {})[rel] = band_hash
+        adapter.write_json_singleton(f"backdrop/{stage_id}/manifest.json", backdrop)
+        after = provenance.snapshot_file(pack, pack / rel)
+        artifact_id = f"backdrop:{stage_id}"
+        detail = {"kind": "band_restore", "band": idx, "path": rel, "to": to_hash}
+
+    else:
+        raise ValueError(
+            f"cannot restore {target!r} from these bytes — targets: "
+            "enemy:<id> | item:<id> (row JSON or sprite PNG), player, "
+            "tilesheet:<stage>, backdrop:<stage>/<index>"
+        )
+
+    pinned = _maybe_pin(pack, artifact_id)
+    provenance.record(
+        pack,
+        artifact_id=artifact_id,
+        op="restore",
+        source="user",
+        actor=actor,
+        session=session,
+        detail=detail,
+        before_hash=before,
+        after_hash=after,
+    )
+    return {"target": target, "artifact_id": artifact_id, "pinned": pinned, **detail}
+
+
+def assign_asset(
+    pack_dir: str | Path,
+    source: str,
+    to: str,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """The in-project "use this asset here" gesture (design §5a): copy one
+    actor's WHOLE art bundle (base sprite + animation strips/atlas/frames)
+    onto another row. Bytes are copied (rows stay independently editable),
+    and because the copies hash identically, the lineage tree shows the two
+    artifacts sharing nodes — the cross-asset connection the library exists
+    to surface. Journals ``op:"import"``, ``detail.kind:"asset_assign"``.
+
+    ``source`` / ``to``: ``enemy:<id>`` | ``item:<id>`` (distinct).
+    """
+    pack = Path(pack_dir)
+    s_kind, _, s_id = source.partition(":")
+    t_kind, _, t_id = to.partition(":")
+    if s_kind not in ("enemy", "item") or t_kind not in ("enemy", "item"):
+        raise ValueError("assign works between enemy:<id> / item:<id> rows")
+    if (s_kind, s_id) == (t_kind, t_id):
+        raise ValueError("source and destination are the same row")
+    s_path = pack / s_kind / f"{s_id}.json"
+    t_path = pack / t_kind / f"{t_id}.json"
+    if not s_path.is_file():
+        raise FileNotFoundError(f"{s_kind} {s_id!r} not found")
+    if not t_path.is_file():
+        raise FileNotFoundError(f"{t_kind} {t_id!r} not found")
+
+    src_row = _read(s_path)
+    sprite_rel = str(src_row.get("sprite_path") or "")
+    src_base = pack / sprite_rel
+    if not sprite_rel or not src_base.is_file():
+        raise FileNotFoundError(f"{source} has no sprite to assign")
+    src_dir = src_base.parent
+    old_prefix = str(Path(sprite_rel).parent)
+    new_prefix = f"sprite/{t_kind}/{t_id}"
+
+    adapter = _pack_adapter(pack)
+    dest_row = _read(t_path)
+    # The event's hashes are the SPRITE bytes (facet sprite) — the after
+    # hash equals the source's sprite hash, which is exactly what makes the
+    # lineage tree show both artifacts sharing one node.
+    old_sprite_rel = str(dest_row.get("sprite_path") or "")
+    before = (
+        provenance.snapshot_file(pack, pack / old_sprite_rel)
+        if old_sprite_rel else None
+    )
+    # Clear stale art first: assigning a STATIC sprite must not leave the
+    # dest's old animation playing from leftover manifests/strips.
+    dest_dir = pack / new_prefix
+    src_names = {
+        f.name for f in src_dir.iterdir()
+        if f.is_file() and not f.name.startswith(".") and not f.name.endswith(".tmp")
+    }
+    if dest_dir.is_dir():
+        for f in dest_dir.iterdir():
+            if f.is_file() and f.name not in src_names:
+                f.unlink()
+    sprite_hash = ""
+    for f in sorted(src_dir.iterdir()):
+        if (
+            not f.is_file() or f.name.startswith(".") or f.name.endswith(".tmp")
+        ):
+            continue
+        data = f.read_bytes()
+        if f.name.endswith(".json"):
+            # Playback manifests embed pack-relative paths — the play
+            # surfaces read THESE, so a verbatim copy would render the dest
+            # from the source's live files.
+            data = (
+                data.decode("utf-8").replace(old_prefix, new_prefix).encode("utf-8")
+            )
+        written = adapter.write_binary(f"{new_prefix}/{f.name}", data)
+        if f.name == src_base.name:
+            sprite_hash = written
+    dest_row["sprite_path"] = f"{new_prefix}/{src_base.name}"
+    dest_row["sprite_hash"] = sprite_hash
+    dest_row["status"] = "user_edited"
+    src_anim = (src_row.get("stats") or {}).get("animation")
+    if isinstance(src_anim, dict):
+        replaced = json.loads(
+            json.dumps(src_anim).replace(old_prefix, new_prefix)
+        )
+        dest_row.setdefault("stats", {})["animation"] = replaced
+    else:
+        # Source is static — the dest's old animation block is now a lie.
+        (dest_row.get("stats") or {}).pop("animation", None)
+    adapter.write_json_singleton(f"{t_kind}/{t_id}.json", dest_row)
+    after = provenance.snapshot_file(
+        pack, pack / f"{new_prefix}/{src_base.name}"
+    )
+
+    pinned = _maybe_pin(pack, f"{t_kind}:{t_id}")
+    provenance.record(
+        pack,
+        artifact_id=f"{t_kind}:{t_id}",
+        op="import",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={
+            "kind": "asset_assign", "from": source, "from_hash": sprite_hash,
+        },
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "from": source, "to": to, "sprite_hash": sprite_hash, "pinned": pinned,
+    }
+
+
+# ---------------------------------------------------------------------------
+# World map authoring
+# ---------------------------------------------------------------------------
+
+_LOOP_MODES = {"loop", "once", "ping_pong"}
+#: Playback fields a human may correct by hand. Deliberately NOT the geometry
+#: (x/y/w/h/ox/oy) — that is generation's output; these are corrections layered
+#: on top of it, which is why re-animating clears them.
+_FRAME_EDITABLE = ("offsets", "durations_ms", "loop")
+
+
+def apply_frames_edit(
+    pack_dir: str | Path,
+    target: str,
+    state: str,
+    edit: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Hand-correct one animation state's PLAYBACK: per-frame offsets, per-frame
+    durations, loop mode.
+
+    The point is fixing a badly-seated or badly-timed animation without paying
+    to regenerate it. Offsets are `[[dx, dy], ...]` in FRAME pixel space and
+    must match the frame count — the same contract ``durations_ms`` already
+    follows, so a desynced list is refused here rather than silently shifting
+    the wrong frames at play time.
+
+    Written to BOTH ``atlas.json`` and ``frames.json``: the two loaders read
+    different manifests (atlas wins where present, strips are the fallback),
+    so writing one would leave the other rendering the un-corrected version.
+
+    Mirrors ``db update``: validate → write → rehash → journal. A no-op edit
+    does not journal.
+    """
+    from canon.adapters.platformer_read import _sprite_dir_for
+
+    pack = Path(pack_dir)
+    _label, sprite_dir = _sprite_dir_for(pack, target)
+    frames_path = pack / sprite_dir / "frames.json"
+    atlas_path = pack / sprite_dir / "atlas.json"
+    if not frames_path.is_file():
+        raise FileNotFoundError(f"{target} has no animation ({frames_path} missing)")
+
+    frames_meta = json.loads(frames_path.read_text())
+    entry = frames_meta.get(state)
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"{target} has no animation state {state!r} "
+            f"(has {', '.join(sorted(frames_meta)) or 'none'})"
+        )
+    count = int(entry.get("frames", 0) or 0)
+
+    unknown = [k for k in edit if k not in _FRAME_EDITABLE]
+    if unknown:
+        raise ValueError(
+            f"cannot edit {', '.join(sorted(unknown))} — "
+            f"frames-edit changes playback ({', '.join(_FRAME_EDITABLE)}), "
+            f"not the generated frame geometry"
+        )
+
+    patch: dict[str, Any] = {}
+    if "offsets" in edit:
+        raw = edit["offsets"]
+        if raw is None:
+            patch["offsets"] = None  # clear back to generation's seating
+        else:
+            if not isinstance(raw, list) or len(raw) != count:
+                raise ValueError(
+                    f"offsets needs one [dx, dy] per frame ({count} for {state!r}), "
+                    f"got {len(raw) if isinstance(raw, list) else type(raw).__name__}"
+                )
+            pairs = []
+            for pair in raw:
+                if (
+                    not isinstance(pair, (list, tuple))
+                    or len(pair) != 2
+                    or not all(isinstance(v, (int, float)) for v in pair)
+                ):
+                    raise ValueError(f"offsets entries must be [dx, dy]; got {pair!r}")
+                pairs.append([int(pair[0]), int(pair[1])])
+            patch["offsets"] = pairs
+    if "durations_ms" in edit:
+        raw = edit["durations_ms"]
+        if not isinstance(raw, list) or len(raw) != count:
+            raise ValueError(
+                f"durations_ms needs one value per frame ({count} for {state!r})"
+            )
+        if not all(isinstance(v, (int, float)) and v > 0 for v in raw):
+            raise ValueError("durations_ms entries must be positive numbers")
+        patch["durations_ms"] = [int(v) for v in raw]
+    if "loop" in edit:
+        if edit["loop"] not in _LOOP_MODES:
+            raise ValueError(
+                f"loop must be one of {', '.join(sorted(_LOOP_MODES))}; got {edit['loop']!r}"
+            )
+        patch["loop"] = edit["loop"]
+
+    def _apply(entry: dict) -> bool:
+        changed = False
+        for key, value in patch.items():
+            if value is None:
+                if entry.pop(key, None) is not None:
+                    changed = True
+                continue
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
+        return changed
+
+    before = provenance.snapshot_file(pack, frames_path)
+    touched = _apply(entry)
+
+    atlas_meta = None
+    if atlas_path.is_file():
+        atlas_meta = json.loads(atlas_path.read_text())
+        astate = (atlas_meta.get("states") or {}).get(state)
+        if isinstance(astate, dict) and _apply(astate):
+            touched = True
+
+    if not touched:
+        return {"frames_edit": "no_change", "target": target, "state": state}
+
+    frames_path.write_text(json.dumps(frames_meta, indent=2))
+    if atlas_meta is not None:
+        atlas_path.write_text(json.dumps(atlas_meta, indent=2))
+    after = provenance.snapshot_file(pack, frames_path)
+
+    provenance.record(
+        pack,
+        # The BARE target, matching what `asset animate` journals — animation is
+        # a facet of the actor, not a separate artifact. A different id here
+        # would fork the lineage tree the History tab reads.
+        artifact_id=target,
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={"kind": "frames_edit", "state": state, "fields": sorted(patch)},
+        before_hash=before,
+        after_hash=after,
+    )
+    return {
+        "frames_edit": "updated",
+        "target": target,
+        "state": state,
+        "fields": sorted(patch),
+    }
+
+
+_EDGE_KINDS = {"path", "one", "lock", "new"}
+
+
+def apply_world_map_edit(
+    pack_dir: str | Path,
+    edit: dict,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Persist hand-authoring of the world map onto ``world.json``.
+
+    The map itself is RECOMPUTED from the seed on every resume, so the durable
+    record is a set of overrides on the World bible — ``map_nodes`` (placed
+    positions), ``map_edges`` (typed connections) and ``map_locked``. Writing
+    them here and letting ``compose._world_map`` layer them on is what stops
+    the next run from silently reverting a human's layout.
+
+    Accepts any subset of::
+
+        {"nodes": {"l1": {"pos": [0.2, 0.4]}, "l2": null},
+         "edges": [{"a": "l1", "b": "l2", "kind": "lock", "condition": "..."}],
+         "locked": true}
+
+    A ``null`` node value REMOVES the override, handing that node back to the
+    generator. Mirrors ``db update``: validate → write → journal.
+    """
+    pack = Path(pack_dir)
+    wj = pack / "world.json"
+    if not wj.is_file():
+        raise FileNotFoundError(f"no world.json in {pack}")
+    world = json.loads(wj.read_text())
+    before = provenance.snapshot_file(pack, wj)
+
+    changed: list[str] = []
+
+    if "nodes" in edit:
+        nodes = dict(world.get("map_nodes") or {})
+        for level_id, value in (edit["nodes"] or {}).items():
+            if value is None:
+                if nodes.pop(level_id, None) is not None:
+                    changed.append(f"unplaced {level_id}")
+                continue
+            pos = (value or {}).get("pos")
+            if (
+                not isinstance(pos, (list, tuple))
+                or len(pos) != 2
+                or not all(isinstance(v, (int, float)) for v in pos)
+            ):
+                raise ValueError(f"node {level_id!r} needs pos [x, y] in 0..1")
+            # Clamp rather than reject: a drag that overshoots the canvas edge
+            # is a normal gesture, not an error.
+            clamped = [round(min(1.0, max(0.0, float(v))), 4) for v in pos]
+            if nodes.get(level_id, {}).get("pos") != clamped:
+                changed.append(f"placed {level_id}")
+            nodes[level_id] = {"pos": clamped}
+        world["map_nodes"] = nodes
+
+    if "edges" in edit:
+        specs: list[dict] = []
+        for e in edit["edges"] or []:
+            a, b = e.get("a"), e.get("b")
+            if not a or not b:
+                raise ValueError("every edge needs both 'a' and 'b'")
+            kind = e.get("kind") or "path"
+            if kind not in _EDGE_KINDS:
+                raise ValueError(
+                    f"edge kind {kind!r} not one of {sorted(_EDGE_KINDS)}"
+                )
+            spec: dict[str, Any] = {"a": a, "b": b, "kind": kind}
+            if e.get("condition"):
+                spec["condition"] = str(e["condition"])
+            if e.get("stop"):
+                spec["stop"] = str(e["stop"])
+            specs.append(spec)
+        if specs != (world.get("map_edges") or []):
+            changed.append(f"{len(specs)} edge(s)")
+        world["map_edges"] = specs
+
+    if "locked" in edit:
+        locked = bool(edit["locked"])
+        if locked != bool(world.get("map_locked")):
+            changed.append("locked" if locked else "unlocked")
+        world["map_locked"] = locked
+
+    if not changed:
+        # No-op edits must not pollute the journal (the same hygiene rule
+        # apply_level_edit follows for grab-and-release-in-place).
+        return {"world_map": "no_change", "changed": []}
+
+    wj.write_text(json.dumps(world, indent=2))
+    after = provenance.snapshot_file(pack, wj)
+    provenance.record(
+        pack,
+        artifact_id="world",
+        op="edit",
+        source="user",
+        actor=actor,
+        session=session,
+        detail={"kind": "world_map_edit", "changes": changed},
+        before_hash=before,
+        after_hash=after,
+    )
+    return {"world_map": "updated", "changed": changed}
+
+
+def _level_facts(lv: dict) -> dict[str, Any]:
+    """The per-level detail the map shows without opening the editor: how big
+    the level is, how much is placed in it, and which sub-rooms hang off it."""
+    facts: dict[str, Any] = {}
+    width, height = lv.get("grid_width"), lv.get("grid_height")
+    if isinstance(width, int) and isinstance(height, int) and width and height:
+        facts["size"] = f"{width}×{height}"
+    facts["entities"] = len(lv.get("entities") or [])
+    facts["items"] = len(lv.get("items") or [])
+    rooms = [r for r in (lv.get("secret_rooms") or []) if isinstance(r, str)]
+    if rooms:
+        facts["rooms"] = rooms
+    return facts
+
+
+def _level_overrides(lv: dict, stage: dict) -> list[str]:
+    """Which of its area's defaults a level actually departs from.
+
+    REPORTED, not configured. A level inherits its area's theme, blocks and
+    music bed today — there is no per-level field for any of them — so the only
+    real divergences are an enemy placed outside the area's roster and the
+    per-level physics overrides ``Level`` does carry.
+    """
+    out: list[str] = []
+    pool = {str(ref) for ref in (stage.get("enemy_refs") or [])}
+    if pool:
+        placed = {
+            str(e.get("ref"))
+            for e in (lv.get("entities") or [])
+            if isinstance(e, dict) and str(e.get("ref", "")).startswith("enemy:")
+        }
+        if placed - pool:
+            out.append("enemies")
+    if lv.get("rules_overrides") or lv.get("movement_overrides"):
+        out.append("physics")
+    return out
+
+
+def read_world_map(pack_dir: str | Path) -> dict:
+    """The render-ready world map: nodes with positions + display names, typed
+    edges, and the AREAS (stages) they cluster under.
+
+    Areas are stages — they already carry the theme/biome/level membership the
+    design's area inspector wants, so this exposes what exists rather than
+    inventing a parallel grouping.
+    """
+    pack = Path(pack_dir)
+    manifest = json.loads((pack / "manifest.json").read_text())
+    wmap = manifest.get("world_map") or {}
+    world = {}
+    if (pack / "world.json").is_file():
+        world = json.loads((pack / "world.json").read_text())
+
+    published = {n.get("level_id") for n in wmap.get("nodes") or []}
+    placed = dict(world.get("map_nodes") or {})
+
+    # ONE pass over the level files on disk. Draft discovery and the per-node
+    # detail below both need them, and a pack can hold a lot of levels.
+    on_disk: dict[str, dict[str, Any]] = {}
+    for level_json in sorted(pack.glob("level/*/*/level.json")):
+        try:
+            lv = json.loads(level_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        lid = lv.get("level_id") or level_json.parent.name
+        on_disk[lid] = {"stage_id": level_json.parent.parent.name, "data": lv}
+
+    # Stage records carry the area defaults (enemy roster, tileset, boss) that
+    # the manifest's stage summary leaves out.
+    stage_recs: dict[str, dict[str, Any]] = {}
+    for stage_json in sorted(pack.glob("stage/*/stage.json")):
+        try:
+            rec = json.loads(stage_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        stage_recs[rec.get("stage_id") or stage_json.parent.name] = rec
+
+    def _detail(level_id: str) -> dict[str, Any]:
+        found = on_disk.get(level_id)
+        if not found:
+            return {}
+        lv = found["data"]
+        facts = _level_facts(lv)
+        overrides = _level_overrides(lv, stage_recs.get(found["stage_id"]) or {})
+        if overrides:
+            facts["overrides"] = overrides
+        return facts
+
+    # DRAFT levels — created by `level create` but not yet published into a
+    # stage's level list, so `compose._world_map` (which walks stage.level_ids)
+    # can't see them. They are the design's `planned` nodes: on the map, not
+    # yet part of the progression.
+    #
+    # SECRET ROOMS are deliberately excluded: a room is a sub-room INSIDE a
+    # level, not a stop on the world map, so it has no node here.
+    drafts: list[dict[str, Any]] = []
+    for lid, found in on_disk.items():
+        lv = found["data"]
+        if lid in published or lv.get("parent_level"):
+            continue
+        pos = (placed.get(lid) or {}).get("pos") or [0.5, 0.5]
+        drafts.append(
+            {
+                "level_id": lid,
+                "display_name": None,
+                "stage_id": found["stage_id"],
+                "pos": [round(float(pos[0]), 4), round(float(pos[1]), 4)],
+                "status": "planned",
+                **({"origin": "manual"} if lid in placed else {}),
+                **_detail(lid),
+            }
+        )
+    drafts.sort(key=lambda n: n["level_id"])
+
+    # Layer the DURABLE overrides on the manifest here too, exactly as
+    # `compose._world_map` does at compose time. Without this the editor writes
+    # world.json and reads back the pre-edit manifest — the map would appear to
+    # ignore every edit until the next full pipeline run.
+    nodes: list[dict[str, Any]] = []
+    for n in wmap.get("nodes") or []:
+        node = dict(n)
+        placed_pos = (placed.get(node.get("level_id")) or {}).get("pos")
+        if isinstance(placed_pos, (list, tuple)) and len(placed_pos) == 2:
+            node["pos"] = [round(float(placed_pos[0]), 4), round(float(placed_pos[1]), 4)]
+            node["origin"] = "manual"
+        node.update(_detail(str(node.get("level_id"))))
+        nodes.append(node)
+
+    authored = world.get("map_edges") or []
+    specs = authored or wmap.get("edge_specs")
+    if not specs:
+        # Untyped derived chain — surface it in the same shape so the consumer
+        # has exactly one edge model to draw.
+        specs = [
+            {"a": a, "b": b, "kind": "path"} for a, b in (wmap.get("edges") or [])
+        ]
+
+    validation = {}
+    for lid in [n.get("level_id") for n in wmap.get("nodes") or []]:
+        rel = None
+        for stage in manifest.get("stages") or []:
+            if lid in (stage.get("levels") or []):
+                rel = stage.get("stage_id")
+        if rel:
+            validation[lid] = rel
+
+    areas = []
+    for i, stage in enumerate(manifest.get("stages") or []):
+        sid = stage.get("stage_id")
+        rec = stage_recs.get(sid) or {}
+        # `blocks` is the area's tile set and `enemy_pool` its roster — the
+        # defaults every level inside inherits. Both live on the stage record;
+        # the manifest's stage summary carries only theme/biome/membership.
+        areas.append(
+            {
+                "stage_id": sid,
+                "index": i,
+                "theme": stage.get("theme", ""),
+                "biome": stage.get("biome", ""),
+                "level_ids": list(stage.get("levels") or []),
+                "music": (manifest.get("audio") or {}).get(sid, {}).get("music"),
+                "blocks": str(rec.get("tileset_ref") or "").split(":", 1)[-1],
+                "enemy_pool": [
+                    str(ref).split(":", 1)[-1] for ref in (rec.get("enemy_refs") or [])
+                ],
+                "boss": str(rec.get("boss_ref") or "").split(":", 1)[-1],
+            }
+        )
+
+    return {
+        "world": manifest.get("world", ""),
+        "nodes": [*nodes, *drafts],
+        "edges": specs,
+        "areas": areas,
+        "locked": bool(world.get("map_locked")),
+        "manual_count": len(world.get("map_nodes") or {}),
+    }

@@ -803,12 +803,264 @@ def status_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Whole-project scaffolding — start a fresh platformer from cradle.
+# ---------------------------------------------------------------------------
+
+world_app = typer.Typer(help="Whole-project scaffolding.")
+app.add_typer(world_app, name="world")
+
+
+def _set_world_name(pack_dir: Path, name: str) -> None:
+    """Stamp the chosen world name over the fake-generated one so the new
+    project reads as the user's (manifest ``world`` string + world.json
+    ``title``). Cosmetic — stage/level ids and physics are untouched."""
+    mf = pack_dir / "manifest.json"
+    if mf.is_file():
+        data = json.loads(mf.read_text())
+        data["world"] = name
+        mf.write_text(json.dumps(data, indent=2))
+    wj = pack_dir / "world.json"
+    if wj.is_file():
+        world = json.loads(wj.read_text())
+        world["title"] = name
+        wj.write_text(json.dumps(world, indent=2))
+
+
+@world_app.command("new")
+def world_new(
+    output_dir: Path = typer.Argument(..., help="Where to create the new pack (must be empty/new)."),
+    name: str = typer.Option("My Platformer", "--name", help="World display name."),
+    stages: int = typer.Option(1, "--stages", help="Number of biome stages."),
+    levels: int = typer.Option(2, "--levels", help="Levels per stage."),
+    enemies: int = typer.Option(4, "--enemies", help="Enemy roster size."),
+    items: int = typer.Option(4, "--items", help="Item pool size."),
+    seed: str | None = typer.Option(None, "--seed", help="Pin for reproducibility (default: varied)."),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="Design text: fake ($0) | anthropic (paid)."),
+    image_backend: str = typer.Option("fake", "--image-backend", help="Art: none | fake | fal | retro | pixellab | local."),
+    music_backend: str = typer.Option("none", "--music-backend", help="Music: none | fake | lyria."),
+    sfx_backend: str = typer.Option("none", "--sfx-backend", help="SFX: none | fake | elevenlabs."),
+    vlm_backend: str = typer.Option("none", "--vlm-backend", help="Animation authoring: none | fake | anthropic."),
+    model: str | None = typer.Option(None, "--model", help="LLM model (anthropic only)."),
+    env_file: Path | None = typer.Option(None, "--env-file", help="KEY=VALUE file for the paid backends."),
+) -> None:
+    """Scaffold a fresh, PLAYABLE platformer project — a populated starter.
+
+    Every generator is a separate backend so you can go free or fully paid:
+    all defaults = a $0 preview (canned text, placeholder art). Turn any dial
+    up for a real run — ``--llm-backend anthropic`` (Claude authors the world),
+    ``--image-backend fal`` (real sprites/backdrops), ``--music-backend lyria``,
+    ``--sfx-backend elevenlabs``, ``--vlm-backend anthropic`` (animation). Paid
+    backends need their keys via --env-file. This is what cradle's "new
+    project" shells to.
+    """
+    import secrets
+    import subprocess
+
+    import canon as _canon_pkg
+
+    _load_env_file(env_file)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        _emit_error(f"target already exists and is not empty: {output_dir}")
+    repo = Path(_canon_pkg.__file__).resolve().parents[2]
+    script = repo / "examples" / "run_platformer_slice.py"
+    if not script.is_file():
+        _emit_error(
+            f"bootstrap script not found at {script} — `canon world new` needs a "
+            "source checkout of canon-ai (editable install)."
+        )
+    eff_seed = seed or f"cradle-{secrets.token_hex(4)}"
+    # Each generator's backend flows straight through to the slice. The
+    # subprocess inherits os.environ, so _load_env_file above puts any keys in
+    # reach for the paid backends.
+    cmd = [
+        sys.executable, str(script),
+        "--backend", llm_backend, "--engine", "json",
+        "--image-backend", image_backend,
+        "--music-backend", music_backend,
+        "--sfx-backend", sfx_backend,
+        "--vlm-backend", vlm_backend,
+        "--num-stages", str(stages), "--num-levels", str(levels),
+        "--num-enemies", str(enemies), "--num-items", str(items),
+        "--seed", eff_seed, "--output-dir", str(output_dir),
+    ]
+    if model:
+        cmd += ["--model", model]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=str(repo))
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or b"").decode(errors="replace")[-800:]
+        _emit_error(f"world new failed:\n{tail}")
+    _set_world_name(output_dir, name)
+    _emit({
+        "pack_dir": str(output_dir), "world": name, "seed": eff_seed,
+        "backends": {
+            "llm": llm_backend, "image": image_backend,
+            "music": music_backend, "sfx": sfx_backend, "vlm": vlm_backend,
+        },
+    })
+
+
+@world_app.command("map")
+def world_map_read(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+) -> None:
+    """The render-ready world map: nodes (position + display name + stage),
+    typed edges, and the AREAS levels cluster under. Pure read."""
+    try:
+        from canon.adapters.platformer_write import read_world_map
+
+        _emit(read_world_map(pack_dir))
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"world map failed: {e}", traceback=traceback.format_exc())
+
+
+@world_app.command("map-edit")
+def world_map_edit(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    edit_json: str = typer.Option(
+        ..., "--json",
+        help='Any subset of {"nodes":{"l1":{"pos":[x,y]}},"edges":[...],"locked":bool}. '
+        "A null node value hands that node back to the generator.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Hand-author the world map: place nodes, type the connections, lock the
+    layout.
+
+    The map is recomputed from the seed on every resume, so these are stored as
+    DURABLE OVERRIDES on the World bible and layered back on at compose time —
+    without that, the next run silently reverts your layout."""
+    try:
+        edit = json.loads(edit_json)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    try:
+        from canon.adapters.platformer_write import apply_world_map_edit
+
+        _emit(
+            apply_world_map_edit(
+                pack_dir, edit, actor=actor, session=session  # type: ignore[possibly-unbound]
+            )
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"world map-edit failed: {e}", traceback=traceback.format_exc())
+
+
+@world_app.command("estimate")
+def world_estimate(
+    stages: int = typer.Option(3, "--stages"),
+    levels: int = typer.Option(9, "--levels"),
+    enemies: int = typer.Option(7, "--enemies"),
+    items: int = typer.Option(5, "--items"),
+    llm_backend: str = typer.Option("fake", "--llm-backend"),
+    image_backend: str = typer.Option("fake", "--image-backend"),
+    music_backend: str = typer.Option("none", "--music-backend"),
+    sfx_backend: str = typer.Option("none", "--sfx-backend"),
+    vlm_backend: str = typer.Option("none", "--vlm-backend"),
+) -> None:
+    """Forecast the cost of a NEW project (`world new`) at these counts +
+    backends, WITHOUT running anything. fake/none categories price at $0 (the
+    counts still show, so you can see what turning a backend on would cost).
+
+    Invoke via `python -m canon.cli.main` from the repo root — the estimator
+    lives under examples.* which the `canon` console script can't import."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            "world",
+            counts={
+                "num_stages": stages, "num_levels": levels,
+                "num_enemies": enemies, "num_items": items,
+            },
+            backends={
+                "llm": llm_backend, "image": image_backend,
+                "music": music_backend, "sfx": sfx_backend, "vlm": vlm_backend,
+            },
+        )
+    except Exception as e:
+        _emit_error(f"world estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
+
+
+# ---------------------------------------------------------------------------
 # Platformer read/export verbs — the read half external tooling (Cradle)
 # shells out to instead of re-implementing .npz decoding + the tileset registry.
 # ---------------------------------------------------------------------------
 
 level_app = typer.Typer(help="Platformer level inspection / export.")
 app.add_typer(level_app, name="level")
+
+level_music_app = typer.Typer(help="Per-level / per-section music.")
+level_app.add_typer(level_music_app, name="music")
+
+
+@level_music_app.command("list")
+def level_music_list(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+) -> None:
+    """List every music track file in the pack (for 'assign an existing track')."""
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.list_music_tracks(pack_dir)
+    except Exception as e:
+        _emit_error(f"level music list failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_music_app.command("generate")
+def level_music_generate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level (or secret room) id."),
+    brief: str = typer.Option("", "--brief", help="What the track should feel like."),
+    section: int | None = typer.Option(
+        None, "--section", help="Index into the level's music_sections (default: the level track)."
+    ),
+    music_backend: str = typer.Option("lyria", "--music-backend", help="fake ($0) | lyria (paid)."),
+    seconds: int | None = typer.Option(None, "--seconds", help="Track length (default 30s clip)."),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the WHOLE music prompt for this call (wins over --brief; "
+        "see `canon prompt show --kind music`).",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file", help="KEY=VALUE file (GOOGLE_API_KEY for lyria)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate ONE music track for a level or one of its user-defined music
+    sections (Lyria, paid — GOOGLE_API_KEY via --env-file; fake is $0), repoint
+    the level to it (journaled), and report the actual cost."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(prompt, prompt_file, "--prompt")
+    try:
+        result = ops.generate_level_music(
+            pack_dir, level_id=level_id, brief=brief, section=section,
+            backend=music_backend, music_seconds=seconds,
+            prompt_override=override, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level music generate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
 
 
 @level_app.command("export")
@@ -1017,6 +1269,332 @@ def level_create(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@level_app.command("sandbox")
+def level_sandbox(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str | None = typer.Option(
+        None, "--stage", help="Stage to borrow tiles from (default: the first)."
+    ),
+    width: int = typer.Option(40, "--width"),
+    height: int = typer.Option(16, "--height"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Create-or-reuse the flat DRAFT room the movement sandbox plays in.
+
+    Idempotent: the room has a reserved id, so repeat launches reuse it and
+    journal nothing. Play it with `PLAT_SANDBOX=1` for no win condition and a
+    HUD naming the animation state the game picked and why.
+    """
+    try:
+        from canon.adapters.platformer_write import ensure_sandbox_level
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ensure_sandbox_level(  # type: ignore[possibly-unbound]
+            pack_dir, stage_id, width=width, height=height,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id or "")
+    except Exception as e:
+        _emit_error(f"Sandbox failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("generate")
+def level_generate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str = typer.Option(..., "--stage", help="Stage the level belongs to."),
+    brief: str = typer.Option("", "--brief", help="Design brief the layout agent honors."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled by world position)."),
+    width: int | None = typer.Option(None, "--width"),
+    height: int | None = typer.Option(None, "--height"),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    enemies: int = typer.Option(4, "--enemies", help="Max enemy placements."),
+    items: int = typer.Option(12, "--items", help="Max item placements."),
+    seed: str | None = typer.Option(None, "--seed", help="Pin for reproducibility (default: varied)."),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the LAYOUT agent's SYSTEM prompt for this call "
+        "(placements keep their defaults; see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate a WHOLE new DRAFT level — terrain + enemies + items.
+
+    Draft: stays out of the manifest/world map until `canon level publish`.
+    Full-control pins (difficulty/width/height/axis) constrain the roll. Fake
+    backend is $0 (canned DSL); anthropic is paid (key via --env-file)."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
+    try:
+        result = ops.generate_level(
+            pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, max_enemies=enemies, max_items=items, seed=seed,
+            system_override=override, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
+    except Exception as e:
+        _emit_error(f"level generate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("estimate")
+def level_estimate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(
+        "__preview__", "--level",
+        help="Existing level the op runs on (omit + pass --width to price a NEW level).",
+    ),
+    op: str = typer.Option(
+        "generate", "--op",
+        help="generate | layout | enemies | items (which per-level op to price).",
+    ),
+    width: int | None = typer.Option(
+        None, "--width",
+        help="Price a NEW level of this width instead of loading a level from disk.",
+    ),
+    axis: str | None = typer.Option(None, "--axis"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+) -> None:
+    """Forecast the cost of ONE per-level op (generate / regenerate-layout /
+    place-enemies / place-items) on an existing level, backend-aware (fake =
+    $0). LLM-only — these ops author no art/audio. Run via
+    `python -m canon.cli.main` from the repo root (estimator lives in examples.*)."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            op, pack_dir=pack_dir, level_id=level_id, width=width, axis=axis,
+            backends={"llm": llm_backend},
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id, op=op)
+    except Exception as e:
+        _emit_error(f"level estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
+
+
+@level_app.command("generate-terrain")
+def level_generate_terrain(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    stage_id: str = typer.Option(..., "--stage", help="Stage the level belongs to."),
+    brief: str = typer.Option("", "--brief", help="Design brief the layout agent honors."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled)."),
+    width: int | None = typer.Option(None, "--width"),
+    height: int | None = typer.Option(None, "--height"),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Generate ONLY a new DRAFT level's TERRAIN (no placements) — then paint
+    it or run `level place-enemies`/`place-items` onto it."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
+    try:
+        result = ops.generate_terrain(
+            pack_dir, stage_id=stage_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, seed=seed, system_override=override,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), stage=stage_id)
+    except Exception as e:
+        _emit_error(f"level generate-terrain failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("place-enemies")
+def level_place_enemies(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (generated or hand-painted)."),
+    enemies: int = typer.Option(4, "--enemies", help="Max enemy placements."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Place enemies onto an EXISTING level, (re)writing entities.json against
+    its on-disk grid — works on generated OR hand-painted terrain."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.place_enemies(
+            pack_dir, level_id=level_id, backend=llm_backend, model=llm_model,
+            max_enemies=enemies, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level place-enemies failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("place-items")
+def level_place_items(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (generated or hand-painted)."),
+    items: int = typer.Option(12, "--items", help="Max item placements."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Place items onto an EXISTING level, (re)writing items.json against its
+    on-disk grid + enemy roster — generated OR hand-painted terrain."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.place_items(
+            pack_dir, level_id=level_id, backend=llm_backend, model=llm_model,
+            max_items=items, seed=seed, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level place-items failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("regenerate")
+def level_regenerate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Existing level to redesign (draft or published)."),
+    brief: str = typer.Option("", "--brief", help="What the redesigned level should be like."),
+    difficulty: int | None = typer.Option(None, "--difficulty", help="1..3 (default: rolled)."),
+    width: int | None = typer.Option(None, "--width", help="Override (default: keep current)."),
+    height: int | None = typer.Option(None, "--height", help="Override (default: keep current)."),
+    axis: str | None = typer.Option(None, "--axis", help="horizontal | vertical (default: rolled)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind layout`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Regenerate an EXISTING level's TERRAIN in place from a brief — a flat
+    draft becomes a designed level, or an existing one is redesigned. Keeps the
+    current size unless --width/--height given; CLEARS placements (re-run
+    place-enemies/place-items); leaves manifest untouched (stays published)."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
+    try:
+        result = ops.regenerate_terrain(
+            pack_dir, level_id=level_id, brief=brief, backend=llm_backend,
+            model=llm_model, difficulty=difficulty, width=width, height=height,
+            axis=axis, seed=seed, system_override=override,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level regenerate failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("improve")
+def level_improve(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Existing level to improve in place."),
+    instruction: str = typer.Option(..., "--instruction", help="What to change (the LLM sees the current level)."),
+    fix_problems: bool = typer.Option(False, "--fix-problems", help="Also feed the level's validation problems to the LLM."),
+    reroll_placements: bool = typer.Option(False, "--reroll-placements", help="Re-roll enemies/items onto the improved terrain (default: keep)."),
+    seed: str | None = typer.Option(None, "--seed"),
+    llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
+    llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the layout agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind improve`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
+    env_file: Path | None = typer.Option(None, "--env-file"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """CONTEXT-AWARE improve: the layout LLM SEES the current level + your
+    instruction and re-authors it in place (keeps dims/axis). Unlike
+    `regenerate` this is not blind and does NOT clear placements (kept by
+    default; --reroll-placements re-adapts them). Journals op=regenerate."""
+    _load_env_file(env_file)
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
+    try:
+        result = ops.improve_terrain(
+            pack_dir, level_id=level_id, instruction=instruction,
+            fix_problems=fix_problems, reroll_placements=reroll_placements,
+            backend=llm_backend, model=llm_model, seed=seed,
+            system_override=override, actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level improve failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
 @level_app.command("publish")
 def level_publish(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
@@ -1048,6 +1626,26 @@ def level_publish(
         _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
     except Exception as e:
         _emit_error(f"Publish failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@level_app.command("validate")
+def level_validate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    level_id: str = typer.Option(..., "--level", help="Level id (e.g. l1)."),
+) -> None:
+    """Run generation's REAL validation suite on a level as it sits on disk
+    (hand edits included): spawn→exit/checkpoint reachability under the
+    level's own physics (jump-arc simulation, run-up momentum, swim), enemy
+    placement rules (water policy, footprint, variant/rarity caps), and item
+    collectibility. Pure read — no repairs, no writes, no journal."""
+    ops = _pack_ops()
+    try:
+        result = ops.validate_level(pack_dir, level_id)
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), level=level_id)
+    except Exception as e:
+        _emit_error(f"level validate failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
 
 
@@ -1156,6 +1754,315 @@ def _pack_ops():
     return ops
 
 
+def _prompt_text(text: str | None, path: Path | None, flag: str) -> str | None:
+    """Resolve a prompt override from an inline string or a file. Returns None
+    when neither is given (→ the built-in default runs, byte-for-byte)."""
+    if text and path:
+        _emit_error(f"Pass either {flag} or {flag}-file, not both.")
+    if path:
+        if not path.is_file():
+            _emit_error(f"Prompt file not found: {path}")
+        return path.read_text()
+    return text or None
+
+
+prompt_app = typer.Typer(
+    help="Inspect the prompts the generators send (and override them per call)."
+)
+app.add_typer(prompt_app, name="prompt")
+
+
+@prompt_app.command("show")
+def prompt_show(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    kind: str = typer.Option(
+        ..., "--kind",
+        help="layout | improve | enemy | item | sprite | animate | music",
+    ),
+    level_id: str | None = typer.Option(
+        None, "--level", help="Use this level's real data (layout/improve/music)."
+    ),
+    target: str | None = typer.Option(
+        None, "--target",
+        help="Row id for enemy/item, enemy:<id>|item:<id>|player for sprite, "
+        "or enemy:<id>|player for animate.",
+    ),
+    instruction: str = typer.Option(
+        "", "--instruction", help="Preview an improve with this instruction."
+    ),
+    brief: str = typer.Option("", "--brief", help="Brief for layout/music previews."),
+) -> None:
+    """Print the DEFAULT prompt a generator would send, WITHOUT generating.
+
+    LLM kinds emit ``system`` (the editable standing instructions) plus the
+    ``user_message`` for context; image/audio/vlm kinds emit a single
+    ``prompt``. Feed an edited ``system`` back via --system-prompt on the gen
+    verb (or --prompt for sprite/animate/music). Pure read: no LLM call, no
+    cost, no journal."""
+    ops = _pack_ops()
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = ops.preview_prompt(
+            pack_dir, kind, level_id=level_id, target=target,
+            instruction=instruction, brief=brief,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), kind=kind)
+    except Exception as e:
+        _emit_error(f"prompt show failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+spend_app = typer.Typer(help="Per-project spend ledger (what paid ops cost).")
+app.add_typer(spend_app, name="spend")
+
+
+@spend_app.command("record")
+def spend_record(
+    pack_dir: Path = typer.Argument(..., help="Pack root the spend belongs to."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Spend entry, e.g. {"op":"generate","scope":"level","level_id":'
+        '"l1","backends":{"llm":"anthropic"},"actual_usd":0.07}.',
+    ),
+) -> None:
+    """Append one paid-op spend entry to <pack>/.canon/spend.jsonl. Cradle
+    calls this after each op it fires (it never writes pack files itself)."""
+    from canon.spend import record_spend
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        entry = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(entry, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        stored = record_spend(pack_dir, entry)  # type: ignore[arg-type]
+    except Exception as e:
+        _emit_error(f"spend record failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "spend_record", "entry": stored})  # type: ignore[possibly-unbound]
+
+
+@spend_app.command("list")
+def spend_list(
+    pack_dir: Path = typer.Argument(..., help="Pack root to summarize."),
+) -> None:
+    """Emit the pack's spend ledger + a roll-up (total actual, per-op)."""
+    from canon.spend import summarize
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        summary = summarize(pack_dir)
+    except Exception as e:
+        _emit_error(f"spend list failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "spend_list", "spend": summary})  # type: ignore[possibly-unbound]
+
+
+anim_app = typer.Typer(
+    help="Animation frames: inspect the geometry, correct the playback.",
+)
+app.add_typer(anim_app, name="anim")
+
+
+@anim_app.command("inspect")
+def anim_inspect_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    target: str = typer.Option(
+        ..., "--target", help="player | enemy:<id> | item:<id>."
+    ),
+) -> None:
+    """Every measurable fact about one actor's animation.
+
+    Per state: the shared frame square, playback timing, authored offsets, and
+    the measured content box of every frame — plus the two defects that are
+    invisible frame by frame (states sized independently, feet wandering
+    between frames of one state). Pure read.
+    """
+    from canon.adapters.platformer_read import read_animation
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        anim = read_animation(pack_dir, target)
+    except ValueError as e:
+        _emit_error(str(e))
+    except Exception as e:
+        _emit_error(f"anim inspect failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "anim_inspect", "animation": anim})  # type: ignore[possibly-unbound]
+
+
+@anim_app.command("edit")
+def anim_edit_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    target: str = typer.Option(..., "--target", help="player | enemy:<id> | item:<id>."),
+    state: str = typer.Option(..., "--state", help="Animation state, e.g. fall."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Playback patch, e.g. {"offsets":[[0,-2],[0,-2],[0,-1]],'
+        '"durations_ms":[120,120,90],"loop":"loop"}. offsets:null clears them.',
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who is editing (journalled)."),
+    session: str | None = typer.Option(None, "--session", help="Session id."),
+) -> None:
+    """Correct one animation state's playback by hand — per-frame offsets,
+    per-frame durations, loop mode.
+
+    Fixes a badly-seated or badly-timed animation without paying to regenerate
+    it. Frame GEOMETRY is generation's output and is not editable here; these
+    are corrections layered on top, which is why re-animating clears them.
+    """
+    from canon.adapters.platformer_write import apply_frames_edit
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        edit = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(edit, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        result = apply_frames_edit(
+            pack_dir, target, state, edit, actor=actor, session=session  # type: ignore[arg-type]
+        )
+    except (ValueError, FileNotFoundError) as e:
+        _emit_error(str(e))
+    except Exception as e:
+        _emit_error(f"anim edit failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "anim_edit", **result})  # type: ignore[possibly-unbound]
+
+
+engine_app = typer.Typer(
+    help="The game runtime inside a pack (Godot project files).",
+)
+app.add_typer(engine_app, name="engine")
+
+
+def _pack_engine():
+    """Import the platformer pack's engine-export module (same sys.path fix
+    ``_pack_ops`` needs — the pack lives under ``examples/``)."""
+    import canon as _canon
+
+    root = Path(_canon.__file__).resolve().parents[2]
+    if (root / "examples").is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from examples.platformer_pack import godot_export
+    except ImportError as e:  # pragma: no cover — env-specific
+        _emit_error(
+            f"Failed to import the platformer pack engine export ({e}); "
+            f"looked for examples/ under {root}."
+        )
+    return godot_export
+
+
+@engine_app.command("status")
+def engine_status_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root to check."),
+) -> None:
+    """Is this pack's game runtime current with canon's template?
+
+    The runtime is COPIED into a pack when it is generated, so a pack keeps
+    whatever engine code existed that day — every engine fix shipped since is
+    invisible to it. Pure read; nothing is written.
+    """
+    engine = _pack_engine()
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        status = engine.engine_status(pack_dir)
+    except Exception as e:
+        _emit_error(f"engine status failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "engine_status", "status": status})  # type: ignore[possibly-unbound]
+
+
+@engine_app.command("sync")
+def engine_sync_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root to refresh."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change; write nothing."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite hand-edited runtime files too (they are refused by default).",
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who is syncing (journalled)."),
+    session: str | None = typer.Option(None, "--session", help="Session id (journalled)."),
+) -> None:
+    """Refresh a pack's game runtime from canon's current template.
+
+    A file that differs from its OWN stamp was hand-edited, so it is REFUSED
+    by name rather than silently overwritten; pass --force to overwrite it
+    anyway. Only the runtime is touched — generated content is never rewritten.
+    """
+    engine = _pack_engine()
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        result = engine.engine_sync(
+            pack_dir, dry_run=dry_run, force=force, actor=actor, session=session
+        )
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    except Exception as e:
+        _emit_error(f"engine sync failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "engine_sync", **result})  # type: ignore[possibly-unbound]
+
+
+jobs_app = typer.Typer(help="Per-project job ledger (background generation runs).")
+app.add_typer(jobs_app, name="jobs")
+
+
+@jobs_app.command("record")
+def jobs_record(
+    pack_dir: Path = typer.Argument(..., help="Pack root the job belongs to."),
+    json_str: str = typer.Option(
+        ..., "--json",
+        help='Job entry, e.g. {"job_id":"ab12","op":"improve","target":"l1",'
+        '"status":"ok","changed":true,"duration_ms":8200}.',
+    ),
+) -> None:
+    """Append one background-job entry to <pack>/.canon/jobs.jsonl. Cradle's
+    worker calls this on job completion (it never writes pack files itself)."""
+    from canon.jobs import record_job
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        entry = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        _emit_error(f"--json is not valid JSON: {e}")
+    if not isinstance(entry, dict):  # type: ignore[possibly-unbound]
+        _emit_error("--json must be a JSON object.")
+    try:
+        stored = record_job(pack_dir, entry)  # type: ignore[arg-type]
+    except Exception as e:
+        _emit_error(f"jobs record failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "jobs_record", "entry": stored})  # type: ignore[possibly-unbound]
+
+
+@jobs_app.command("list")
+def jobs_list(
+    pack_dir: Path = typer.Argument(..., help="Pack root to summarize."),
+) -> None:
+    """Emit the pack's job ledger + a roll-up (count, per-op, per-status)."""
+    from canon.jobs import summarize
+
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        summary = summarize(pack_dir)
+    except Exception as e:
+        _emit_error(f"jobs list failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "jobs_list", "jobs": summary})  # type: ignore[possibly-unbound]
+
+
 db_app = typer.Typer(help="Generic database rows: create / LLM-complete (anchored).")
 app.add_typer(db_app, name="db")
 
@@ -1186,6 +2093,14 @@ def db_new_cmd(
     ),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the authoring agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind enemy|item`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1198,11 +2113,13 @@ def db_new_cmd(
         fields = json.loads(fields_json) if fields_json else {}
     except json.JSONDecodeError as e:
         _emit_error(f"Invalid --fields JSON: {e}")
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         llm = ops.build_llm(llm_backend if complete else None, llm_model)
         result = ops.new_db_row(
             pack_dir, entity_type, fields,
-            complete=complete, llm=llm, actor=actor, session=session,
+            complete=complete, llm=llm, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type)
@@ -1224,6 +2141,14 @@ def db_complete_cmd(
     ),
     llm_backend: str = typer.Option("fake", "--llm-backend", help="fake | anthropic"),
     llm_model: str | None = typer.Option(None, "--llm-model"),
+    system_prompt: str | None = typer.Option(
+        None, "--system-prompt",
+        help="Override the authoring agent's SYSTEM prompt for this call "
+        "(see `canon prompt show --kind enemy|item`).",
+    ),
+    system_prompt_file: Path | None = typer.Option(
+        None, "--system-prompt-file", help="Read the system override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1231,17 +2156,98 @@ def db_complete_cmd(
     """LLM-complete an existing row, anchored by its locked fields."""
     _load_env_file(env_file)
     ops = _pack_ops()
+    override = _prompt_text(system_prompt, system_prompt_file, "--system-prompt")
     try:
         llm = ops.build_llm(llm_backend, llm_model)
         result = ops.complete_db_row(
             pack_dir, entity_type, entity_id,
             [s.strip() for s in locked.split(",")] if locked else [],
-            reroll=reroll, llm=llm, actor=actor, session=session,
+            reroll=reroll, llm=llm, system_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError, KeyError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), id=entity_id)
     except Exception as e:
         _emit_error(f"db complete failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@db_app.command("update")
+def db_update_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item | tile"),
+    entity_id: str = typer.Option(
+        ..., "--id",
+        help="Row id — or <stage>/<tile_name> with --type tile.",
+    ),
+    set_json: str = typer.Option(
+        ..., "--set",
+        help='JSON of field: value changes (e.g. \'{"hp": 9, "name": "Grub"}\'; '
+        "null deletes a nested knob). Values land verbatim — no rerolls.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """DIRECT human edit of an existing row (no LLM, no rerolls): enemy/item
+    fields, or collision/params for a tile type. Rehashes, stamps
+    ``user_edited``, journals ``op:"edit"`` with the field diff."""
+    ops = _pack_ops()
+    try:
+        changes = json.loads(set_json)
+    except json.JSONDecodeError as e:
+        _emit_error(f"Invalid --set JSON: {e}")
+    try:
+        if entity_type == "tile":
+            result = ops.update_tile_slots(
+                pack_dir, entity_id, changes, actor=actor, session=session
+            )
+        else:
+            result = ops.update_db_row(
+                pack_dir, entity_type, entity_id, changes,
+                actor=actor, session=session,
+            )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type, id=entity_id)
+    except Exception as e:
+        _emit_error(f"db update failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@db_app.command("schema")
+def db_schema_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    entity_type: str = typer.Option(..., "--type", help="enemy | item"),
+    set_json: str | None = typer.Option(
+        None, "--set",
+        help='Edit: {"fields": {<name>: <field entry>|null, ...}} — each named '
+        "field is replaced wholesale. Omit to just read the effective schema.",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Read (default) or edit (--set) the roll-table schema bounding
+    generation for one entity type. Edits are validated fail-closed (loader +
+    lookup coverage + smoke roll) and land as a PACK-LOCAL override."""
+    changes = None
+    if set_json is not None:
+        # Parsed OUTSIDE the op try: _emit_error's Exit must not be re-caught
+        # below as a second "db schema failed" payload.
+        try:
+            changes = json.loads(set_json)
+        except json.JSONDecodeError as e:
+            _emit_error(f"Invalid --set JSON: {e}")
+    ops = _pack_ops()
+    try:
+        if changes is None:
+            result = ops.read_db_schema(pack_dir, entity_type)
+        else:
+            result = ops.update_db_schema(
+                pack_dir, entity_type, changes, actor=actor, session=session
+            )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), type=entity_type)
+    except Exception as e:
+        _emit_error(f"db schema failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
 
 
@@ -1262,6 +2268,14 @@ def asset_generate_cmd(
     image_edit_backend: str | None = typer.Option(None, "--image-edit-backend"),
     music_backend: str | None = typer.Option(None, "--music-backend"),
     sfx_backend: str | None = typer.Option(None, "--sfx-backend"),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the image prompt (sprite targets) or music prompt "
+        "(audio targets) for this call — see `canon prompt show --kind sprite`.",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
@@ -1270,6 +2284,7 @@ def asset_generate_cmd(
     path). Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
     _load_env_file(env_file)
     ops = _pack_ops()
+    override = _prompt_text(prompt, prompt_file, "--prompt")
     try:
         result = ops.generate_asset(
             pack_dir, target,
@@ -1277,7 +2292,7 @@ def asset_generate_cmd(
             image_edit_model=image_edit_model,
             image_edit_backend=image_edit_backend,
             music_backend=music_backend, sfx_backend=sfx_backend,
-            actor=actor, session=session,
+            prompt_override=override, actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)
@@ -1300,13 +2315,33 @@ def asset_animate_cmd(
         False, "--reuse-spec",
         help="Skip VLM authoring and reuse the stored motion spec.",
     ),
+    renormalize: bool = typer.Option(
+        False, "--renormalize",
+        help="REFRAME ONLY, $0, no backends: re-seat the frames already on "
+        "disk on one shared square, giving every state equal headroom and "
+        "repacking the atlas. It canNOT restore cross-state proportions — "
+        "those were lost when each state was scaled to fill its own cell; "
+        "re-animate for that.",
+    ),
+    prompt: str | None = typer.Option(
+        None, "--prompt",
+        help="Override the VLM's motion-spec authoring prompt for this call — "
+        "see `canon prompt show --kind animate`. Inert with --reuse-spec / "
+        "--renormalize, which never author.",
+    ),
+    prompt_file: Path | None = typer.Option(
+        None, "--prompt-file", help="Read the prompt override from a file."
+    ),
     env_file: Path | None = typer.Option(None, "--env-file"),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
     """Animate ONE actor (the multi-image path): VLM-authored motion spec →
-    one img2img sheet per state → strips + frames.json + packed atlas."""
+    one img2img sheet per state → strips + frames.json + packed atlas.
+
+    With --renormalize it instead repairs the existing frames in place (free)."""
     _load_env_file(env_file)
+    override = _prompt_text(prompt, prompt_file, "--prompt")
     ops = _pack_ops()
     try:
         result = ops.animate_asset(
@@ -1315,13 +2350,51 @@ def asset_animate_cmd(
             image_edit_model=image_edit_model,
             image_edit_backend=image_edit_backend,
             vlm_backend=vlm_backend, vlm_model=vlm_model,
-            reuse_spec=reuse_spec, actor=actor, session=session,
+            reuse_spec=reuse_spec, renormalize=renormalize,
+            prompt_override=override,
+            actor=actor, session=session,
         )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)
     except Exception as e:
         _emit_error(f"asset animate failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("estimate")
+def asset_estimate(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(..., "--target", help="enemy:<id> | player"),
+    op: str = typer.Option("animate", "--op", help="animate (the only op today)."),
+    reuse_spec: bool = typer.Option(
+        False, "--reuse-spec", help="Price a run that skips the VLM authoring call."
+    ),
+    image_backend: str = typer.Option("fake", "--image-backend", help="fal | fake"),
+    vlm_backend: str = typer.Option("none", "--vlm-backend", help="anthropic | none"),
+) -> None:
+    """Forecast the cost of animating ONE actor, backend-aware (fake/none =
+    $0). Priced BY STATES — one img2img edit per state per facing — plus one
+    VLM authoring call unless --reuse-spec. Run via `python -m canon.cli.main`
+    from the repo root (estimator lives in examples.*)."""
+    try:
+        from examples.platformer_pack.estimate import estimate_cradle
+    except ImportError as e:
+        _emit_error(
+            f"Failed to import platformer estimator: {e} — run this via "
+            "`python -m canon.cli.main` from the repo root."
+        )
+    if not pack_dir.exists():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        est = estimate_cradle(  # type: ignore[possibly-unbound]
+            op, pack_dir=pack_dir, target=target, reuse_spec=reuse_spec,
+            backends={"image": image_backend, "vlm": vlm_backend},
+        )
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target, op=op)
+    except Exception as e:
+        _emit_error(f"asset estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
 
 
 @asset_app.command("replace")
@@ -1360,6 +2433,249 @@ def asset_replace(
     except Exception as e:
         _emit_error(f"Asset replace failed: {e}", traceback=traceback.format_exc())
     _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("versions")
+def asset_versions_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target", help="Artifact id (enemy:<id>, tileset:<stage>, …)."
+    ),
+) -> None:
+    """The compact version chain for ANY journaled artifact (the restore
+    picker's source) — level steps keep `level versions`."""
+    try:
+        from canon.provenance import artifact_versions
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+    versions = artifact_versions(pack_dir, target)  # type: ignore[possibly-unbound]
+    _emit({"artifact_id": target, "versions": versions, "count": len(versions)})
+
+
+@asset_app.command("lineage")
+def asset_lineage_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(..., "--target", help="Artifact id."),
+    max_nodes: int = typer.Option(500, "--max-nodes"),
+) -> None:
+    """The artifact's FAMILY TREE from the journal + object store: nodes =
+    versions (content hashes, with facet/actor/model/prompt), edges = the
+    events between them; shared bytes connect artifacts across the pack."""
+    try:
+        from canon.adapters.platformer_read import asset_lineage
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer reader: {e}")
+    try:
+        result = asset_lineage(pack_dir, target, max_nodes=max_nodes)  # type: ignore[possibly-unbound]
+    except FileNotFoundError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset lineage failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("restore")
+def asset_restore_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> (row JSON or sprite PNG by bytes) | "
+        "player | tilesheet:<stage> | backdrop:<stage>/<index>",
+    ),
+    to: str = typer.Option(..., "--to", help="Version hash (sha256:…)."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Make a historic version current again (op:"restore"). Nothing is
+    deleted — the lineage grows a new branch from the chosen node."""
+    try:
+        from canon.adapters.platformer_write import restore_asset
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+    try:
+        result = restore_asset(  # type: ignore[possibly-unbound]
+            pack_dir, target, to, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"asset restore failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@asset_app.command("assign")
+def asset_assign_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    source: str = typer.Option(..., "--source", help="enemy:<id> | item:<id>"),
+    to: str = typer.Option(..., "--to", help="enemy:<id> | item:<id>"),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Use one row's art on another: copies the WHOLE bundle (sprite +
+    animation) with a cross-artifact provenance edge — the lineage tree
+    shows both rows sharing the same nodes afterward."""
+    try:
+        from canon.adapters.platformer_write import assign_asset
+    except ImportError as e:
+        _emit_error(f"Failed to import platformer writer: {e}")
+    try:
+        result = assign_asset(  # type: ignore[possibly-unbound]
+            pack_dir, source, to, actor=actor, session=session
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), source=source, to=to)
+    except Exception as e:
+        _emit_error(f"asset assign failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+library_app = typer.Typer(
+    help="The GLOBAL cross-project asset library ($CANON_LIBRARY, "
+    "default ~/.canon/library)."
+)
+app.add_typer(library_app, name="library")
+
+
+@library_app.command("publish")
+def library_publish_cmd(
+    pack_dir: Path = typer.Argument(..., help="Source pack root."),
+    target: str = typer.Option(
+        ..., "--target",
+        help="enemy:<id> | item:<id> | player | tile:<stage>/<name> | "
+        "backdrop:<stage>/<i> | audio:<stage>",
+    ),
+    name: str | None = typer.Option(None, "--name"),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated."),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Publish an asset into the library (composite assets travel whole;
+    identical re-publishes dedup). Journals op:"keep" in the source pack."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        result = library.publish(  # type: ignore[possibly-unbound]
+            pack_dir, target, name=name,
+            tags=[t.strip() for t in tags.split(",")] if tags else (),
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), target=target)
+    except Exception as e:
+        _emit_error(f"library publish failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@library_app.command("list")
+def library_list_cmd(
+    kind: str | None = typer.Option(None, "--kind"),
+    tag: str | None = typer.Option(None, "--tag"),
+    query: str | None = typer.Option(None, "--query"),
+    project: str | None = typer.Option(
+        None, "--project",
+        help="Filter by source pack path/world name (the project view).",
+    ),
+) -> None:
+    """Browse the library index (newest first)."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    entries = library.list_entries(kind=kind, tag=tag, query=query, project=project)  # type: ignore[possibly-unbound]
+    _emit({"entries": entries, "count": len(entries), "root": str(library.library_root())})  # type: ignore[possibly-unbound]
+
+
+@library_app.command("import")
+def library_import_cmd(
+    pack_dir: Path = typer.Argument(..., help="Destination pack root."),
+    library_id: str = typer.Option(..., "--id"),
+    new_id: str | None = typer.Option(
+        None, "--as", help="Preferred id (a fresh one is minted on collision)."
+    ),
+    into: str | None = typer.Option(
+        None, "--into",
+        help="tile:<stage>/<name> | backdrop:<stage>/<i> | audio:<stage> "
+        "(required for those kinds).",
+    ),
+    actor: str = typer.Option("user", "--actor"),
+    session: str | None = typer.Option(None, "--session"),
+) -> None:
+    """Import a library entry: bytes copy in (packs stay self-contained),
+    ids are always fresh, and the artifact carries a durable library_ref."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        result = library.import_entry(  # type: ignore[possibly-unbound]
+            pack_dir, library_id, new_id=new_id, into=into,
+            actor=actor, session=session,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _emit_error(str(e), pack_dir=str(pack_dir), id=library_id)
+    except Exception as e:
+        _emit_error(f"library import failed: {e}", traceback=traceback.format_exc())
+    _emit(result)  # type: ignore[possibly-unbound]
+
+
+@library_app.command("cat")
+def library_cat_cmd(
+    content_hash: str = typer.Argument(..., help="sha256:<hex> object hash."),
+) -> None:
+    """Fetch library object bytes as base64 (previews for the browser UI)."""
+    try:
+        from canon import library
+    except ImportError as e:
+        _emit_error(f"Failed to import library: {e}")
+    try:
+        data = library.read_object(content_hash)  # type: ignore[possibly-unbound]
+    except FileNotFoundError:
+        _emit_error(f"object {content_hash} not in the library store")
+    import base64
+
+    _emit({
+        "hash": content_hash,
+        "size": len(data),  # type: ignore[possibly-unbound]
+        "bytes_b64": base64.b64encode(data).decode("ascii"),  # type: ignore[possibly-unbound]
+    })
+
+
+object_app = typer.Typer(help="Content-addressed object store reads.")
+app.add_typer(object_app, name="object")
+
+
+@object_app.command("cat")
+def object_cat_cmd(
+    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    content_hash: str = typer.Argument(..., help="sha256:<hex> version hash."),
+    out: Path | None = typer.Option(
+        None, "--out", help="Write raw bytes to a file instead of emitting JSON."
+    ),
+) -> None:
+    """Fetch a stored version's bytes (thumbnails of history live only in
+    the CAS). Without --out, emits base64 JSON small enough for UI pipes."""
+    try:
+        from canon.provenance import read_object
+    except ImportError as e:
+        _emit_error(f"Failed to import provenance: {e}")
+    try:
+        data = read_object(pack_dir, content_hash)  # type: ignore[possibly-unbound]
+    except FileNotFoundError:
+        _emit_error(f"object {content_hash} not in the store", pack_dir=str(pack_dir))
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[possibly-unbound]
+        out.write_bytes(data)  # type: ignore[possibly-unbound]
+        _emit({"hash": content_hash, "size": len(data), "out": str(out)})  # type: ignore[possibly-unbound]
+    else:
+        import base64
+
+        _emit({
+            "hash": content_hash,
+            "size": len(data),  # type: ignore[possibly-unbound]
+            "bytes_b64": base64.b64encode(data).decode("ascii"),  # type: ignore[possibly-unbound]
+        })
 
 
 def main() -> None:

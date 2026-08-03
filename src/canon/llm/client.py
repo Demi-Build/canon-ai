@@ -12,6 +12,7 @@ batching via a thread pool.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 from canon.backends.base import LLMBackend
 from canon.llm.request import LLMRequest
@@ -36,6 +37,15 @@ class LLMClient:
             ``supports_request_model`` (so a fake backend's runs — and
             their provenance stamps — are untouched). An explicit
             ``request.model`` always wins over the resolver.
+        system_overrides: Optional ``{phase-label-prefix: system_text}`` map.
+            Per-call system-prompt overrides (the "edit prompt" feature): when
+            a registered key matches a call's effective phase label (exact, or
+            a ``key:``-bounded prefix so ``plat:layout`` matches
+            ``plat:layout:l1`` but never ``plat:layout_extra``), that call's
+            ``request.system`` is swapped for the override text before the
+            backend runs — keyed by label so a level generate's ``plat:layout``
+            override never touches its ``plat:placement`` call. Empty map (the
+            default) → byte-identical to no override.
 
     Example::
 
@@ -55,17 +65,39 @@ class LLMClient:
         stats: GenerationStats | None = None,
         phase: str = "default",
         model_resolver=None,
+        system_overrides: dict[str, str] | None = None,
     ) -> None:
         self.backend = backend
         self.stats = stats
         self.phase = phase  # default phase label for stats wiring; can be overridden per-call
         self.model_resolver = model_resolver
+        # {phase-label-prefix -> system text}. Per-call system-prompt overrides
+        # applied in generate(); empty = no override (byte-identical default).
+        self.system_overrides: dict[str, str] = dict(system_overrides or {})
+
+    def _override_for(self, eff_phase: str) -> str | None:
+        """The override system text whose key best matches ``eff_phase``, or
+        None. A key matches when it equals the phase or is a ``key:``-bounded
+        prefix of it; the LONGEST matching key wins (most specific)."""
+        if not self.system_overrides:
+            return None
+        best: str | None = None
+        for key in self.system_overrides:
+            if eff_phase == key or eff_phase.startswith(key + ":"):
+                if best is None or len(key) > len(best):
+                    best = key
+        return self.system_overrides[best] if best is not None else None
 
     def generate(self, request: LLMRequest, *, phase: str | None = None) -> str:
         """Generate a single response.
 
         Calls ``backend.generate(request)`` and, if ``stats`` was provided,
         records the call under ``phase`` (or the client's default phase).
+
+        When a ``system_overrides`` entry matches the effective phase label,
+        this call's system prompt is swapped for the override text (the
+        per-call "edit prompt" feature). The swap is applied to a COPY of the
+        request, so the caller's object is never mutated.
 
         Args:
             request: The ``LLMRequest`` to send.
@@ -81,12 +113,16 @@ class LLMClient:
             Backends that don't surface them (e.g. ``FakeLLMBackend``) report
             zeros via ``getattr`` defaults.
         """
+        eff_phase = phase or self.phase
         if (
             self.model_resolver is not None
             and getattr(self.backend, "supports_request_model", False)
             and getattr(request, "model", None) is None
         ):
-            request.model = self.model_resolver(phase or self.phase)
+            request.model = self.model_resolver(eff_phase)
+        override = self._override_for(eff_phase)
+        if override is not None:
+            request = replace(request, system=override)
         response = self.backend.generate(request)
         if self.stats is not None:
             self.stats.record_call(

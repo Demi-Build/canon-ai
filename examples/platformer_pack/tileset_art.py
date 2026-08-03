@@ -640,13 +640,23 @@ def build_sheet_reference(base: Any, n_frames: int, cell_px: int) -> Any:
 
 
 def segment_frames(
-    sheet: Any, *, min_gap_frac: float = 0.01, min_blob_frac: float = 0.02
+    sheet: Any,
+    *,
+    min_gap_frac: float = 0.01,
+    min_blob_frac: float = 0.02,
+    min_area_frac: float = 0.15,
 ) -> list:
     """Split a generated sprite SHEET into per-frame RGBA crops, left→right.
     Background is cut first (white → transparent); opaque columns are grouped
     into blobs, runs closer than ``min_gap_frac`` of the width are merged, and
     blobs narrower than ``min_blob_frac`` are dropped. Fraction thresholds keep
-    it resolution-independent."""
+    it resolution-independent.
+
+    Crops whose opaque AREA falls below ``min_area_frac`` of the median crop's
+    are dropped as artifacts: a stray full-height streak (real case — the
+    player's ``fall`` sheet came back as a head plus a 3px vertical stick)
+    otherwise survives as a "frame" and inflates the state's frame square,
+    shrinking every real frame beside it."""
     keyed = remove_background(sheet.convert("RGB"))  # RGBA, bg → transparent
     w, h = keyed.size
     alpha = list(keyed.getchannel("A").get_flattened_data())
@@ -681,22 +691,65 @@ def segment_frames(
         strip = keyed.crop((x0, 0, x1, h))
         bbox = strip.getchannel("A").getbbox()
         crops.append(strip.crop(bbox) if bbox else strip)
+    if len(crops) > 2:
+        # Drop artifact slivers by opaque area against the MEDIAN crop (robust
+        # to one outlier in either direction). Only with >2 crops, so a real
+        # 2-frame cycle is never halved.
+        areas = [_opaque_area(c) for c in crops]
+        median = sorted(areas)[len(areas) // 2]
+        if median > 0:
+            crops = [
+                c for c, a in zip(crops, areas) if a >= median * min_area_frac
+            ]
     return crops
 
 
-def normalize_frames(crops: list, *, pad: int = 4) -> list:
-    """Seat every crop in a common SQUARE canvas (max content dimension +
-    pad), x-centered and bottom-aligned (feet on the frame floor, matching
-    ``_bottom_align`` and the static base.png framing). One shared canvas
-    size → the creature holds a consistent size across the cycle. Empty
-    input → []."""
+def _opaque_area(img: Any) -> int:
+    """Count of visible pixels — the artifact test that a bounding box can't
+    make (a 3px full-height streak has a tall bbox but almost no area)."""
+    rgba = img.convert("RGBA")
+    return sum(1 for a in rgba.getchannel("A").get_flattened_data() if a > 0)
+
+
+def frame_side(crops: list, *, pad: int = 4) -> int:
+    """The square canvas size that seats every crop in ``crops`` — max content
+    dimension + pad. Split out from ``normalize_frames`` so a caller holding
+    SEVERAL states' crops can compute ONE side across all of them and pass it
+    back in; sizing per state instead stretches each state's largest dimension
+    to fill the cell, so an actor whose idle is wide and whose jump is tall
+    renders at two different scales (the 'half the frame vanishes in the jump'
+    bug). Empty input → 0."""
+    if not crops:
+        return 0
+    return max(max(c.width for c in crops), max(c.height for c in crops)) + pad
+
+
+def normalize_frames(crops: list, *, pad: int = 4, side: int | None = None) -> list:
+    """Seat every crop in a common SQUARE canvas, x-centered and bottom-aligned
+    (feet on the frame floor, matching ``_bottom_align`` and the static
+    base.png framing). One shared canvas size → the creature holds a consistent
+    size across the cycle.
+
+    ``side`` pins that canvas explicitly — pass the ``frame_side`` of an
+    actor's WHOLE crop set so every state shares one scale. Omitted, the side
+    is computed from ``crops`` alone (per-state sizing; correct only when the
+    caller has a single state). Crops larger than ``side`` are scaled down to
+    fit rather than cropped, so a pinned side never clips content.
+    Empty input → []."""
     from PIL import Image
 
     if not crops:
         return []
-    side = max(max(c.width for c in crops), max(c.height for c in crops)) + pad
+    if side is None:
+        side = frame_side(crops, pad=pad)
     out = []
     for c in crops:
+        if c.width > side or c.height > side:
+            fit = min(side / c.width, side / c.height)
+            c = c.resize(
+                (max(1, round(c.width * fit)), max(1, round(c.height * fit))),
+                Image.LANCZOS,
+            )
         frame = Image.new("RGBA", (side, side), (0, 0, 0, 0))
         frame.paste(c, ((side - c.width) // 2, side - c.height))
         out.append(frame)
@@ -1099,12 +1152,17 @@ class DiffusionSheetProducer:
         world_title: str,
         graphics: Any,
         size: tuple[int, int],
+        prompt_override: str | None = None,
     ) -> Any:
         """Transparent RGBA sprite at ``size``. Background is cut at full
-        generation resolution (halo avoidance) before downscaling."""
+        generation resolution (halo avoidance) before downscaling.
+
+        ``prompt_override`` replaces the built prompt for this ONE call (the
+        per-call "edit prompt" feature); the sanitized content-policy retry
+        prompt is left alone so the fallback stays safe. None = default."""
         from PIL import Image
 
-        prompt = sprite_prompt(
+        prompt = (prompt_override or "").strip() or sprite_prompt(
             name, descriptor, color_hex, theme, world_title, graphics
         )
         sanitized = (

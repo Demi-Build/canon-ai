@@ -72,6 +72,8 @@ ENV/
 
 docs/
 docs/*
+ROADMAP_HANDOFF.md
+.claude/
 
 # Generated platformer output trees — never source. Prefer --output-dir OUTSIDE
 # the repo; plat_slice_output is the runner default that lands here otherwise

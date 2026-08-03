@@ -103,6 +103,22 @@ class SparseMaskEntry(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class MusicSection(BaseModel):
+    """A user-authored music region on a level (NOT the transient
+    generation-time layout sections). ``[start, end)`` is a half-open range of
+    cells along the level's ``layout_axis`` (columns for horizontal levels,
+    rows for vertical). While the player stands inside it, ``music_path`` plays
+    instead of the level/stage default. Empty ``music_path`` = "silence here".
+    Authored by the user after generation (agents may propose these later);
+    the play surfaces resolve section → level → stage by position."""
+
+    start: int
+    end: int
+    music_path: str = ""
+    music_hash: str = ""
+    name: str = ""
+
+
 class TileSlot(BaseModel):
     """One slot of a tilesheet: which region is which tile id.
 
@@ -138,6 +154,24 @@ class World(ArtifactMeta):
     stage_ids: list[str] = Field(default_factory=list)
     edges: list[tuple[str, str]] = Field(default_factory=list)  # connectivity
     unlock_rules: dict[str, Any] = Field(default_factory=dict)
+    #: DURABLE world-map authoring, layered over the deterministic layout
+    #: `compose._world_map` computes from the seed. That layout is recomputed
+    #: on EVERY resume (compose is an always-node), so anything a human places
+    #: has to live here or the next run silently stomps it.
+    #:
+    #: All three default to empty, and empty means "compute everything" — so a
+    #: pack that has never been hand-authored produces byte-identical output.
+    #:
+    #: `map_nodes`: level_id -> {"pos": [x, y]} in normalized 0..1 coords.
+    #: Presence alone marks the node `manual` in the emitted map.
+    map_nodes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: `map_edges`: typed connections between LEVELS. Non-empty REPLACES the
+    #: derived linear chain (the chain is what you get before authoring).
+    #: Each: {"a", "b", "kind": path|one|lock|new, "condition"?, "stop"?}.
+    map_edges: list[dict[str, Any]] = Field(default_factory=list)
+    #: When locked, generation may ADD and CONNECT levels but must not move a
+    #: node a human placed. (Enforced by `_world_map`, not by convention.)
+    map_locked: bool = False
     #: Generated boot-splash key art (art track): splash/world.png,
     #: hash-tracked so the splash is edit-detected and pinnable.
     splash_path: str = ""  # output_dir-relative; "" = engine title card
@@ -248,6 +282,18 @@ class Level(ArtifactMeta):
     #: effective spec at generation time (low-gravity levels validate
     #: with low gravity). Secret rooms inherit their parent's.
     movement_overrides: dict[str, Any] = Field(default_factory=dict)
+    #: Per-level MUSIC override (additive). Empty → the stage default theme
+    #: (manifest["audio"][stage]) plays, as before. Set (assigned to an
+    #: existing track or generated per-level) → this track plays for the whole
+    #: level. Secret rooms are Levels, so a room carries its own here. The
+    #: play surfaces resolve music by position: an active ``music_sections``
+    #: entry wins, else this ``music_path``, else the stage default.
+    music_path: str = ""
+    music_hash: str = ""
+    #: User-authored music regions (see ``MusicSection``) — durable, added
+    #: after generation, each optionally its own track. Empty = the level uses
+    #: ``music_path`` / the stage default everywhere.
+    music_sections: list[MusicSection] = Field(default_factory=list)
 
     # Placements — references, never copies (§6.1)
     entities: list[Placement] = Field(default_factory=list)

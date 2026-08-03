@@ -104,40 +104,29 @@ NOTES_MAX_CHARS = 300
 #: The closed animation-state vocabulary. Both play surfaces ALREADY track
 #: each of these: ``walk`` while moving, ``hurt`` while hurt_t>0, ``death``
 #: when !alive, else ``idle``. The VLM spec and frames.json share these keys.
+# The animation VOCABULARY lives in animation_spec (one source of truth,
+# overridable per pack via animation.json). These module constants stay as
+# the built-in DEFAULTS every existing call site already reads.
+from examples.platformer_pack.animation_spec import (  # noqa: E402
+    DEFAULT_SETS as _ANIM_SPEC_DEFAULT_SETS,
+    DEFAULT_STATES as _ANIM_SPEC_DEFAULT_STATES,
+)
+
 #: This is the BASE enemy set — :func:`enemy_animation_states` widens it per
 #: archetype (a hopper adds ``jump`` for its airborne arc).
-ANIMATION_STATES: tuple[str, ...] = ("idle", "walk", "hurt", "death")
+ANIMATION_STATES: tuple[str, ...] = tuple(_ANIM_SPEC_DEFAULT_SETS["enemy"])
 
 #: The PLAYER's states. The player jumps (enemies don't) and never plays a
 #: death cycle (it respawns), so its set differs from the enemy set. Both
 #: surfaces track: rising airborne → ``jump``, descending → ``fall``, the
 #: brief touch-down window → ``land``, braking against carried momentum →
 #: ``skid``, moving on ground → ``walk``, else idle.
-PLAYER_ANIMATION_STATES: tuple[str, ...] = (
-    "idle", "walk", "jump", "fall", "land", "skid",
-)
+PLAYER_ANIMATION_STATES: tuple[str, ...] = tuple(_ANIM_SPEC_DEFAULT_SETS["player"])
 
 #: One-line meaning of each state, woven into the authoring prompt so motion
 #: is grounded in what the state actually is (a flyer's ``walk`` is flight).
 _STATE_BRIEF: dict[str, str] = {
-    "idle": "at rest / holding position (a flyer hovers, a sentry barely stirs)",
-    "walk": "actively moving along its path (for a flyer/swimmer: flight/swim)",
-    "hurt": "recoiling from a hit — a brief flinch",
-    "death": "defeated — collapse, tumble, or fade",
-    # Transient states carry an explicit SILHOUETTE contract so a generator
-    # can't collapse them into near-identical standing frames (postmortem
-    # ticket 8): each names a distinct outline the others don't share.
-    "jump": "the RISING launch — a compact crouch then push-off, body "
-            "gathered and tucked, moving UP; a rounded rising silhouette, "
-            "clearly NOT the stretched trailing-limb fall",
-    "fall": "the DESCENT past the peak — body stretched tall and vertical, "
-            "arms, limbs and hair trailing UPWARD; a tall narrow silhouette",
-    "land": "the touchdown SQUASH — body compressed low and WIDE, legs fully "
-            "folded, an implied dust puff; a short wide silhouette, clearly "
-            "flatter than idle",
-    "skid": "braking against carried momentum — torso leaned BACK, legs "
-            "thrust FORWARD and braced; a diagonal leaning silhouette, "
-            "distinct from an upright walk",
+    k: v["brief"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: Per-state frame counts are clamped here. The image model ignores exact
@@ -151,16 +140,14 @@ PLAYER_ANIM_FRAMES_MAX = 9
 #: Fallback frame count when the model omits/garbles a state — chosen to read
 #: right: idle barely stirs, a walk/flight cycle is the fullest.
 ANIM_DEFAULT_FRAMES: dict[str, int] = {
-    "idle": 2, "walk": 4, "hurt": 2, "death": 4, "jump": 6,
-    "fall": 3, "land": 2, "skid": 2,
+    k: v["frames"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: How each state's cycle plays back on both surfaces: ``loop`` wraps
 #: forever, ``once`` holds the last frame (a death collapse must not
 #: restart mid-linger). Unknown states fall back to ``loop``.
 STATE_LOOP_MODES: dict[str, str] = {
-    "idle": "loop", "walk": "loop", "jump": "once", "fall": "loop",
-    "land": "once", "skid": "loop", "hurt": "once", "death": "once",
+    k: v["loop"] for k, v in _ANIM_SPEC_DEFAULT_STATES.items()
 }
 
 #: Motion phrases are clamped like the QA notes.
@@ -938,15 +925,22 @@ def enemy_animation_subject(enemy: Any) -> str:
     )
 
 
-def enemy_animation_states(enemy: Any) -> tuple[str, ...]:
+def enemy_animation_states(
+    enemy: Any, pack_dir: Any = None
+) -> tuple[str, ...]:
     """The state set ONE enemy authors/generates: the base vocabulary, plus
     ``jump`` for a hopper (both surfaces track its airborne arc via
     ``e_grounded``). Same archetype lookup as
     :func:`enemy_animation_subject`."""
+    from examples.platformer_pack.animation_spec import load_spec, states_for
+
     archetype = enemy.archetype or "patroller"
-    if archetype == "hopper":
-        return (*ANIMATION_STATES, "jump")
-    return ANIMATION_STATES
+    # Resolution order (most specific first): this enemy's own
+    # `animation_states` field, then `enemy.<archetype>`, then the base set —
+    # all overridable per pack via animation.json. The hopper default below is
+    # the old special case, now expressed as data.
+    resolved = states_for(load_spec(pack_dir), "enemy", archetype, enemy)
+    return tuple(resolved) if resolved else ANIMATION_STATES
 
 
 def animate_prompt(
@@ -1047,15 +1041,22 @@ def author_animation_spec(
     states: tuple[str, ...] = ANIMATION_STATES,
     frames_max: int = ANIM_FRAMES_MAX,
     max_retries: int = 3,
+    prompt_override: str | None = None,
 ) -> dict | None:
     """Run the VLM to author a per-state motion spec for one actor (enemy or
     player) from its ACTUAL sprite. Mirrors :meth:`VlmQaPhase._judge_level`'s
     retry loop.
 
+    ``prompt_override`` replaces the authoring instructions for this ONE call
+    ("✎ edit prompt"); empty/None keeps the built prompt byte-for-byte. The
+    rejection feedback still appends, so the validation loop is unchanged.
+
     Returns the sanitized spec (persist it as the actor's animation manifest),
     or ``None`` when the verdict never validates — the caller then keeps the
     static sprite (the loud-fallback contract)."""
-    prompt = animate_prompt(actor_id, subject, states, frames_max)
+    prompt = (prompt_override or "").strip() or animate_prompt(
+        actor_id, subject, states, frames_max
+    )
 
     def generate(feedback: list[str] | None = None) -> str:
         text = prompt
@@ -1189,6 +1190,7 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
     checks: list[dict] = []
     target = actor_id
     masks: dict[str, list] = {}
+    spans: dict[str, tuple[int, int]] = {}  # state -> (max content extent, cell)
     states = animation.get("states") or {}
     for state, meta in sorted(states.items()):
         rel = str(meta.get("path", ""))
@@ -1215,6 +1217,16 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
             continue
         crops = [img.crop((i * fw, 0, (i + 1) * fw, img.height)) for i in range(n)]
         masks[state] = _silhouette_mask(crops)
+        # Widest content extent in this state — fed to the cross-state scale
+        # check below (every other check here is per state, which is exactly
+        # why the per-state sizing bug shipped unseen).
+        extents = [
+            max(b[2] - b[0], b[3] - b[1])
+            for c in crops
+            if (b := c.getchannel("A").getbbox())
+        ]
+        if extents:
+            spans[state] = (max(extents), fw)
         blank = []
         for i, frame in enumerate(crops):
             alpha = list(frame.getchannel("A").get_flattened_data())
@@ -1246,6 +1258,42 @@ def _animation_checks(ctx: Any, actor_id: str, animation: dict) -> list[dict]:
                     " — measured upstream of the normalize re-anchor"
                 ),
             })
+    # CROSS-STATE SCALE: the actor must be ONE size across its states. Frames
+    # are seated in a square sized from the whole actor, so the states that
+    # reach the cell edge are the LARGEST pose(s) and every other state is
+    # strictly smaller. When EVERY state fills the cell, each was sized from
+    # its own crops instead — the character then changes size the moment its
+    # state changes (a wide idle and a tall jump both stretched to fill).
+    # Every other check here is per state and structurally cannot see this.
+    #
+    # The trigger is all-of-them, NOT more-than-one: several states can tie
+    # for largest and then legitimately share the edge. Measured — real
+    # pre-fix art is uniformly flush (ember_hopper 5/5, player 6/6, every
+    # actor N/N), post-repair art is 0/N, and correct art with a tie is 2/4.
+    # An earlier `len(filled) <= 1` failed that last case on good frames.
+    filled = sorted(
+        state for state, (extent, cell) in spans.items() if extent >= cell - 1
+    )
+    if len(spans) > 1:
+        checks.append({
+            "check": "animation_scale", "target": target, "subject": "states",
+            "passed": len(filled) < len(spans),
+            "detail": (
+                f"{len(spans)} state(s) share one frame square; "
+                + (
+                    "none reaches the cell edge"
+                    if not filled
+                    else f"all {len(filled)} fill the cell "
+                    f"({', '.join(filled)}) — each was sized from its own "
+                    "crops, so the actor changes size between states"
+                    if len(filled) == len(spans)
+                    else f"only {filled[0]!r} reaches the cell edge"
+                    if len(filled) == 1
+                    else f"{len(filled)} of {len(spans)} reach the cell edge "
+                    f"({', '.join(filled)}) — tied for largest pose"
+                )
+            ),
+        })
     # Sibling-state silhouette near-dupes (ticket 8): transient states can
     # render as the same pose. Only NEAR-DUPE pairs are recorded (a distinct
     # set adds nothing → byte-clean), and each is advisory — it warns but

@@ -17,9 +17,95 @@ Nothing here mutates the pack; it is a pure projection of on-disk state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+# The on-disk files whose bytes together define a level's current STATE. A
+# change to any of them is a change to the level (terrain, placements, spawn/
+# exit/music in level.json, the sparse layers). Ordered so the composite
+# revision hash is stable.
+_LEVEL_STATE_FILES = (
+    "collision.npz", "terrain.npz", "background.npz",
+    "hazards.json", "triggers.json", "foreground.json",
+    "entities.json", "items.json", "level.json",
+)
+
+# How a level last changed → a human label, keyed by the journal event's
+# detail.kind (falls back to the op). Covers every mutation path: generation
+# ops (kinds stamped by baseline_level), hand edits (apply_level_edit /
+# import_level_grids), and library/restore ops.
+_CHANGE_LABELS = {
+    "generate": "Generated",
+    "improve": "Improved",
+    "regenerate": "Regenerated layout",
+    "place_enemies": "Placed enemies",
+    "place_items": "Placed items",
+    "terrain_paint": "Hand-painted terrain",
+    "enemy_move": "Moved an enemy",
+    "item_move": "Moved an item",
+    "level_edit": "Saved edit",
+    "hazards_change": "Edited hazards",
+    "triggers_change": "Edited triggers",
+    "foreground_change": "Edited foreground",
+}
+
+
+def level_revision(level_dir: str | Path) -> dict:
+    """A content identifier for a level's CURRENT state — a composite SHA over
+    its on-disk state files. Two byte-identical levels share it; any generation,
+    improvement, or hand edit that changes bytes changes it (a no-op that writes
+    identical bytes does not). Pure read — no CAS side effects (unlike
+    ``provenance.snapshot_file``).
+
+    Returns ``{"revision": "sha256:<hex>", "short": "<10 hex>"}``.
+    """
+    d = Path(level_dir)
+    h = hashlib.sha256()
+    for name in _LEVEL_STATE_FILES:
+        p = d / name
+        if not p.is_file():
+            continue
+        h.update(name.encode("utf-8"))
+        h.update(hashlib.sha256(p.read_bytes()).hexdigest().encode("ascii"))
+        h.update(b"\n")
+    digest = h.hexdigest()
+    return {"revision": f"sha256:{digest}", "short": digest[:10]}
+
+
+def level_last_change(pack_dir: str | Path, stage_id: str, level_id: str) -> dict | None:
+    """The most recent journaled change to this level, for the "how it last
+    changed" chip: ``{op, source, kind, actor, ts, hash, label}`` (or None if the
+    level has no journal history). Reads the provenance journal — the single
+    source of truth across generation, improvement, hand-paint and save. The
+    journal is append-ordered, so the last event touching this level is the last
+    write (for a multi-step action like improve+reroll that's its final sub-step)."""
+    from canon import provenance
+
+    prefix = f"level:{stage_id}/{level_id}/"
+    best_event: dict | None = None
+    for e in provenance.all_events(pack_dir):
+        if str(e.get("artifact_id", "")).startswith(prefix):
+            best_event = e  # keep the LAST match (append order = latest write)
+    if best_event is None:
+        return None
+    op = str(best_event.get("op", ""))
+    kind = str((best_event.get("detail") or {}).get("kind", "") or "")
+    label = _CHANGE_LABELS.get(kind) or _CHANGE_LABELS.get(op) or (
+        {"create": "Created", "restore": "Restored", "edit": "Saved edit"}.get(op)
+        or (op.capitalize() if op else "Changed")
+    )
+    return {
+        "op": op,
+        "source": str(best_event.get("source", "")),
+        "kind": kind,
+        "actor": str(best_event.get("actor", "")),
+        "ts": str(best_event.get("ts", "")),
+        "hash": str(best_event.get("after_hash", "") or ""),
+        "label": label,
+    }
 
 
 def load_grid(path: str | Path) -> list[list[int]]:
@@ -61,6 +147,223 @@ def _abs(pack_dir: Path, rel: str | None) -> str | None:
     if not rel:
         return None
     return str((pack_dir / rel).resolve())
+
+
+#: Where an animation target's sprite directory lives, by target grammar.
+def _sprite_dir_for(pack: Path, target: str) -> tuple[str, str]:
+    """``(label, sprite dir relative to the pack)`` for an animation target.
+
+    Grammar matches ``platformer_play._anim_preview_targets`` so the inspector
+    and the viewers name the same things: ``enemy:<id>`` | ``item:<id>`` |
+    ``player``.
+    """
+    t = (target or "").strip()
+    if t == "player":
+        return "player", "sprite/player"
+    if ":" in t:
+        kind, ident = t.split(":", 1)
+        if kind in ("enemy", "item") and ident:
+            return ident, f"sprite/{kind}/{ident}"
+    raise ValueError(
+        f"unknown animation target {target!r} — expected player, "
+        f"enemy:<id> or item:<id>"
+    )
+
+
+def _pack_vlm_qa():
+    """The platformer pack's ``vlm_qa`` module, or ``None``.
+
+    The state vocabulary and the per-state motion briefs are PACK data (they
+    describe this game's animation contract), but they live under ``examples/``
+    rather than in the installed package — same repo-root import the CLI
+    already uses for ``examples.platformer_pack.ops``. Returns None rather than
+    raising: an installed-without-examples canon still reads animations fine,
+    it just can't offer the briefs.
+    """
+    import sys
+
+    import canon as _canon
+
+    root = Path(_canon.__file__).resolve().parents[2]
+    if (root / "examples").is_dir() and str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from examples.platformer_pack import vlm_qa
+    except ImportError:  # pragma: no cover — env-specific
+        return None
+    return vlm_qa
+
+
+def _animation_plan(pack: Path, target: str) -> tuple[list[str], dict]:
+    """``(states this actor would animate, brief per state)``.
+
+    The player has its own richer ladder (jump/fall/land/skid); an enemy takes
+    the base vocabulary plus ``jump`` when it's a hopper — the same lookup
+    generation itself uses, so the dialog promises exactly what a run delivers.
+    """
+    vq = _pack_vlm_qa()
+    if vq is None:
+        return [], {}
+    if target == "player":
+        planned = list(vq.PLAYER_ANIMATION_STATES)
+    else:
+        planned = list(vq.ANIMATION_STATES)
+        kind, _, ident = target.partition(":")
+        if kind == "enemy" and ident:
+            rp = pack / "enemy" / f"{ident}.json"
+            row = (_read_json(rp) if rp.is_file() else {}) or {}
+            if str(row.get("archetype") or "") == "hopper":
+                planned = list(vq.enemy_animation_states(SimpleNamespace(archetype="hopper")))
+    briefs = {s: vq._STATE_BRIEF[s] for s in planned if s in vq._STATE_BRIEF}
+    return planned, briefs
+
+
+def _stored_motion_spec(pack: Path, target: str) -> dict:
+    """The motion spec a previous animate run stored on THIS actor, if any.
+
+    Actor-specific and therefore truer than the generic brief — it describes
+    how this particular drawing moves. Enemies and items carry it on their row
+    (`stats.animation.spec`); the player's lives in the Bible, which the
+    sequential runner's packs don't ship, so it simply reads empty there.
+    """
+    kind, _, ident = (target or "").partition(":")
+    if kind in ("enemy", "item") and ident:
+        rp = pack / kind / f"{ident}.json"
+        row = (_read_json(rp) if rp.is_file() else {}) or {}
+        spec = ((row.get("stats") or {}).get("animation") or {}).get("spec")
+        return spec if isinstance(spec, dict) else {}
+    if target == "player":
+        # The sequential runner's packs ship no bible.json — read empty.
+        bp = pack / "bible.json"
+        bible = (_read_json(bp) if bp.is_file() else {}) or {}
+        player = bible.get("player") or {}
+        spec = ((player.get("animation") or {})).get("spec")
+        return spec if isinstance(spec, dict) else {}
+    return {}
+
+
+def _frame_boxes(strip_path: Path, count: int, fw: int, fh: int) -> list[dict]:
+    """The opaque content box of every frame in a strip, in FRAME pixel space.
+
+    Measured from the shipped pixels rather than read back from the atlas
+    rects: the rects are what generation *intended*, and the whole point of
+    this inspector is catching art that disagrees with the intent. Frames with
+    no opaque pixel at all report a null box instead of a zero-size one.
+    """
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover — Pillow ships with the art extra
+        return []
+    try:
+        sheet = Image.open(strip_path).convert("RGBA")
+    except (OSError, ValueError):
+        return []
+    boxes: list[dict] = []
+    for i in range(count):
+        crop = sheet.crop((i * fw, 0, (i + 1) * fw, fh))
+        bbox = crop.getbbox()
+        if bbox is None:
+            boxes.append({"index": i, "box": None})
+            continue
+        x0, y0, x1, y1 = bbox
+        boxes.append(
+            {
+                "index": i,
+                "box": {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0},
+                # How far the content's feet sit above the cell's bottom edge.
+                # A state whose feet wander between frames is the thing that
+                # makes an actor look like it hops between poses.
+                "foot_gap": fh - y1,
+            }
+        )
+    return boxes
+
+
+def read_animation(pack_dir: str | Path, target: str) -> dict:
+    """Every measurable fact about one actor's animation, for the inspector.
+
+    Pure read — no writes, no journal. Reports, per state: the shared frame
+    square, playback timing, any authored offsets, and the measured content box
+    of every frame. Also flags the two defects that are invisible frame by
+    frame:
+
+    ``flush``       the state's content touches the cell edge. With ONE shared
+                    square across all states, only the single largest pose may
+                    do this — so more than one flush state means the states
+                    were sized independently, which is the bug that made the
+                    player lose two thirds of its pixels mid-jump.
+    ``foot_wander`` the feet move between frames of one state, which reads as
+                    the actor bobbing while it should be planted.
+    """
+    pack = Path(pack_dir)
+    label, sprite_dir = _sprite_dir_for(pack, target)
+    meta = _read_json(pack / sprite_dir / "frames.json") or {}
+    atlas = _read_json(pack / sprite_dir / "atlas.json") or {}
+
+    states: list[dict] = []
+    for state, entry in sorted(meta.items()):
+        if not isinstance(entry, dict):
+            continue
+        count = int(entry.get("frames", 0) or 0)
+        fw = int(entry.get("frame_width", 0) or 0)
+        fh = int(entry.get("frame_height", 0) or 0)
+        rel = str(entry.get("path", "") or "")
+        frames = _frame_boxes(pack / rel, count, fw, fh) if (count and fw and fh) else []
+        boxes = [f["box"] for f in frames if f["box"]]
+        widest = max((b["w"] for b in boxes), default=0)
+        tallest = max((b["h"] for b in boxes), default=0)
+        foot_gaps = [f["foot_gap"] for f in frames if f["box"]]
+        durations = entry.get("durations_ms")
+        if not isinstance(durations, list) or len(durations) != count:
+            durations = [int(entry.get("duration_ms", 120) or 120)] * count
+        offsets = entry.get("offsets")
+        if not isinstance(offsets, list) or len(offsets) != count:
+            offsets = None
+        states.append(
+            {
+                "state": state,
+                "frames": count,
+                "frame_width": fw,
+                "frame_height": fh,
+                "path": rel,
+                "path_abs": _abs(pack, rel),
+                "loop": entry.get("loop", "loop"),
+                "durations_ms": durations,
+                "offsets": offsets,
+                "boxes": frames,
+                "widest": widest,
+                "tallest": tallest,
+                # Flush = the content reaches the cell edge (1px tolerance for
+                # the pad the writer leaves).
+                "flush": bool(fw and fh and (widest >= fw - 1 or tallest >= fh - 1)),
+                "foot_wander": (max(foot_gaps) - min(foot_gaps)) if foot_gaps else 0,
+            }
+        )
+
+    flush = [s["state"] for s in states if s["flush"]]
+    planned, briefs = _animation_plan(pack, target)
+    spec = _stored_motion_spec(pack, target)
+    return {
+        "target": target,
+        "label": label,
+        "sprite_dir": sprite_dir,
+        # What an animate run WORKS FROM, so the generate dialog can show its
+        # real inputs instead of only backend dropdowns: the base sprite it
+        # edits, the states it will author, the per-state motion brief, and any
+        # spec a previous run already stored for THIS actor.
+        "base_sprite": f"{sprite_dir}/base.png",
+        "base_sprite_abs": _abs(pack, f"{sprite_dir}/base.png"),
+        "planned_states": planned,
+        "briefs": briefs,
+        "spec": spec,
+        "has_atlas": bool(atlas),
+        "atlas_path_abs": _abs(pack, str(atlas.get("path", "") or "")) if atlas else None,
+        "states": states,
+        "flush_states": flush,
+        # More than one state touching the edge means they were squared
+        # independently — the signature `animation_scale` checks for.
+        "independently_sized": len(flush) > 1,
+    }
 
 
 def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
@@ -175,10 +478,27 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
 
     slots = tileset.get("slots", [])
     graphics = manifest.get("graphics", {})
+    # Music: the level's own override + user sections, plus the stage default
+    # it falls back to — all abs-resolved so cradle's <AudioPlayer> can play them.
+    stage_music = ((manifest.get("audio", {}) or {}).get(stage_id, {}) or {}).get("music") or ""
+    level_music = level.get("music_path") or ""
+    music_sections = [
+        {
+            **s,
+            "music_path_abs": _abs(pack, s.get("music_path")) if s.get("music_path") else None,
+        }
+        for s in (level.get("music_sections") or [])
+    ]
+    rev = level_revision(level_dir)
     return {
         "level_id": level_id,
         "stage_id": stage_id,
         "display_name": _display_name(manifest, level_id),
+        # Content identity of the CURRENT state (changes on every real edit /
+        # generation) + how it last changed (from the provenance journal).
+        "revision": rev["revision"],
+        "revision_short": rev["short"],
+        "last_change": level_last_change(pack, stage_id, level_id),
         "grid_width": level.get("grid_width"),
         "grid_height": level.get("grid_height"),
         "spawn": level.get("spawn"),
@@ -206,4 +526,306 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "items": items,
         "props": props,
         "backdrop": backdrop,
+        "music_path": level_music,
+        "music_path_abs": _abs(pack, level_music) if level_music else None,
+        "music_sections": music_sections,
+        "stage_music": stage_music,
+        "stage_music_abs": _abs(pack, stage_music) if stage_music else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Asset lineage — the journal + CAS rendered as a family tree (Library A)
+# ---------------------------------------------------------------------------
+
+#: detail.kind → node FACET: what kind of bytes a version holds. Facets route
+#: thumbnails (png vs json diff) and restore targets; unknown kinds fall back
+#: by artifact-id family below.
+_FACET_BY_KIND = {
+    "db_new": "row", "db_update": "row", "db_complete": "row",
+    "row_restore": "row",
+    "sprite_replace": "sprite", "sprite_restore": "sprite",
+    "asset_assign": "sprite",
+    "asset_animate": "animation",
+    "tile_reskin": "tilesheet", "tilesheet_restore": "tilesheet",
+    "band_replace": "band", "band_restore": "band",
+    "tile_params": "tileset_manifest",
+    "db_schema": "schema",
+}
+
+#: Facet priority per artifact family: which facet's latest version is THE
+#: current center of the tree (an animated enemy's identity is its row, not
+#: its frames.json — alphabetical facet order picked the atlas).
+_PRIMARY_FACETS = {
+    "enemy": ("row", "sprite", "animation"),
+    "item": ("row", "sprite"),
+    "player": ("sprite", "animation"),
+    "tileset": ("tilesheet", "tileset_manifest"),
+    "backdrop": ("band", "backdrop_manifest"),
+    "schema": ("schema",),
+    "level": ("level_step",),
+}
+
+
+def _facet_for(event: dict) -> str:
+    kind = str((event.get("detail") or {}).get("kind", ""))
+    aid = str(event.get("artifact_id", ""))
+    if kind == "asset_generate":
+        # generate_asset journals ONE kind for every target family; the
+        # snapshot bytes differ per family (backdrop/audio = their manifest).
+        if aid.startswith("backdrop:"):
+            return "backdrop_manifest"
+        if aid.startswith("audio:"):
+            return "audio_manifest"
+        return "sprite"
+    if kind in _FACET_BY_KIND:
+        return _FACET_BY_KIND[kind]
+    if aid.startswith("level:"):
+        return "level_step"
+    if aid.startswith("schema:"):
+        return "schema"
+    if aid.startswith(("tileset:", "backdrop:")):
+        return "tileset_manifest" if aid.startswith("tileset:") else "band"
+    return "data"
+
+
+def _placement_usage(pack: Path) -> dict[str, list[str]]:
+    """id → level ids that place it (usage badges). One pass over the tree."""
+    usage: dict[str, list[str]] = {}
+    level_root = pack / "level"
+    if not level_root.is_dir():
+        return usage
+    for level_dir in sorted(level_root.glob("*/*")):
+        lid = level_dir.name
+        for fname, key, family in (
+            ("entities.json", "enemy_id", "enemy"),
+            ("items.json", "item_id", "item"),
+        ):
+            f = level_dir / fname
+            if not f.is_file():
+                continue
+            try:
+                records = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for rec in records if isinstance(records, list) else []:
+                rid = str(rec.get(key, ""))
+                # Typed keys ("enemy:x") — enemy/item/stage ids share one
+                # slugify namespace and would collide on bare names.
+                if rid and lid not in usage.setdefault(f"{family}:{rid}", []):
+                    usage[f"{family}:{rid}"].append(lid)
+    return usage
+
+
+def asset_lineage(
+    pack_dir: str | Path, artifact_id: str, max_nodes: int = 500
+) -> dict:
+    """The artifact's family tree, derived from the journal + object store.
+
+    Content lives on NODES (one per distinct content hash — a version), and
+    provenance lives on EDGES (the journal event that turned one version into
+    the next: op, actor, time, model, prompt when recorded). Cross-asset
+    connections come free from the CAS: the same bytes appearing in two
+    artifacts' histories is ONE node wearing both badges — that's how a sheet
+    repainted and reassigned to another enemy row stays visibly connected.
+    Rooted at the earliest ancestor; centered (``requested_node_id``) on the
+    artifact's CURRENT version, per the reference contract.
+    """
+    from canon import provenance
+
+    pack = Path(pack_dir)
+    events = [
+        e for e in provenance.all_events(pack)
+        if e.get("after_hash") or e.get("before_hash")
+    ]
+
+    # Transitive closure by shared hashes: start from the target artifact's
+    # events, then pull in any event anywhere that touches a known hash.
+    # Hash-indexed BFS (linear) — a rescan loop goes quadratic on long
+    # cross-artifact chains. `included` then sorts by TIME so the
+    # producer-metadata pass (first after_hash wins) and the `latest` pass
+    # (last one wins) are journal-true regardless of discovery order.
+    idx_by_hash: dict[str, list[int]] = {}
+    for i, e in enumerate(events):
+        for h in (e.get("before_hash"), e.get("after_hash")):
+            if h:
+                idx_by_hash.setdefault(h, []).append(i)
+    queue: list[str] = []
+    hashes: set[str] = set()
+    for e in events:
+        if e.get("artifact_id") == artifact_id:
+            for h in (e.get("before_hash"), e.get("after_hash")):
+                if h and h not in hashes:
+                    hashes.add(h)
+                    queue.append(h)
+    included_ids: set[int] = set()
+    while queue:
+        h = queue.pop()
+        for i in idx_by_hash.get(h, ()):
+            if i in included_ids:
+                continue
+            included_ids.add(i)
+            e = events[i]
+            for hh in (e.get("before_hash"), e.get("after_hash")):
+                if hh and hh not in hashes:
+                    hashes.add(hh)
+                    queue.append(hh)
+    included = [events[i] for i in sorted(included_ids)]
+    included.sort(key=lambda e: str(e.get("ts", "")))
+
+    usage_map = _placement_usage(pack)
+
+    # Nodes: one per content hash; the event that PRODUCED the hash (first
+    # after_hash appearance) carries its op/actor/gen. A hash seen only as a
+    # before_hash predates the journal (baseline bytes).
+    nodes: dict[str, dict] = {}
+    for e in included:
+        for h in (e.get("before_hash"), e.get("after_hash")):
+            if h and h not in nodes:
+                nodes[h] = {
+                    "id": h, "facet": "data", "op": "baseline",
+                    "source": "", "actor": "", "ts": "",
+                    "gen": None, "artifacts": [], "current_of": [],
+                    "usage": {}, "detail": {},
+                }
+    for e in included:
+        h = e.get("after_hash")
+        aid = str(e.get("artifact_id", ""))
+        for hh in (e.get("before_hash"), e.get("after_hash")):
+            if hh and aid and aid not in nodes[hh]["artifacts"]:
+                nodes[hh]["artifacts"].append(aid)
+        if h and nodes[h]["op"] == "baseline":
+            nodes[h].update(
+                facet=_facet_for(e),
+                op=str(e.get("op", "")),
+                source=str(e.get("source", "")),
+                actor=str(e.get("actor", "")),
+                ts=str(e.get("ts", "")),
+                gen=e.get("gen"),
+                detail={
+                    k: v for k, v in (e.get("detail") or {}).items()
+                    if k in ("kind", "path", "band", "tile", "type")
+                },
+            )
+    # A before-only node (bytes that predate the journal) inherits the facet
+    # AND routing detail (band index, tile name) of the edit that consumed
+    # it — otherwise the original band art has no restore target.
+    for e in included:
+        b = e.get("before_hash")
+        if b and nodes[b]["op"] == "baseline":
+            if nodes[b]["facet"] == "data":
+                nodes[b]["facet"] = _facet_for(e)
+            if not nodes[b]["detail"]:
+                nodes[b]["detail"] = {
+                    k: v for k, v in (e.get("detail") or {}).items()
+                    if k in ("kind", "path", "band", "tile", "type")
+                }
+
+    # Current version + usage badges per artifact (latest after_hash wins —
+    # facet-scoped so a row edit doesn't unseat the current sprite).
+    latest: dict[tuple, str] = {}
+    for e in included:
+        h = e.get("after_hash")
+        if h:
+            latest[(str(e.get("artifact_id", "")), _facet_for(e))] = h
+    for (aid, facet), h in latest.items():
+        nodes[h]["current_of"].append(f"{aid}#{facet}")
+    for node in nodes.values():
+        for aid in node["artifacts"]:
+            if aid in usage_map:
+                node["usage"][aid] = usage_map[aid]
+
+    edges: list[dict] = []
+    for e in included:
+        after = e.get("after_hash")
+        if not after:
+            continue
+        detail = e.get("detail") or {}
+        base = {
+            "op": str(e.get("op", "")),
+            "kind": str(detail.get("kind", "")),
+            "actor": str(e.get("actor", "")),
+            "ts": str(e.get("ts", "")),
+            "gen": e.get("gen"),
+        }
+        # A restore's meaningful parent is the node it restored FROM
+        # (detail.to) — that's where the new branch hangs. The state it
+        # replaced stays as a secondary "replaced" edge.
+        restored_from = (
+            str(detail.get("to", ""))
+            if str(detail.get("kind", "")).endswith("_restore")
+            else ""
+        )
+        if restored_from and restored_from in nodes and restored_from != after:
+            edges.append({"from": restored_from, "to": after, **base})
+        before = e.get("before_hash")
+        if before and before != after:
+            edge = {"from": before, "to": after, **base}
+            if restored_from:
+                edge["kind"] = f"{base['kind']}:replaced"
+            edges.append(edge)
+
+    # Depths for the layered layout. Only STRUCTURAL edges participate — a
+    # restore's secondary ":replaced" edge points backward and closes a
+    # cycle (longest-path layering never terminates on cycles). The sweep
+    # is bounded anyway, so even a hand-crafted cyclic journal converges
+    # instead of hanging.
+    structural = [e for e in edges if not e["kind"].endswith(":replaced")]
+    incoming: dict[str, list[str]] = {h: [] for h in nodes}
+    for edge in structural:
+        incoming[edge["to"]].append(edge["from"])
+    depth: dict[str, int] = {h: 0 for h in nodes}
+    for _ in range(max(1, len(nodes))):
+        settled = True
+        for edge in structural:
+            d = depth[edge["from"]] + 1
+            if d > depth[edge["to"]] and d <= len(nodes):
+                depth[edge["to"]] = d
+                settled = False
+        if settled:
+            break
+    for h, node in nodes.items():
+        node["depth"] = depth[h]
+
+    # Requested = the artifact's current PRIMARY-facet version (an animated
+    # enemy centers on its row, not its frames.json).
+    priority = _PRIMARY_FACETS.get(artifact_id.split(":", 1)[0], ())
+    requested = next(
+        (
+            latest[(artifact_id, facet)]
+            for facet in priority
+            if (artifact_id, facet) in latest
+        ),
+        None,
+    )
+    if requested is None:
+        candidates = sorted(
+            (facet, h) for (aid, facet), h in latest.items() if aid == artifact_id
+        )
+        requested = candidates[0][1] if candidates else next(iter(nodes), None)
+    # Root: walk up from the requested node; earliest-ts parent wins forks.
+    root = requested
+    seen_up: set[str] = set()
+    while root and incoming.get(root) and root not in seen_up:
+        seen_up.add(root)
+        root = min(incoming[root], key=lambda h: nodes[h]["ts"])
+
+    node_list = sorted(nodes.values(), key=lambda n: (n["depth"], n["ts"]))
+    pruned = len(node_list) > max_nodes
+    if pruned:
+        keep = {n["id"] for n in node_list[:max_nodes]} | {requested, root}
+        node_list = [n for n in node_list if n["id"] in keep]
+        edges = [e for e in edges if e["from"] in keep and e["to"] in keep]
+
+    return {
+        "artifact_id": artifact_id,
+        "root_id": root,
+        "requested_node_id": requested,
+        "nodes": node_list,
+        "edges": edges,
+        "metadata": {
+            "total_nodes": len(nodes),
+            "max_depth": max((n["depth"] for n in node_list), default=0),
+            "pruned": pruned,
+        },
     }

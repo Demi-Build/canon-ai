@@ -60,7 +60,7 @@ var level_ids: Array
 var level_index := 0
 
 # --- world flow: (SPLASH ->) MAP -> START -> PLAYING -> END -> MAP ---
-enum GameState { MAP, START, PLAYING, END, SPLASH }
+enum GameState { MAP, START, PLAYING, END, SPLASH, ANIM_PREVIEW }
 var game_state: int = GameState.MAP
 var map_root: CanvasLayer
 var overlay_root: CanvasLayer
@@ -77,6 +77,36 @@ const SPLASH_FADE_S := 0.6
 var splash_root: CanvasLayer
 var splash_view: Node2D  # modulated for the fade (CanvasLayer can't be)
 var splash_t := 0.0  # counts down HOLD + FADE
+# ANIMATION VIEWER (PLAT_ANIM=<enemy:id|item:id|player>): every state of one
+# actor playing side by side instead of a level, so a sprite can be judged in
+# the surface that renders the game. Mirrors examples/platformer_play.py's
+# run_anim_preview; reuses _load_anim + _anim_index, so what it shows is what
+# the game selects. Like PLAT_LEVEL it returns from _ready before the splash.
+var anim_root: CanvasLayer
+var anim_t := 0.0
+var anim_cells: Array = []  # [{sprite, frames, durs, loop, label}]
+# PLAT_ANIM_MODE=grid|sequence. grid (default) is every state side by side on
+# its own clock — right for judging ONE pose. sequence walks the storyboard
+# through the game's OWN ladder so `jump → fall → land` plays as the one motion
+# it is. TAB toggles live. Mirrors platformer_play.run_anim_preview.
+var anim_mode := "grid"
+var anim_target := ""  # the PLAT_ANIM target, kept so TAB can re-enter
+var anim_seq: Dictionary = {}  # sequence-mode nodes, {} in grid mode
+var anim_seq_state := ""  # latched state (mirrors the game's clock latch)
+var anim_seq_t := 0.0
+var anim_is_enemy := false
+# PLAT_SANDBOX=1 — play with NO win condition and a HUD naming the animation
+# state the game picked and why. "How does it feel" is a question neither
+# viewer mode can answer.
+var sandbox_mode := false
+var sandbox_hud: Label
+var player_anim_why := ""  # the reason string from _player_anim_candidates
+# The animation VOCABULARY + selection LADDER as data (animation.json at the
+# pack root, written/edited by the user). Empty = this pack ships no override,
+# and the hand-written ladders below are used verbatim — they are proven
+# equivalent to the built-in defaults by an exhaustive parity test, so an
+# override-less pack cannot diverge from pygame.
+var anim_spec: Dictionary = {}
 # Verification-only: PLAT_TRAJ=<path> dumps every enemy's world position +
 # alerted flag per PLAYING frame (the pygame harness dumps the same format),
 # so the two surfaces' movement can be diffed in world space independent of
@@ -159,6 +189,14 @@ var checkpoints: Array = []
 # the game never depends on it.
 var music_player: AudioStreamPlayer = null
 var sfx_players := {}
+# Music resolves by POSITION (mirrors platformer_play.py): an active user
+# music_section > the level's own music_path > the stage default theme.
+# ``music_cur`` is the currently-loaded track ("" = stopped) — gated so a same
+# -track room switch, or staying inside a section, never restarts it.
+var music_cur := ""
+var stage_music_rel := ""
+var level_music_path := ""
+var level_music_sections: Array = []
 
 # Physics semantics from tileset slot metadata: category sets keyed by
 # tile-type int; volumes map tile-type -> params Dictionary.
@@ -271,9 +309,33 @@ func _ready() -> void:
 	status = $UI/Status
 	# Hearts HUD on the UI CanvasLayer (screen-space — a world node would
 	# scale and drift under camera zoom), below the status line.
+	if FileAccess.file_exists("res://animation.json"):
+		var spec_v: Variant = _load_json("res://animation.json")
+		if spec_v is Dictionary:
+			anim_spec = spec_v
+	sandbox_mode = OS.get_environment("PLAT_SANDBOX") != ""
 	hearts_root = Control.new()
 	hearts_root.position = Vector2(16, 44)
 	$UI.add_child(hearts_root)
+	if sandbox_mode:
+		# SANDBOX HUD — names the animation state the game just picked and WHY.
+		# Both come from _player_anim_candidates, the same ladder gameplay uses,
+		# so the HUD cannot describe a decision the game didn't make. Screen
+		# space, like the hearts, and on a panel because small text over a
+		# parallax backdrop is unreadable. Mirrors platformer_play's HUD.
+		sandbox_hud = Label.new()
+		sandbox_hud.position = Vector2(16, 76)
+		sandbox_hud.size = Vector2(520, 96)
+		sandbox_hud.add_theme_font_size_override("font_size", 15)
+		sandbox_hud.add_theme_color_override("font_color", Color(0.94, 0.925, 0.97))
+		var bg := StyleBoxFlat.new()
+		bg.bg_color = Color(0.07, 0.059, 0.094, 0.82)
+		bg.content_margin_left = 10.0
+		bg.content_margin_right = 10.0
+		bg.content_margin_top = 7.0
+		bg.content_margin_bottom = 7.0
+		sandbox_hud.add_theme_stylebox_override("normal", bg)
+		$UI.add_child(sandbox_hud)
 	camera = Camera2D.new()
 	add_child(camera)
 	camera.make_current()
@@ -302,6 +364,14 @@ func _ready() -> void:
 			var pair := token.split(":")
 			if pair.size() == 2:
 				_actions[int(pair[0])] = String(pair[1]).strip_edges()
+	# Animation viewer hook: PLAT_ANIM=<enemy:id|item:id|player> shows one
+	# actor's states instead of playing — no map, no level, no physics.
+	var env_anim := OS.get_environment("PLAT_ANIM")
+	if env_anim != "":
+		var env_mode := OS.get_environment("PLAT_ANIM_MODE").strip_edges()
+		anim_mode = "sequence" if env_mode == "sequence" else "grid"
+		_enter_anim_preview(env_anim)
+		return
 	# Verification/debug hook: PLAT_LEVEL=<level id> starts on that level
 	# DIRECTLY (no map, no start overlay — frame-capture runs verify any
 	# level without input).
@@ -391,6 +461,312 @@ func _dismiss_splash() -> void:
 		splash_root.queue_free()
 		splash_root = null
 		splash_view = null
+
+
+func _anim_preview_sprite_rel(target: String) -> String:
+	# PLAT_ANIM grammar, identical to platformer_play._anim_preview_targets:
+	# enemy:<id> | item:<id> | player.
+	if target == "player":
+		return "sprite/player/base.png"
+	var parts := target.split(":")
+	if parts.size() == 2 and (parts[0] == "enemy" or parts[0] == "item"):
+		return "sprite/%s/%s/base.png" % [parts[0], parts[1]]
+	return ""
+
+
+func _enter_anim_preview(target: String) -> void:
+	# One column per animation state, each on its own clock and loop mode, over
+	# the baseline the frames are bottom-anchored to. Frames come from
+	# _load_anim (atlas → strips → static ladder) and are selected by
+	# _anim_index, so this shows exactly what gameplay would show — the point
+	# is to judge the art, not to re-implement playback.
+	anim_target = target
+	anim_is_enemy = target.begins_with("enemy:")
+	anim_seq = {}
+	anim_seq_state = ""
+	anim_seq_t = 0.0
+	anim_root = CanvasLayer.new()
+	anim_root.layer = 30
+	add_child(anim_root)
+	var view := Node2D.new()
+	anim_root.add_child(view)
+	var vp := get_viewport_rect().size
+	var bg := ColorRect.new()
+	bg.color = Color(0.10, 0.086, 0.133)
+	bg.size = vp
+	view.add_child(bg)
+
+	var title := Label.new()
+	title.text = target
+	title.add_theme_font_size_override("font_size", 28)
+	title.position = Vector2(24.0, 16.0)
+	title.size = Vector2(vp.x, 40.0)
+	view.add_child(title)
+
+	var sprite_rel := _anim_preview_sprite_rel(target)
+	var anim := _load_anim(sprite_rel) if sprite_rel != "" else {}
+	var states: Array = []
+	if anim.has("states"):
+		states = (anim["states"] as Dictionary).keys()
+		states.sort()
+	anim_cells = []
+	if states.is_empty():
+		var miss := Label.new()
+		miss.text = (
+			"no animation for %s — 🎨 generate a sprite, then 🎬 animate" % target
+			if sprite_rel != "" else "unknown target %s" % target
+		)
+		miss.add_theme_font_size_override("font_size", 20)
+		miss.position = Vector2(24.0, 96.0)
+		miss.size = Vector2(vp.x, 40.0)
+		view.add_child(miss)
+	elif anim_mode == "sequence":
+		_build_anim_sequence(view, anim, vp)
+	else:
+		# One cell per state, laid out across the viewport and centered.
+		var cell := minf(220.0, (vp.x - 48.0) / float(states.size()))
+		var box := cell - 16.0
+		var top := maxf(96.0, (vp.y - box) / 2.0 - 40.0)
+		var baseline := top + box
+		var left := (vp.x - cell * states.size()) / 2.0
+		for i in range(states.size()):
+			var state := String(states[i])
+			var frames: Array = (anim["states"] as Dictionary)[state]
+			if frames.is_empty():
+				continue
+			var x := left + i * cell
+			var pane := ColorRect.new()
+			pane.color = Color(0.157, 0.133, 0.204)
+			pane.position = Vector2(x, top)
+			pane.size = Vector2(box, box)
+			view.add_child(pane)
+			var floor_line := ColorRect.new()
+			floor_line.color = Color(0.337, 0.29, 0.408)
+			floor_line.position = Vector2(x, baseline)
+			floor_line.size = Vector2(box, 1.0)
+			view.add_child(floor_line)
+			# Zoom lives on a HOLDER, not on the Sprite2D. An atlas frame is an
+			# AtlasTexture that draws its trimmed region at a per-frame margin
+			# offset; scaling the sprite itself leaves that offset unscaled, so
+			# frames drift off the baseline (death sat ~70px high). A parent
+			# transform scales the offset and the region together. Scale comes
+			# from the NOMINAL square (CELL) — never a texture's reported size,
+			# which varies per frame — matching gameplay, where _actor_visual
+			# sets the scale ONCE from base.png and then swaps textures.
+			# Integer scale: pixel art shimmers at fractional zoom.
+			var s := maxf(1.0, floorf(box / CELL))
+			var holder := Node2D.new()
+			holder.scale = Vector2(s, s)
+			holder.position = Vector2(
+				x + (box - CELL * s) / 2.0, baseline - CELL * s
+			)
+			view.add_child(holder)
+			var sprite := Sprite2D.new()
+			sprite.centered = false
+			sprite.texture_filter = tile_filter
+			sprite.texture = frames[0]
+			holder.add_child(sprite)
+			var name_label := Label.new()
+			name_label.text = state
+			name_label.add_theme_font_size_override("font_size", 16)
+			name_label.position = Vector2(x, baseline + 8.0)
+			name_label.size = Vector2(cell, 22.0)
+			view.add_child(name_label)
+			var meta_label := Label.new()
+			meta_label.add_theme_font_size_override("font_size", 13)
+			meta_label.position = Vector2(x, baseline + 30.0)
+			meta_label.size = Vector2(cell, 20.0)
+			view.add_child(meta_label)
+			anim_cells.append({
+				"sprite": sprite,
+				"frames": frames,
+				"durs": (anim["durs"] as Dictionary).get(state, [0.12]),
+				"loop": String((anim["loops"] as Dictionary).get(state, "loop")),
+				"label": meta_label,
+				"state": state,
+			})
+
+	var help := Label.new()
+	help.text = "TAB grid/sequence   SPACE replay   ESC quit"
+	help.add_theme_font_size_override("font_size", 14)
+	help.position = Vector2(24.0, vp.y - 40.0)
+	help.size = Vector2(vp.x, 24.0)
+	view.add_child(help)
+	var mode_lbl := Label.new()
+	mode_lbl.text = anim_mode
+	mode_lbl.add_theme_font_size_override("font_size", 14)
+	mode_lbl.position = Vector2(vp.x - 220.0, 22.0)
+	mode_lbl.size = Vector2(200.0, 20.0)
+	mode_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	view.add_child(mode_lbl)
+	anim_t = 0.0
+	game_state = GameState.ANIM_PREVIEW
+	input_armed = false
+
+
+func _build_anim_sequence(view: Node2D, anim: Dictionary, vp: Vector2) -> void:
+	# ONE large actor playing the chain the game's ladder picks, over a timeline
+	# of the storyboard. Mirrors platformer_play._draw_anim_sequence: it draws,
+	# it decides nothing — the state comes from _sequence_at + _anim_pick, the
+	# same machinery gameplay uses, so it cannot drift from what the game shows.
+	var box := minf(360.0, vp.y - 300.0)
+	var top := 96.0
+	var baseline := top + box
+	var left := 48.0
+	var pane := ColorRect.new()
+	pane.color = Color(0.157, 0.133, 0.204)
+	pane.position = Vector2(left, top)
+	pane.size = Vector2(box, box)
+	view.add_child(pane)
+	var floor_line := ColorRect.new()
+	floor_line.color = Color(0.337, 0.29, 0.408)
+	floor_line.position = Vector2(left, baseline)
+	floor_line.size = Vector2(box, 1.0)
+	view.add_child(floor_line)
+	# Zoom on a HOLDER, never the Sprite2D — an atlas frame is an AtlasTexture
+	# drawing its trimmed region at a per-frame margin offset, and scaling the
+	# sprite leaves that offset unscaled (the phase-1 bug). Same trick as grid.
+	var s := maxf(1.0, floorf(box / CELL))
+	var holder := Node2D.new()
+	holder.scale = Vector2(s, s)
+	holder.position = Vector2(left + (box - CELL * s) / 2.0, baseline - CELL * s)
+	view.add_child(holder)
+	var sprite := Sprite2D.new()
+	sprite.centered = false
+	sprite.texture_filter = tile_filter
+	holder.add_child(sprite)
+
+	var y := baseline + 16.0
+	var state_lbl := Label.new()
+	state_lbl.add_theme_font_size_override("font_size", 26)
+	state_lbl.position = Vector2(left, y)
+	state_lbl.size = Vector2(vp.x - left, 32.0)
+	view.add_child(state_lbl)
+	var why_lbl := Label.new()
+	why_lbl.add_theme_font_size_override("font_size", 15)
+	why_lbl.position = Vector2(left, y + 34.0)
+	why_lbl.size = Vector2(vp.x - left, 22.0)
+	view.add_child(why_lbl)
+	var ladder_lbl := Label.new()
+	ladder_lbl.add_theme_font_size_override("font_size", 14)
+	ladder_lbl.position = Vector2(left, y + 58.0)
+	ladder_lbl.size = Vector2(vp.x - left, 22.0)
+	view.add_child(ladder_lbl)
+
+	# The storyboard as a bar: each segment proportional to its duration, the
+	# current one lit, so the chain reads as one motion with a playhead.
+	var segs: Array = ENEMY_SEQUENCE if anim_is_enemy else ANIM_SEQUENCE
+	var total := 0.0
+	for seg in segs:
+		total += float(seg[0])
+	var bar_y := y + 92.0
+	var bar_w := vp.x - left * 2.0
+	var rects: Array = []
+	var bx := left
+	for seg in segs:
+		var w := bar_w * float(seg[0]) / total
+		var r := ColorRect.new()
+		r.color = Color(0.19, 0.165, 0.243)
+		r.position = Vector2(bx, bar_y)
+		r.size = Vector2(maxf(2.0, w - 3.0), 10.0)
+		view.add_child(r)
+		rects.append(r)
+		bx += w
+	var playhead := ColorRect.new()
+	playhead.color = Color(0.925, 0.906, 0.961)
+	playhead.size = Vector2(2.0, 16.0)
+	playhead.position = Vector2(left, bar_y - 3.0)
+	view.add_child(playhead)
+	anim_seq = {
+		"sprite": sprite,
+		"anim": anim,
+		"state": state_lbl,
+		"why": why_lbl,
+		"ladder": ladder_lbl,
+		"rects": rects,
+		"playhead": playhead,
+		"bar_left": left,
+		"bar_w": bar_w,
+		"total": total,
+	}
+
+
+func _anim_preview_process(delta: float) -> void:
+	# SPACE rewinds every clock so the `once` states (jump/land/hurt/death),
+	# which hold their last frame by design, can be replayed.
+	if input_armed and Input.is_key_pressed(KEY_SPACE):
+		anim_t = 0.0
+		input_armed = false
+	# TAB toggles grid ↔ sequence — a toggle, not a replacement: the grid is
+	# still the right tool for judging a single pose. Rebuild in place.
+	if input_armed and Input.is_key_pressed(KEY_TAB):
+		input_armed = false
+		anim_mode = "grid" if anim_mode == "sequence" else "sequence"
+		if anim_root != null:
+			anim_root.queue_free()
+			anim_root = null
+		anim_cells = []
+		_enter_anim_preview(anim_target)
+		return
+	anim_t += delta
+	if not anim_seq.is_empty():
+		_anim_sequence_process(delta)
+		return
+	for cell in anim_cells:
+		var frames: Array = cell["frames"]
+		var i := _anim_index(anim_t, cell["durs"], cell["loop"])
+		i = clampi(i, 0, frames.size() - 1)
+		(cell["sprite"] as Sprite2D).texture = frames[i]
+		(cell["label"] as Label).text = "%d/%d %s" % [
+			i + 1, frames.size(), cell["loop"]
+		]
+
+
+func _anim_sequence_process(delta: float) -> void:
+	# Drive the storyboard through the game's OWN ladder. The viewer never
+	# names a state itself — _sequence_at builds candidates, _anim_pick chooses,
+	# and the state-change latch mirrors gameplay so a "once" state such as
+	# `land` restarts from frame 0 every pass through the chain.
+	anim_seq_t += delta
+	var anim: Dictionary = anim_seq["anim"]
+	var states: Dictionary = anim["states"]
+	var res := _sequence_at(anim_t, anim_is_enemy)
+	var cand: Array = res[0]
+	var state := _anim_pick(cand, states)
+	if state != anim_seq_state:
+		anim_seq_state = state
+		anim_seq_t = 0.0
+	var frames: Array = states[state]
+	var i := clampi(
+		_anim_index(anim_seq_t, anim["durs"][state], str(anim["loops"][state])),
+		0,
+		frames.size() - 1,
+	)
+	(anim_seq["sprite"] as Sprite2D).texture = frames[i]
+	(anim_seq["state"] as Label).text = "%s   %d/%d %s" % [
+		state, i + 1, frames.size(), str(anim["loops"][state])
+	]
+	(anim_seq["why"] as Label).text = String(res[1])
+	# The ladder that produced the pick, winner marked. A pick below the head
+	# means that state has no art and the game fell through to this one.
+	# The winner is the FIRST candidate that exists, so mark by INDEX — a state
+	# like `walk` appears twice in the ladder and only one occurrence won.
+	var parts: PackedStringArray = []
+	var win_i := cand.find(state)
+	for j in range(cand.size()):
+		parts.append(("[%s]" % cand[j]) if j == win_i else String(cand[j]))
+	(anim_seq["ladder"] as Label).text = " > ".join(parts)
+	var rects: Array = anim_seq["rects"]
+	var seg_i := int(res[2])
+	for j in range(rects.size()):
+		(rects[j] as ColorRect).color = (
+			Color(0.424, 0.376, 0.518) if j == seg_i else Color(0.19, 0.165, 0.243)
+		)
+	var total := float(anim_seq["total"])
+	var u := fmod(anim_t, total) / total if total > 0.0 else 0.0
+	(anim_seq["playhead"] as ColorRect).position.x = (
+		float(anim_seq["bar_left"]) + float(anim_seq["bar_w"]) * u
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +1093,16 @@ func _stage_for_id(level_id: String) -> String:
 	var m := _room_id_re.search(level_id)
 	if m != null and level_stage.has(m.get_string(1)):
 		return str(level_stage[m.get_string(1)])
+	# DRAFT levels (`canon level create`, and the sandbox room) live on disk but
+	# are deliberately kept OUT of the manifest until `level publish`, so the
+	# lookups above cannot see them. Fall back to disk — the same fix
+	# platformer_play._stage_for and export_level_bundle both needed.
+	for st in manifest.get("stages", []):
+		var sid := str((st as Dictionary).get("stage_id", ""))
+		if sid != "" and FileAccess.file_exists(
+			"res://level/%s/%s/level.json" % [sid, level_id]
+		):
+			return sid
 	return stage_id
 
 
@@ -749,6 +1135,10 @@ func _load_level_by_id(level_id: String, preserve := false, arrive: Variant = nu
 	for k in (level.get("rules_overrides", {}) as Dictionary):
 		rules[k] = level["rules_overrides"][k]
 	break_delay_s = float(rules.get("break_delay_s", 0.6))
+	# Per-level music override (additive) — the resolver falls back to the
+	# stage theme when these are empty. Read here; applied after spawn/axis.
+	level_music_path = str(level.get("music_path", ""))
+	level_music_sections = level.get("music_sections", [])
 	grid = _load_json(base + "/collision.grid.json")["collision"]
 	terrain = _load_json(base + "/terrain.grid.json")["terrain"]
 	tile_fuses.clear()  # per-level breakable state (broken tiles reset on reload)
@@ -766,6 +1156,10 @@ func _load_level_by_id(level_id: String, preserve := false, arrive: Variant = nu
 	# past the level bounds.
 	var vp := get_viewport_rect().size
 	layout_axis = str(level.get("layout_axis", "horizontal"))
+	# Seed music for this level from the spawn cell (stage default unless the
+	# level/room carries its own track). Per-frame section swaps happen in
+	# _process; a same-track room switch is gated out by music_cur.
+	_apply_music(_music_cell(spawn))
 	var k: float
 	if layout_axis == "vertical":
 		var vr_override: Variant = level.get("view_rows")
@@ -1606,10 +2000,12 @@ func _load_atlas_anim(base_dir: String) -> Dictionary:
 	var loops := {}
 	for state in sdict:
 		var m: Dictionary = sdict[state]
-		var texs := _atlas_frames(sheet, m.get("frames", []), fw, fh)
+		var rects: Variant = m.get("frames", [])
+		var offs := _anim_offsets(m, (rects as Array).size() if typeof(rects) == TYPE_ARRAY else 0)
+		var texs := _atlas_frames(sheet, rects, fw, fh, offs)
 		if texs.is_empty():
 			continue
-		var left := _atlas_frames(sheet, m.get("frames_left", []), fw, fh)
+		var left := _atlas_frames(sheet, m.get("frames_left", []), fw, fh, offs)
 		if left.size() == texs.size():
 			states_left[state] = left
 		states[state] = texs
@@ -1623,24 +2019,65 @@ func _load_atlas_anim(base_dir: String) -> Dictionary:
 	}
 
 
-func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int) -> Array:
-	# AtlasTexture margin re-inflates a trimmed crop: the reported size
-	# becomes the untrimmed frame square, so scale/anchor math holds.
+func _anim_offsets(m: Dictionary, n: int) -> Array:
+	# Per-frame authored nudges [[dx, dy], ...] in FRAME pixel space — a human
+	# correction to where generation seated a frame. Honored only when the list
+	# matches the frame count, the same contract "durations_ms" follows, so a
+	# desynced hand-edit degrades to "no offsets" rather than silently shifting
+	# the wrong frames. Absent => every offset is (0, 0) and the render is
+	# byte-identical to a pack without the field.
+	# Mirror of platformer_play._anim_offsets.
+	var raw: Variant = m.get("offsets")
+	var offs: Array = []
+	if typeof(raw) == TYPE_ARRAY and (raw as Array).size() == n:
+		for pair in raw:
+			if typeof(pair) == TYPE_ARRAY and (pair as Array).size() >= 2:
+				offs.append(Vector2i(int(pair[0]), int(pair[1])))
+			else:
+				offs.append(Vector2i(0, 0))
+	else:
+		for i in range(n):
+			offs.append(Vector2i(0, 0))
+	return offs
+
+
+func _atlas_frames(sheet: Texture2D, rects: Variant, fw: int, fh: int, offsets: Array = []) -> Array:
+	# Reconstitute each UNTRIMMED frame: blit the trimmed crop at its (ox, oy)
+	# offset onto a transparent fw x fh square. Byte-for-byte the same
+	# construction as platformer_play._atlas_frames, which is the point — both
+	# surfaces must register frames identically.
+	#
+	# This REPLACED an AtlasTexture-with-margin approach that was meant to
+	# re-inflate the crop to the full square. Measured: the vertical margin was
+	# not applied, so any frame whose content did not touch the top of its
+	# square drew exactly oy pixels too high — ember_hopper's `death` sat 12px
+	# (of 32) high, and an actor visibly hopped between poses. pygame, which
+	# always built real squares, disagreed. Real squares here too: costs a
+	# little texture memory at 32px, removes a whole class of drift.
 	var texs: Array = []
 	if typeof(rects) != TYPE_ARRAY:
+		return texs
+	var sheet_image := sheet.get_image()
+	if sheet_image == null:
 		return texs
 	for r in rects:
 		if typeof(r) != TYPE_DICTIONARY:
 			return []
 		var w := int(r.get("w", 0))
 		var h := int(r.get("h", 0))
-		var ox := int(r.get("ox", 0))
-		var oy := int(r.get("oy", 0))
-		var atlas := AtlasTexture.new()
-		atlas.atlas = sheet
-		atlas.region = Rect2(int(r.get("x", 0)), int(r.get("y", 0)), w, h)
-		atlas.margin = Rect2(ox, oy, fw - w - ox, fh - h - oy)
-		texs.append(atlas)
+		if w <= 0 or h <= 0:
+			return []
+		var frame_image := Image.create(fw, fh, false, sheet_image.get_format())
+		frame_image.fill(Color(0, 0, 0, 0))
+		var nudge: Vector2i = Vector2i(0, 0)
+		if texs.size() < offsets.size():
+			nudge = offsets[texs.size()]
+		frame_image.blit_rect(
+			sheet_image,
+			Rect2i(int(r.get("x", 0)), int(r.get("y", 0)), w, h),
+			Vector2i(int(r.get("ox", 0)) + nudge.x, int(r.get("oy", 0)) + nudge.y),
+		)
+		texs.append(ImageTexture.create_from_image(frame_image))
 	return texs
 
 
@@ -1719,6 +2156,223 @@ func _anim_pick(candidates: Array, states: Dictionary) -> String:
 	return str(states.keys()[0])
 
 
+func _truthy(v: Variant) -> bool:
+	# Python's bool(): null/0/"" are false. A signal the engine didn't send
+	# reads as false, so `{"on_ground": false}` still matches.
+	if v == null:
+		return false
+	if v is bool:
+		return v
+	if v is int or v is float:
+		return float(v) != 0.0
+	return true
+
+
+func _holds(cond: Variant, value: Variant) -> bool:
+	# One signal test. Unknown ops fail CLOSED — a typo must not make a rule
+	# always fire. Mirror of animation_spec._holds.
+	if cond is Dictionary:
+		for op in (cond as Dictionary):
+			var want: Variant = (cond as Dictionary)[op]
+			if op == "eq":
+				if value != want:
+					return false
+			elif op in ["gt", "lt", "gte", "lte"]:
+				if not (value is int or value is float):
+					return false
+				var a := float(value)
+				var b := float(want)
+				if op == "gt" and not (a > b):
+					return false
+				if op == "lt" and not (a < b):
+					return false
+				if op == "gte" and not (a >= b):
+					return false
+				if op == "lte" and not (a <= b):
+					return false
+			else:
+				return false
+		return true
+	if cond is bool:
+		return _truthy(value) == (cond as bool)
+	return value == cond
+
+
+func _eval_ladder(
+	rules: Array, signals: Dictionary, tail: Array, default_why: String
+) -> Array:
+	# [candidates in priority order, why]. Every rule whose condition holds
+	# contributes its state, in declaration order; `why` comes from the FIRST
+	# match. Mirror of animation_spec.eval_ladder.
+	var picked: Array = []
+	var why := default_why
+	var use_tail: Array = tail
+	for rule in rules:
+		var rd: Dictionary = rule
+		var when_d: Dictionary = rd.get("when", {})
+		var ok := true
+		for sig in when_d:
+			if not _holds(when_d[sig], signals.get(sig)):
+				ok = false
+				break
+		if not ok:
+			continue
+		var state := String(rd.get("state", ""))
+		if state != "" and not picked.has(state):
+			picked.append(state)
+		if picked.size() == 1:
+			why = String(rd.get("why", default_why))
+			var rt: Variant = rd.get("tail")
+			if rt is Array:
+				use_tail = rt
+	var out: Array = picked.duplicate()
+	for st in use_tail:
+		if not out.has(String(st)):
+			out.append(String(st))
+	return [out, why]
+
+
+func _spec_ladder(kind: String, signals: Dictionary) -> Array:
+	# The data ladder for `kind`, or [] when this pack ships no override.
+	if anim_spec.is_empty():
+		return []
+	var ladders: Dictionary = anim_spec.get("ladders", {})
+	if not ladders.has(kind):
+		return []
+	var tails: Dictionary = anim_spec.get("tails", {})
+	var whys: Dictionary = anim_spec.get("why", {})
+	return _eval_ladder(
+		ladders[kind], signals, tails.get(kind, ["idle"]),
+		String(whys.get(kind, ""))
+	)
+
+
+func _player_anim_candidates(
+	on_ground: bool, vy: float, dx: float, vx: float, land_t: float,
+	submerged: bool = false
+) -> Array:
+	# Mirror of platformer_play.player_anim_candidates: returns
+	# [candidates, why]. ONE place decides which state gameplay wants, so the
+	# game, the sequence viewer and the sandbox HUD agree by construction.
+	var skid_now := dx != 0.0 and signf(vx) == -dx and absf(vx) > 0.5
+	var spec_res := _spec_ladder("player", {
+		"on_ground": on_ground,
+		"descending": vy > 0.0,
+		"moving": dx != 0.0,
+		"braking": skid_now,
+		"landing": land_t > 0.0,
+		"submerged": submerged,
+		"vy": vy,
+		"vx": vx,
+	})
+	if not spec_res.is_empty():
+		return spec_res
+	var cand: Array = []
+	var why := ""
+	if not on_ground:
+		if vy > 0.0:
+			cand.append("fall")
+			why = "airborne · past the peak"
+		else:
+			why = "airborne · rising"
+		cand.append("jump")
+	else:
+		var skid := dx != 0.0 and signf(vx) == -dx and absf(vx) > 0.5
+		if skid:
+			cand.append("skid")
+			why = "grounded · braking against momentum"
+		elif land_t > 0.0:
+			why = "grounded · touchdown window"
+		elif dx != 0.0:
+			why = "grounded · moving"
+		else:
+			why = "grounded · at rest"
+		if land_t > 0.0:
+			cand.append("land")
+		if dx != 0.0:
+			cand.append("walk")
+	cand.append_array(["idle", "walk"])
+	return [cand, why]
+
+
+func _enemy_anim_candidates(
+	alive: bool, hurt_t: float, grounded: bool, moving: bool
+) -> Array:
+	# Mirror of platformer_play.enemy_anim_candidates.
+	var spec_res := _spec_ladder("enemy", {
+		"alive": alive, "hurt": hurt_t > 0.0,
+		"grounded": grounded, "moving": moving, "submerged": false,
+	})
+	if not spec_res.is_empty():
+		return spec_res
+	if not alive:
+		return [["death", "hurt", "idle"], "defeated"]
+	var cand: Array = []
+	var why := "holding position"
+	if hurt_t > 0.0:
+		cand.append("hurt")
+		why = "recoiling from a hit"
+	elif not grounded:
+		why = "airborne (mid-hop)"
+	elif moving:
+		why = "moving along its path"
+	if not grounded:
+		cand.append("jump")
+	if moving:
+		cand.append("walk")
+	cand.append_array(["idle", "walk", "hurt", "death"])
+	return [cand, why]
+
+
+# Sequence-viewer storyboards (PLAT_ANIM_MODE=sequence) — the SIGNALS a real
+# play session would produce, walked in order, so `jump → fall → land` reads as
+# ONE motion. Mirrors platformer_play.ANIM_SEQUENCE / ENEMY_SEQUENCE exactly.
+# Player rows: [secs, on_ground, vy, dx, vx, land_t].
+const ANIM_SEQUENCE: Array = [
+	[0.8, true, 0.0, 0.0, 0.0, 0.0],
+	[1.2, true, 0.0, 1.0, 4.0, 0.0],
+	[0.45, false, -6.0, 1.0, 4.0, 0.0],
+	[0.65, false, 5.0, 1.0, 4.0, 0.0],
+	[0.25, true, 0.0, 1.0, 4.0, 0.12],
+	[0.5, true, 0.0, 1.0, 4.0, 0.0],
+	[0.5, true, 0.0, -1.0, 4.0, 0.0],
+	[0.7, true, 0.0, 0.0, 0.0, 0.0],
+]
+# Enemy rows: [secs, alive, hurt_t, grounded, moving].
+const ENEMY_SEQUENCE: Array = [
+	[0.9, true, 0.0, true, false],
+	[1.3, true, 0.0, true, true],
+	[0.5, true, 0.0, false, true],
+	[0.45, true, 0.2, true, true],
+	[0.7, true, 0.0, true, true],
+	[1.3, false, 0.0, true, false],
+]
+
+
+func _sequence_at(t: float, is_enemy: bool) -> Array:
+	# Walk the storyboard to time t (wrapping) → [candidates, why, seg_index].
+	# Mirror of platformer_play.sequence_at.
+	var segs: Array = ENEMY_SEQUENCE if is_enemy else ANIM_SEQUENCE
+	var total := 0.0
+	for s in segs:
+		total += float(s[0])
+	var u := fmod(t, total) if total > 0.0 else 0.0
+	var acc := 0.0
+	for i in range(segs.size()):
+		var seg: Array = segs[i]
+		if u < acc + float(seg[0]):
+			var r: Array = (
+				_enemy_anim_candidates(bool(seg[1]), float(seg[2]), bool(seg[3]), bool(seg[4]))
+				if is_enemy
+				else _player_anim_candidates(
+					bool(seg[1]), float(seg[2]), float(seg[3]), float(seg[4]), float(seg[5])
+				)
+			)
+			return [r[0], r[1], i]
+		acc += float(seg[0])
+	return [["idle"], "", segs.size() - 1]
+
+
 var player_vis_off := Vector2(4, 4)
 
 
@@ -1755,18 +2409,10 @@ func _spawn_player(preserve := false) -> void:
 
 
 func _setup_audio(audio: Dictionary) -> void:
-	var music_rel = audio.get("music")
-	if music_rel != null and str(music_rel) != "":
-		var stream := _load_audio_stream(str(music_rel))
-		if stream != null:
-			if "loop" in stream:
-				stream.loop = true
-			elif "loop_mode" in stream:
-				stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
-			music_player = AudioStreamPlayer.new()
-			music_player.stream = stream
-			add_child(music_player)
-			music_player.play()
+	# SFX stay per-stage (shared across a biome). MUSIC is resolved by
+	# position in _apply_music — record the stage default here; the actual
+	# (re)start happens on level load + per-frame section crossings.
+	stage_music_rel = str(audio.get("music", ""))
 	var sfx: Dictionary = audio.get("sfx", {})
 	for event in sfx:
 		var s := _load_audio_stream(str(sfx[event]))
@@ -1775,6 +2421,49 @@ func _setup_audio(audio: Dictionary) -> void:
 			p.stream = s
 			add_child(p)
 			sfx_players[str(event)] = p
+
+
+func _active_music(cell: int) -> String:
+	# Ported VERBATIM from platformer_play.py::_active_music so music switches
+	# at identical cells on both surfaces: a user music_section wins (its path,
+	# possibly "" = deliberate silence), else the level track, else the stage.
+	for sec in level_music_sections:
+		var s: Dictionary = sec
+		if int(s.get("start", 0)) <= cell and cell < int(s.get("end", 0)):
+			return str(s.get("music_path", ""))
+	if level_music_path != "":
+		return level_music_path
+	return stage_music_rel
+
+
+func _music_cell(pos: Vector2) -> int:
+	return int(pos.y if layout_axis == "vertical" else pos.x)
+
+
+func _apply_music(cell: int) -> void:
+	# (Re)start the resolved track only when it changes (gate on music_cur),
+	# freeing the previous player first (no leak). Best-effort — silence on any
+	# missing/failed stream. Called on level load + every frame while playing.
+	var resolved := _active_music(cell)
+	if resolved == music_cur:
+		return
+	if music_player != null:
+		music_player.queue_free()
+		music_player = null
+	music_cur = resolved
+	if resolved == "":
+		return
+	var stream := _load_audio_stream(resolved)
+	if stream == null:
+		return
+	if "loop" in stream:
+		stream.loop = true
+	elif "loop_mode" in stream:
+		stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	music_player = AudioStreamPlayer.new()
+	music_player.stream = stream
+	add_child(music_player)
+	music_player.play()
 
 
 func _load_audio_stream(rel: String) -> AudioStream:
@@ -2280,6 +2969,11 @@ func _process(delta: float) -> void:
 			if input_armed and Input.is_anything_pressed():
 				_enter_map()
 			return
+		GameState.ANIM_PREVIEW:
+			# Art review, not gameplay: no physics, no level, ESC (handled
+			# above) is the only way out.
+			_anim_preview_process(delta)
+			return
 		GameState.SPLASH:
 			# Hold, then fade (the VFX pool's countdown-modulate idiom);
 			# any key once armed skips straight to the map. _enter_map
@@ -2300,6 +2994,10 @@ func _process(delta: float) -> void:
 		level_time = 0.0
 		return
 	level_time += delta
+
+	# Live music switch: crossing into/out of a user music_section swaps the
+	# track (gated, cosmetic — never touches physics). Mirrors platformer_play.
+	_apply_music(_music_cell(player_pos))
 
 	var volume: Variant = _volume_params(player_pos.x, player_pos.y)
 	# Volume-ENTRY edge (prev-frame latch, the was_airborne idiom): one
@@ -2931,16 +3629,10 @@ func _process(delta: float) -> void:
 			enemy["anim_prev"] = pos
 			enemy["anim_t"] = float(enemy["anim_t"]) + delta
 			var st: Dictionary = anim["states"]
-			var cand: Array = []
-			if float(enemy["hurt_t"]) > 0.0:
-				cand.append("hurt")
-			if not bool(enemy["e_grounded"]):
-				# Hopper mid-hop (every other archetype keeps e_grounded
-				# true, so the candidate is safely universal).
-				cand.append("jump")
-			if moving:
-				cand.append("walk")
-			cand.append_array(["idle", "walk", "hurt", "death"])
+			var eres: Array = _enemy_anim_candidates(
+				true, float(enemy["hurt_t"]), bool(enemy["e_grounded"]), moving
+			)
+			var cand: Array = eres[0]
 			var state := _anim_pick(cand, st)
 			if state != str(enemy["anim_state"]):
 				# State-change latch: restart the clock so "once" states
@@ -3077,20 +3769,24 @@ func _process(delta: float) -> void:
 		# valid. Empty anim → the static base sprite stays (loud fallback).
 		if not player_anim.is_empty():
 			var pst: Dictionary = player_anim["states"]
-			var pcand: Array = []
-			if not on_ground:
-				if player_vy > 0.0:
-					pcand.append("fall")
-				pcand.append("jump")
-			else:
-				if dx != 0.0 and signf(player_vx) == -dx and absf(player_vx) > 0.5:
-					pcand.append("skid")
-				if land_t > 0.0:
-					pcand.append("land")
-				if dx != 0.0:
-					pcand.append("walk")
-			pcand.append_array(["idle", "walk"])
+			# The ladder lives in _player_anim_candidates — shared with the
+			# sequence viewer and the sandbox HUD.
+			var pres: Array = _player_anim_candidates(
+				on_ground, player_vy, dx, player_vx, land_t, volume != null
+			)
+			var pcand: Array = pres[0]
+			player_anim_why = String(pres[1])
 			var pstate := _anim_pick(pcand, pst)
+			if sandbox_hud != null:
+				# The ladder with the winner marked — a pick below the head
+				# means that state has no art and the game fell through.
+				var lad: PackedStringArray = []
+				var win_i := pcand.find(pstate)
+				for j in range(pcand.size()):
+					lad.append(("[%s]" % pcand[j]) if j == win_i else String(pcand[j]))
+				sandbox_hud.text = "state  %s\n%s\n%s\nsandbox · no win condition · R reset" % [
+					pstate, player_anim_why, " > ".join(lad)
+				]
 			if pstate != player_anim_state:
 				# State-change latch: restart the clock so "once" states
 				# (jump/land) play from frame 0. pygame mirrors inline.
@@ -3129,6 +3825,11 @@ func _process(delta: float) -> void:
 	# PORTAL, not a goal — without this gate, nearing the portal would
 	# mark the PARENT level beaten and jump to the world map.
 	if _in_room:
+		reached_exit = false
+	# The SANDBOX has no win condition (PLAT_SANDBOX): the exit is just
+	# another cell, so movement can keep being felt instead of the run
+	# ending the moment you touch it. Mirrors platformer_play.
+	if sandbox_mode:
 		reached_exit = false
 	if not won and reached_exit:
 		won = true

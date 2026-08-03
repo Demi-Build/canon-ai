@@ -77,6 +77,14 @@ def _world_map(ctx: Any, stages: list) -> dict[str, Any]:
     total = sum(len(stage.level_ids) for stage in stages)
     # Inter-stage gap: half a slot between biome clusters.
     slots = max(total + 0.5 * max(len(stages) - 1, 0), 1.0)
+    # Durable authoring layered over the computed layout. Empty = compute
+    # everything, so an un-authored pack is byte-identical to before this
+    # existed. The rng is consumed for EVERY node either way, so overriding a
+    # position can't shift the jitter of the nodes after it.
+    world = getattr(ctx.bible, "world", None)
+    overrides = dict(getattr(world, "map_nodes", None) or {})
+    authored_edges = list(getattr(world, "map_edges", None) or [])
+
     nodes: list[dict[str, Any]] = []
     edges: list[list[str]] = []
     cursor = 0.0
@@ -86,20 +94,37 @@ def _world_map(ctx: Any, stages: list) -> dict[str, Any]:
             x = (cursor + 0.5) / slots
             y = 0.5 + (0.14 if len(nodes) % 2 else -0.14)
             y += (rng.random() - 0.5) * 0.06
-            nodes.append(
-                {
-                    "level_id": level_id,
-                    "display_name": f"{stage_number}-{level_index}",
-                    "stage_id": stage.stage_id,
-                    "pos": [round(x, 4), round(y, 4)],
-                }
-            )
+            node: dict[str, Any] = {
+                "level_id": level_id,
+                "display_name": f"{stage_number}-{level_index}",
+                "stage_id": stage.stage_id,
+                "pos": [round(x, 4), round(y, 4)],
+            }
+            placed = overrides.get(level_id)
+            pos = (placed or {}).get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                node["pos"] = [round(float(pos[0]), 4), round(float(pos[1]), 4)]
+                # A hand-placed node is `manual` — that's what the lock and the
+                # map's provenance bar read. Only emitted once authoring has
+                # happened, so the default payload keeps its old shape.
+                node["origin"] = "manual"
+            nodes.append(node)
             if previous is not None:
                 edges.append([previous, level_id])
             previous = level_id
             cursor += 1.0
         cursor += 0.5  # biome cluster gap
-    return {"nodes": nodes, "edges": edges}
+
+    out: dict[str, Any] = {"nodes": nodes, "edges": edges}
+    if authored_edges:
+        # Authored connectivity REPLACES the derived chain: the chain is the
+        # starting point, not a floor. `edges` stays the plain [a, b] pair list
+        # every existing consumer reads; `edge_specs` carries the typing.
+        out["edges"] = [[e["a"], e["b"]] for e in authored_edges if e.get("a") and e.get("b")]
+        out["edge_specs"] = authored_edges
+    if getattr(world, "map_locked", False):
+        out["locked"] = True
+    return out
 
 
 def _run_warnings(ctx: Any) -> list[str]:

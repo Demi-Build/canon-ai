@@ -447,6 +447,14 @@ def _iter_hashed_files(bible: Any):
         for step, rel, stored in dense:
             if rel and stored:
                 yield f"{prefix}/{step}", rel, stored, level, f"{step}_hash"
+        # Per-level music override (additive): the level's own track gets
+        # pin/edit-detection like the masks. (Per-section tracks in
+        # music_sections are user-authored edits, out of the auto-stale set.)
+        if getattr(level, "music_path", "") and getattr(level, "music_hash", ""):
+            yield (
+                f"{prefix}/music", level.music_path, level.music_hash,
+                level, "music_hash",
+            )
         sparse = (
             ("hazards", level.hazards_hash),
             ("triggers", level.triggers_hash),

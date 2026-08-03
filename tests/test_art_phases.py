@@ -860,6 +860,23 @@ class TestFrameSegmentation:
         assert normalize_frames([]) == []
         assert frames_to_strip([]) is None
 
+    def test_thin_streak_is_rejected_as_an_artifact(self) -> None:
+        """Real failure (player `fall`): the model left a full-height 3px
+        streak beside the real poses. Its bbox is as tall as a frame but it has
+        almost no area, so it survived segmentation and inflated the state's
+        frame square — shrinking every real frame beside it."""
+        sheet = _blob_sheet(3, w=800, h=200)
+        draw = ImageDraw.Draw(sheet)
+        draw.rectangle([770, 0, 773, 199], fill=(40, 60, 200))  # the streak
+        crops = segment_frames(sheet)
+        assert len(crops) == 3, [c.size for c in crops]
+        assert all(c.width > 10 for c in crops)
+
+    def test_a_two_frame_cycle_is_never_halved(self) -> None:
+        # The area filter only runs with >2 crops, so a legitimate 2-frame
+        # cycle with uneven poses keeps both frames.
+        assert len(segment_frames(_blob_sheet(2))) == 2
+
     def test_strip_concatenates_frames(self) -> None:
         frames = normalize_frames(segment_frames(_blob_sheet(4)))
         strip = frames_to_strip(frames)
@@ -1156,3 +1173,216 @@ class TestAnimationQaEndToEnd:
             c["check"] == "animation_distinct" and not c["passed"]
             for c in player_checks
         )
+
+
+# ---------------------------------------------------------------------------
+# Cross-state scale consistency — the jump/fall "half the frame vanishes" bug
+# ---------------------------------------------------------------------------
+
+
+def _pose_sheet(n: int, blob_w: int, blob_h: int, cell: int) -> Image.Image:
+    """A sheet of ``n`` identical rectangular 'poses' of a fixed content size,
+    one per ``cell``-wide slot. Unlike ``_blob_sheet``'s circles, the pose's
+    ASPECT is controllable — which is what the real bug needs: an actor whose
+    idle silhouette is wide and whose jump silhouette is tall."""
+    img = Image.new("RGB", (cell * n, cell), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    for i in range(n):
+        cx = i * cell + cell // 2
+        cy = cell // 2
+        draw.rectangle(
+            [cx - blob_w // 2, cy - blob_h // 2, cx + blob_w // 2, cy + blob_h // 2],
+            fill=(40, 60, 200),
+        )
+    return img
+
+
+class _PoseEditBackend:
+    """Edit backend that draws a DIFFERENT-aspect pose per state, both at the
+    same apparent scale, keyed off the state name in the prompt. Mimics the
+    real failure: a squat idle and a taller (but not larger) jump tuck."""
+
+    trusted_alpha = True
+    model = "pose-stub"
+
+    #: (content width, content height) in generation pixels — the jump pose is
+    #: 1.35x the idle pose's height and slightly narrower, exactly as a tuck is.
+    POSES = {"idle": (300, 200), "jump": (240, 270)}
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def edit(self, image_bytes, prompt, width, height, references=None) -> bytes:
+        state = next((s for s in self.POSES if f" {s} animation" in prompt), "idle")
+        bw, bh = self.POSES[state]
+        n = max(1, width // height)
+        buf = io.BytesIO()
+        _pose_sheet(n, bw, bh, height).save(buf, format="PNG")
+        self.calls.append({"op": "edit", "state": state})
+        return buf.getvalue()
+
+
+def _content_box(frame: Image.Image) -> tuple[int, int]:
+    box = frame.convert("RGBA").getchannel("A").getbbox()
+    return (0, 0) if box is None else (box[2] - box[0], box[3] - box[1])
+
+
+class TestCrossStateScale:
+    """The reported bug: 'the character clips and half of the frame vanishes in
+    the jump'. Root cause — ``normalize_frames`` sized the frame square from
+    ONE state's crops, so every state's largest dimension was stretched to fill
+    the cell. An actor whose idle is wide and whose jump is tall therefore
+    rendered at two different scales, and `fall`/`jump` play on every jump."""
+
+    def _states(self, tmp_path: Path) -> dict[str, Image.Image]:
+        from examples.platformer_pack.art_phases import SpriteAnimationPhase
+        from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+
+        out = tmp_path / "out"
+        ctx = PipelineContext(
+            bible=Bible.empty(seed=SEED),
+            config=CanonConfig(seed=SEED, output_dir=out),
+            rng=random.Random(SEED),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        base_rel = "sprite/enemy/poser/base.png"
+        base_abs = out / base_rel
+        base_abs.parent.mkdir(parents=True, exist_ok=True)
+        base = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        ImageDraw.Draw(base).rectangle([8, 12, 24, 28], fill=(40, 60, 200, 255))
+        base.save(base_abs)
+
+        phase = SpriteAnimationPhase(
+            producer=DiffusionSheetProducer(_PoseEditBackend()),
+            graphics=DEFAULT_GRAPHICS,
+        )
+        spec = {
+            "idle": {"frames": 2, "motion": "sways"},
+            "jump": {"frames": 2, "motion": "tucks"},
+        }
+        result = phase._animate_actor(ctx, base_rel, spec, "enemy:poser")
+        assert set(result.get("states", {})) == {"idle", "jump"}, result
+        return {
+            st: Image.open(out / f"sprite/enemy/poser/{st}.png")
+            for st in ("idle", "jump")
+        }
+
+    def test_states_keep_their_relative_proportions(self, tmp_path: Path) -> None:
+        """The jump pose is 1.35x the idle pose's height in the SOURCE art, so
+        it must be ~1.35x on disk too. Before the fix both states independently
+        filled the cell, so this ratio collapsed to whatever each state's own
+        aspect happened to be."""
+        strips = self._states(tmp_path)
+        fw = {st: img.height for st, img in strips.items()}  # square frames
+        idle_w, idle_h = _content_box(strips["idle"].crop((0, 0, fw["idle"], fw["idle"])))
+        jump_w, jump_h = _content_box(strips["jump"].crop((0, 0, fw["jump"], fw["jump"])))
+
+        source_ratio = 270 / 200  # jump height / idle height, as drawn
+        assert idle_h > 0 and jump_h > 0
+        assert jump_h / idle_h == pytest.approx(source_ratio, rel=0.12), (
+            f"jump/idle height ratio {jump_h / idle_h:.2f} should track the "
+            f"source ratio {source_ratio:.2f} — idle {idle_w}x{idle_h}, "
+            f"jump {jump_w}x{jump_h}"
+        )
+
+    def test_no_state_is_stretched_to_fill_the_cell(self, tmp_path: Path) -> None:
+        """Only the actor's LARGEST pose may touch the cell edge. When every
+        state maxes out its own cell, the character visibly changes size the
+        instant its state changes — the reported defect."""
+        strips = self._states(tmp_path)
+        maxed = []
+        for st, img in strips.items():
+            side = img.height
+            w, h = _content_box(img.crop((0, 0, side, side)))
+            if max(w, h) >= side - 1:
+                maxed.append(f"{st} ({w}x{h} in {side}px)")
+        assert len(maxed) <= 1, f"more than one state fills its cell: {maxed}"
+
+
+class TestRenormalizeRepair:
+    """`canon asset animate --renormalize` — the free, backend-free reframe for
+    art generated before the per-actor fix."""
+
+    def _pack(self, tmp_path: Path) -> tuple:
+        from examples.platformer_pack.art_phases import SpriteAnimationPhase
+        from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+
+        out = tmp_path / "out"
+        ctx = PipelineContext(
+            bible=Bible.empty(seed=SEED),
+            config=CanonConfig(seed=SEED, output_dir=out),
+            rng=random.Random(SEED),
+            llm=LLMClient(FakeLLMBackend(make_fake_responder())),
+            prompts=PlatformerPrompts(),
+        )
+        base_rel = "sprite/enemy/poser/base.png"
+        (out / base_rel).parent.mkdir(parents=True, exist_ok=True)
+        base = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        ImageDraw.Draw(base).rectangle([8, 12, 24, 28], fill=(40, 60, 200, 255))
+        base.save(out / base_rel)
+        phase = SpriteAnimationPhase(
+            producer=DiffusionSheetProducer(_PoseEditBackend()),
+            graphics=DEFAULT_GRAPHICS,
+        )
+        phase._animate_actor(
+            ctx,
+            base_rel,
+            {"idle": {"frames": 2, "motion": "s"}, "jump": {"frames": 2, "motion": "t"}},
+            "enemy:poser",
+        )
+        return ctx, phase, out, base_rel
+
+    def test_reframes_without_a_backend_and_keeps_playback_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        ctx, phase, out, base_rel = self._pack(tmp_path)
+        d = out / "sprite/enemy/poser"
+        before = json.loads((d / "frames.json").read_text())
+
+        result = phase._renormalize_actor(ctx, base_rel, "enemy:poser")
+
+        assert set(result["states"]) == {"idle", "jump"}
+        after = json.loads((d / "frames.json").read_text())
+        for state, meta in after.items():
+            # Playback metadata rides through verbatim — a reframe re-seats
+            # pixels, it never re-times or re-authors.
+            assert meta["frames"] == before[state]["frames"]
+            assert meta["loop"] == before[state]["loop"]
+            assert meta["durations_ms"] == before[state]["durations_ms"]
+        assert (d / "atlas.png").exists() and (d / "atlas.json").exists()
+
+    def test_gives_every_state_headroom(self, tmp_path: Path) -> None:
+        """The visible win: no state left flush against its cell edge."""
+        ctx, phase, out, base_rel = self._pack(tmp_path)
+        d = out / "sprite/enemy/poser"
+        # Bake the real pre-fix pathology: every state's content flush against
+        # its cell edge with zero headroom. (On the shipped packs this came from
+        # per-state sizing at generation scale, where the 4px pad rounded away
+        # in the downscale to 32; here we write that end state directly.)
+        for state, (cw, ch) in (("idle", (32, 22)), ("jump", (26, 32))):
+            n = json.loads((d / "frames.json").read_text())[state]["frames"]
+            strip = Image.new("RGBA", (32 * n, 32), (0, 0, 0, 0))
+            for i in range(n):
+                ImageDraw.Draw(strip).rectangle(
+                    [i * 32 + (32 - cw) // 2, 32 - ch,
+                     i * 32 + (32 - cw) // 2 + cw - 1, 31],
+                    fill=(40, 60, 200, 255),
+                )
+            strip.save(d / f"{state}.png")
+        flush_before = [
+            st for st in ("idle", "jump")
+            if max(_content_box(Image.open(d / f"{st}.png").crop((0, 0, 32, 32)))) >= 31
+        ]
+        assert len(flush_before) == 2, "fixture did not reproduce the flush-to-edge state"
+
+        phase._renormalize_actor(ctx, base_rel, "enemy:poser")
+
+        for st in ("idle", "jump"):
+            w, h = _content_box(Image.open(d / f"{st}.png").crop((0, 0, 32, 32)))
+            assert max(w, h) < 32, f"{st} still fills its cell ({w}x{h})"
+
+    def test_missing_frames_json_is_a_no_op(self, tmp_path: Path) -> None:
+        ctx, phase, out, base_rel = self._pack(tmp_path)
+        (out / "sprite/enemy/poser/frames.json").unlink()
+        assert phase._renormalize_actor(ctx, base_rel, "enemy:poser") == {}
