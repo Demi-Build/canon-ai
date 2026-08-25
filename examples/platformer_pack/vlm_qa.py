@@ -48,7 +48,7 @@ from examples.platformer_pack import color as color_math
 from examples.platformer_pack.art_phases import VFX_PROP_NAMES
 from examples.platformer_pack.combat import effective_size, occupancy
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
-from examples.platformer_pack.phases import _stamp_metadata, warn
+from examples.platformer_pack.phases import _stamp_metadata, step, warn
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.variants import DEFAULT_VARIANTS, VariantSet
 
@@ -1804,6 +1804,11 @@ class VlmQaPhase:
 
         all_checks: list[dict] = []
         all_levels: dict[str, dict] = {}
+        judged = 0
+        to_judge = sum(
+            len(_stage_level_and_room_ids(ctx, s))
+            for s in ctx.bible.stages.values()
+        )
         for stage_id, stage in ctx.bible.stages.items():
             checks = run_code_checks(
                 ctx, stage_id, tiles=self.tiles, graphics=self.graphics,
@@ -1816,6 +1821,8 @@ class VlmQaPhase:
                 level = ctx.bible.levels.get(level_id)
                 if level is None:
                     continue
+                judged += 1
+                step(ctx, self.name, level_id, index=judged, total=to_judge)
                 entry = self._judge_level(
                     ctx, stage, level, previous=previous.get(level_id)
                 )

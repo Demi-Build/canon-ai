@@ -149,10 +149,14 @@ class TestOrchestratedPath:
         assert events[-1]["event"] == "run_end" and events[-1]["ok"] is False
 
 
-def _run_slice_observed(output_dir: Path, seed: str = "emberfall_001"):
+def _run_slice_observed(
+    output_dir: Path, seed: str = "emberfall_001", image_producer=None
+):
     """The runner main()'s observability wiring, test-shaped: one stats
     object shared by the LLM client and the manifest snapshot + a
-    steplog."""
+    steplog. An ``image_producer`` turns the art phases ON — without one
+    they early-return, which is exactly the difference between a $0 run
+    and the paid run the progress display exists for."""
     stats = GenerationStats(llm_backend="fake")
     ctx = PipelineContext(
         bible=Bible.empty(seed=seed),
@@ -163,8 +167,115 @@ def _run_slice_observed(output_dir: Path, seed: str = "emberfall_001"):
         prompts=PlatformerPrompts(),
         steplog=StepLog(output_dir),
     )
-    run_pipeline(compose_pipeline(), ctx)
+    run_pipeline(compose_pipeline(image_producer=image_producer), ctx)
     return ctx
+
+
+def _fake_image_producer(tmp_path: Path):
+    """The art phases' $0 producer — same harness tests/test_art_phases.py
+    uses, so the art path here runs the real phase bodies."""
+    import io
+
+    from PIL import Image
+
+    from canon.backends.testing import FakeImageBackend
+    from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+
+    path = tmp_path / "blob.png"
+    if not path.exists():
+        img = Image.new("RGB", (64, 64), (255, 255, 255))
+        for y in range(16, 48):
+            for x in range(16, 48):
+                img.putpixel((x, y), (180, 40, 40))
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        path.write_bytes(buffer.getvalue())
+    return DiffusionSheetProducer(FakeImageBackend(placeholder=path))
+
+
+class TestSubPhaseProgress:
+    """`node_item` — the sub-phase heartbeat.
+
+    Phase-level events are enough for a $0 run (three seconds end to end).
+    A PAID run sits inside one node for minutes per asset, and a display
+    frozen on "Sprite art" for ten minutes is indistinguishable from a
+    crash — which is the whole reason cradle reads this file.
+    """
+
+    def test_step_is_a_noop_without_a_steplog(self) -> None:
+        from examples.platformer_pack.phases import step
+
+        class _Bare:
+            pass
+
+        step(_Bare(), "plat:sprite_art", "anything")  # must not raise
+
+    def test_step_carries_the_item_and_its_position(
+        self, tmp_path: Path
+    ) -> None:
+        from examples.platformer_pack.phases import step
+
+        ctx = _ctx(tmp_path)
+        step(ctx, "plat:sprite_art", "Cinder Beetle", index=3, total=15)
+        step(ctx, "plat:audio", "stage_1 · music")
+        first, second = _events(tmp_path)
+        assert first == {
+            "ts": first["ts"],
+            "event": "node_item",
+            "node": "phase:plat:sprite_art",
+            "item": "Cinder Beetle",
+            "index": 3,
+            "total": 15,
+        }
+        # An unknown count omits the fields rather than inventing a total.
+        assert "index" not in second and "total" not in second
+
+    def test_slice_reports_items_inside_the_long_phases(
+        self, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "run"
+        _run_slice_observed(
+            out, image_producer=_fake_image_producer(tmp_path)
+        )
+        items = [e for e in _events(out) if e["event"] == "node_item"]
+        assert items, "no sub-phase progress at all"
+        by_node: dict[str, list[dict]] = {}
+        for event in items:
+            by_node.setdefault(event["node"], []).append(event)
+        # The phases that dominate a paid run must all report.
+        assert {
+            "phase:plat:layout",
+            "phase:plat:sprite_art",
+            "phase:plat:tileset_art",
+            "phase:plat:backdrop_art",
+        } <= set(by_node)
+        # Every counted phase counts HONESTLY: 1..total, no gaps, and the
+        # promised total is the number actually delivered — a bar that stops
+        # at 12/15 reads as a hang.
+        for node, events in by_node.items():
+            counted = [e for e in events if "index" in e]
+            if not counted:
+                continue
+            total = counted[0]["total"]
+            assert [e["index"] for e in counted] == list(
+                range(1, len(counted) + 1)
+            ), node
+            assert all(e["total"] == total for e in counted), node
+            assert len(counted) == total, node
+
+    def test_progress_does_not_break_determinism(
+        self, tmp_path: Path
+    ) -> None:
+        """`node_item` is observability like every other event here: the
+        generated tree must not move a byte because of it."""
+        run_a, run_b = tmp_path / "a", tmp_path / "b"
+        producer = _fake_image_producer(tmp_path)
+        _run_slice_observed(run_a, image_producer=producer)
+        _run_slice_observed(run_b, image_producer=producer)
+        assert any(
+            e["event"] == "node_item" for e in _events(run_a)
+        ), "test would pass vacuously without progress events"
+        assert_trees_byte_identical(run_a, run_b)
 
 
 class TestSliceObservability:

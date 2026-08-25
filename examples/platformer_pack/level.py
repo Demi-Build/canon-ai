@@ -44,6 +44,7 @@ from examples.platformer_pack.phases import (
     _stamp_metadata,
     resolved_model,
     stamp_provenance,
+    step,
     warn,
 )
 from examples.platformer_pack.rules import (
@@ -2575,8 +2576,13 @@ class LayoutStampPhase:
         self.graphics = graphics
 
     def run(self, ctx: Any) -> None:
-        for stage in world_stages(ctx):
+        stages = list(world_stages(ctx))
+        done = 0
+        total = sum(len(s.level_ids) for s in stages)
+        for stage in stages:
             for index, level_id in enumerate(stage.level_ids):
+                done += 1
+                step(ctx, self.name, level_id, index=done, total=total)
                 level = stamp_level_collision(
                     ctx, level_id, index,
                     movement=self.movement, rules=self.rules, tiles=self.tiles,

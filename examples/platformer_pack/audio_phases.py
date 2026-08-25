@@ -23,7 +23,12 @@ from typing import Any
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import StageAudio
 from canon.pipeline.orchestrator import pinned_ids
-from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, warn
+from examples.platformer_pack.phases import (
+    _stamp_metadata,
+    stamp_provenance,
+    step,
+    warn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +180,7 @@ class AudioPhase:
                 parents=[make_artifact_id("stage", stage_id)],
             )
             if self.music is not None:
+                step(ctx, self.name, f"{stage_id} · music")
                 try:
                     data = self.music.generate(
                         (self.music_prompt_override or "").strip()
@@ -199,6 +205,7 @@ class AudioPhase:
                     )
             if self.sfx is not None:
                 for event, prompt, seconds, loop in SFX_EVENTS:
+                    step(ctx, self.name, f"{stage_id} · sfx {event}")
                     clamped = min(SFX_MAX_SECONDS, max(SFX_MIN_SECONDS, seconds))
                     try:
                         data = self.sfx.generate(

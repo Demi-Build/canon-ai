@@ -33,7 +33,12 @@ from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import Backdrop, PlayerDefinition, StageProps
 from canon.pipeline.orchestrator import pinned_ids
 from examples.platformer_pack.graphics import DEFAULT_GRAPHICS, GraphicsSpec
-from examples.platformer_pack.phases import _stamp_metadata, stamp_provenance, warn
+from examples.platformer_pack.phases import (
+    _stamp_metadata,
+    stamp_provenance,
+    step,
+    warn,
+)
 from examples.platformer_pack.style import background_role
 from examples.platformer_pack.tiles import DEFAULT_TILES, TileRegistry
 from examples.platformer_pack.tileset_art import (
@@ -182,6 +187,11 @@ class TilesetArtPhase:
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         by_name = {t.name: t for t in self.tiles.tiles}
         pinned = pinned_ids(ctx.bible)
+        done = 0
+        total = sum(
+            1 for sid, ts in ctx.bible.tilesets.items()
+            if (ts.artifact_id or f"tileset:{sid}") not in pinned
+        )
         for stage_id, tileset in ctx.bible.tilesets.items():
             # Status never gates a phase body — the pin guard must live
             # here too, or a re-run for another stage repaints pinned art.
@@ -191,6 +201,8 @@ class TilesetArtPhase:
                     stage_id,
                 )
                 continue
+            done += 1
+            step(ctx, self.name, stage_id, index=done, total=total)
             stage = ctx.bible.stages[stage_id]
             tile_px = self.graphics.tile_px
             drift_log = getattr(self.producer, "last_palette_drift", None)
@@ -367,6 +379,10 @@ class SpriteArtPhase:
         # bible filtered to ONE sprite, so it can't bleed onto siblings.
         # None = today's built prompt, byte-for-byte.
         self.prompt_override = prompt_override
+        # Sub-phase progress counters (observability only). `run` recomputes
+        # them; the single-asset op path never sets a total and just counts.
+        self._done = 0
+        self._total: int | None = None
 
     def owns(self, ctx: Any) -> list[str]:
         # An explicitly-regenerated enemy/item definition gets fresh art
@@ -399,6 +415,26 @@ class SpriteArtPhase:
         theme = stage.theme if stage else ""
         size = self.graphics.sprite_size()
         pinned = pinned_ids(ctx.bible)
+
+        # Exact sub-phase total: the same candidate sets the loops below walk,
+        # minus the pins they skip. Counted here rather than in `_generate`
+        # because this is the only place the pin guards are all visible.
+        self._done = 0
+        self._total = (
+            sum(
+                1 for eid, e in ctx.bible.enemy_definitions.items()
+                if (e.artifact_id or f"enemy:{eid}") not in pinned
+            )
+            + sum(
+                1 for iid, i in getattr(ctx.bible, "items", {}).items()
+                if (i.artifact_id or f"item:{iid}") not in pinned
+            )
+            + (0 if "player" in pinned else 1)
+            + len(PROP_SPECS) * sum(
+                1 for sid in ctx.bible.stages
+                if make_artifact_id("props", sid) not in pinned
+            )
+        )
 
         for enemy_id, enemy in ctx.bible.enemy_definitions.items():
             # The phase re-rolls the WHOLE roster whenever it runs (no
@@ -591,6 +627,13 @@ class SpriteArtPhase:
         theme: str, world_title: str, size: tuple[int, int],
     ) -> Any:
         """One sprite, or None after a loud fallback."""
+        # The one choke point every sprite in this phase passes through
+        # (enemies, items, the player, props) — so announcing progress here
+        # covers all four loops with one call. Emitted BEFORE the generate:
+        # on a paid backend this call is the minutes-long part, and the
+        # display's job is to name what is being waited on.
+        self._done += 1
+        step(ctx, self.name, name, index=self._done, total=self._total)
         # Only pass the override when set: the pipeline's call stays exactly
         # as it was, and a producer that predates the kwarg still works.
         extra = (
@@ -769,6 +812,9 @@ class SpriteAnimationPhase:
         # issued once per state per facing (6-12x a run) and a single override
         # would flatten the per-state silhouette contract _STATE_BRIEF enforces.
         self.prompt_override = prompt_override
+        # Sub-phase progress counters, as SpriteArtPhase (observability only).
+        self._done = 0
+        self._total: int | None = None
 
     def owns(self, ctx: Any) -> list[str]:
         # Same ids as SpriteArtPhase — a re-rolled sprite re-rolls its
@@ -810,6 +856,18 @@ class SpriteAnimationPhase:
             return
 
         pinned = pinned_ids(ctx.bible)
+        # Actor-level progress total (each actor is many paid calls — see the
+        # per-state events in `_sheet_frames`).
+        self._done = 0
+        self._total = sum(
+            1 for eid, e in ctx.bible.enemy_definitions.items()
+            if (e.artifact_id or f"enemy:{eid}") not in pinned
+        ) + (
+            1
+            if getattr(ctx.bible, "player", None) is not None
+            and "player" not in pinned
+            else 0
+        )
         for enemy_id, enemy in ctx.bible.enemy_definitions.items():
             if (enemy.artifact_id or f"enemy:{enemy_id}") in pinned:
                 logger.info(
@@ -861,6 +919,8 @@ class SpriteAnimationPhase:
         all leave the static base.png in place."""
         from examples.platformer_pack.vlm_qa import author_animation_spec
 
+        self._done += 1
+        step(ctx, self.name, actor_id, index=self._done, total=self._total)
         if not sprite_path:
             logger.info(
                 "SpriteAnimationPhase: %s has no sprite — static fallback.",
@@ -923,6 +983,11 @@ class SpriteAnimationPhase:
         from PIL import Image
 
         label = "sheet" if facing == "right" else f"{facing} sheet"
+        # The finest paid unit in the whole run: ONE img2img call per state
+        # per facing. No index/total — the state set is chosen per actor by
+        # the VLM, so a count up front would be a lie. The actor-level event
+        # in `_animate_one` carries the bar; this one carries the name.
+        step(ctx, self.name, f"{actor_id} · {state} {label}")
         prompt = _animation_sheet_prompt(state, motion, n_frames, facing=facing)
         ref = build_sheet_reference(base, n_frames, cell_px)
         ref_buf = io.BytesIO()
@@ -1361,6 +1426,11 @@ class BackdropArtPhase:
         world_title = ctx.bible.world.title if ctx.bible.world else ""
         bg_role = background_role(self.tiles)
         pinned = pinned_ids(ctx.bible)
+        done = 0
+        total = sum(
+            1 for sid in ctx.bible.stages
+            if make_artifact_id("backdrop", sid) not in pinned
+        )
         for stage_id, stage in ctx.bible.stages.items():
             if make_artifact_id("backdrop", stage_id) in pinned:
                 logger.info(
@@ -1368,6 +1438,8 @@ class BackdropArtPhase:
                     stage_id,
                 )
                 continue
+            done += 1
+            step(ctx, self.name, stage_id, index=done, total=total)
             tileset = ctx.bible.tilesets.get(stage_id)
             palette = tileset.palette if tileset else {}
             bg_hex = palette.get(bg_role, "#181820")
@@ -1498,6 +1570,7 @@ class WorldArtPhase:
             if tileset is not None:
                 palette = tileset.palette
                 break
+        step(ctx, self.name, world.title or "splash", index=1, total=1)
         try:
             img = self.producer.splash_image(
                 world.title, themes, palette, self.graphics

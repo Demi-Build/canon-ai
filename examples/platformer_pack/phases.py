@@ -68,6 +68,38 @@ def warn(ctx: Any, message: str) -> None:
     ctx.artifacts.setdefault("slice_warnings", []).append(message)
 
 
+def step(
+    ctx: Any,
+    phase: str,
+    item: str,
+    index: int | None = None,
+    total: int | None = None,
+) -> None:
+    """Emit one SUB-phase progress event on the run's StepLog.
+
+    The schedulers already log ``node_start``/``node_done`` per phase, which
+    is enough granularity for a $0 run (the whole thing is three seconds).
+    A paid run is not: ``plat:sprite_art`` alone can sit on one node for
+    minutes per asset, and a progress display frozen on "Sprite art" for ten
+    minutes is indistinguishable from a crash — which is the entire problem
+    a progress display exists to solve. So the phases that loop over PAID
+    work announce each item as they start it.
+
+    Observability only, exactly like the events the schedulers emit: a
+    context with no ``steplog`` (MazeWorld, most tests) writes nothing, and
+    nothing in the pipeline may read these back.
+    """
+    steplog = getattr(ctx, "steplog", None)
+    if steplog is None:
+        return
+    fields: dict[str, object] = {"node": f"phase:{phase}", "item": item}
+    if index is not None:
+        fields["index"] = index
+    if total is not None:
+        fields["total"] = total
+    steplog.emit("node_item", **fields)
+
+
 def resolved_model(ctx: Any, label: str) -> str:
     """The model id that ACTUALLY serves calls under this phase label:
     the per-agent table's answer when the backend honors per-request
