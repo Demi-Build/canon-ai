@@ -19,6 +19,7 @@ painting goes through a separate grid-import path. This is the sparse-layer half
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,21 @@ def _placement_diff(old: list[dict] | None, new: list[dict], id_key: str) -> dic
     return out
 
 
+#: The ``gen`` keys that carry MONEY (row P1-A6 / P.8.3). A multi-event verb
+#: stamps them on its first event only; every later event of the same op keeps
+#: the descriptive half of the block so lineage still reads model + prompt.
+_GEN_COST_KEYS = ("cost_usd", "cost_breakdown", "cost_accuracy")
+
+
+def _uncosted_gen(gen: dict | None) -> dict | None:
+    """``gen`` minus its cost keys — what the 2nd..Nth event of one op gets, so
+    a single billable leg is counted once (P.8.7)."""
+    if not gen:
+        return None
+    stripped = {k: v for k, v in gen.items() if k not in _GEN_COST_KEYS}
+    return stripped or None
+
+
 def apply_level_edit(
     pack_dir: str | Path,
     level_id: str,
@@ -107,12 +123,23 @@ def apply_level_edit(
     session: str | None = None,
     op: str = "edit",
     source: str = "user",
+    gen: dict | None = None,
+    gen_kind: str | None = None,
+    accuracy: str | None = None,
+    cost_error: str | None = None,
 ) -> dict:
     """Apply a sparse-layer edit, persist it, and journal the mutation.
 
     ``op``/``source`` default to a user edit; ``restore_level_step`` reuses this
     with ``op="restore"`` so reverting to an old version flows through the same
     write + journal path.
+
+    Row P1-A6: ``gen`` / ``gen_kind`` / ``accuracy`` / ``cost_error`` thread a
+    COSTED write through this same path (``generate_level_music`` repoints the
+    level through here, so its dollars belong on the event it already writes).
+    One op is ONE billable leg, so the cost rides the FIRST event emitted and
+    the remaining step events carry the gen block without its cost keys — the
+    dashboard therefore counts each op exactly once (P.8.7's one-number rule).
     """
     pack = Path(pack_dir)
     level_dir, stage_id = _find_level_dir(pack, level_id)
@@ -121,6 +148,7 @@ def apply_level_edit(
     rel = f"level/{stage_id}/{level_id}"
     updated: list[str] = []
     events: list[dict] = []
+    uncosted = _uncosted_gen(gen)
 
     def _emit(step: str, before_hash: str | None, after_path: Path, detail: Any) -> None:
         after_hash = provenance.snapshot_file(pack, after_path)
@@ -128,6 +156,7 @@ def apply_level_edit(
             # No-op write (e.g. a placement grabbed and released in place) —
             # don't journal noise; it would pollute the training corpus.
             return
+        first = not events
         events.append(
             provenance.record(
                 pack,
@@ -139,6 +168,10 @@ def apply_level_edit(
                 detail=detail,
                 before_hash=before_hash,
                 after_hash=after_hash,
+                gen=(gen if first else uncosted) or None,
+                gen_kind=gen_kind,
+                accuracy=accuracy,
+                cost_error=cost_error if first else None,
             )
         )
 
@@ -257,6 +290,10 @@ def baseline_level(
     session: str | None = None,
     op: str = "generate",
     detail: dict | None = None,
+    gen: dict | None = None,
+    gen_kind: str | None = None,
+    accuracy: str | None = None,
+    cost_error: str | None = None,
 ) -> dict:
     """Record step-artifact events for a level's as-generated files.
 
@@ -266,10 +303,24 @@ def baseline_level(
     re-opening a level is safe. ``detail`` (e.g. ``{"kind": "improve"}``) rides
     each recorded event so consumers can tell WHICH generation op produced the
     change (generate / improve / regenerate / place_enemies / place_items).
+
+    Row P1-A6: the level ops (generate / regenerate / improve / place_*) pass
+    their ``gen`` block (with ``cost_usd``), ``gen_kind`` (``text`` — LLM-authored
+    data, P.9 J4) and ``accuracy`` here. One op is ONE billable leg: the cost
+    lands on the FIRST event this call records and every later step event keeps
+    the block minus its cost keys, so a five-step level generate is one costed
+    row in the dashboard, not five. A costed op whose steps were ALL already
+    journalled (an identical re-roll) still records its money — a hash-less
+    event on ``level:<stage>/<id>/level`` carrying the op's detail — because
+    money spent must never vanish from the authoritative source (P.8.2).
     """
     pack = Path(pack_dir)
     level_dir, stage_id = _find_level_dir(pack, level_id)
     recorded: list[str] = []
+    uncosted = _uncosted_gen(gen)
+    # Only a NON-ZERO leg (or a loud pricing failure) is worth a hash-less
+    # row: a $0 fake run that changed nothing lost nothing.
+    costed = bool(cost_error) or float((gen or {}).get("cost_usd") or 0.0) > 0.0
     for step, fname in _STEP_FILES.items():
         path = level_dir / fname
         after_hash = provenance.snapshot_file(pack, path)
@@ -278,6 +329,7 @@ def baseline_level(
         aid = _artifact_id(stage_id, level_id, step)
         if provenance.already_recorded(pack, aid, after_hash):
             continue
+        first = not recorded
         provenance.record(
             pack,
             artifact_id=aid,
@@ -287,8 +339,30 @@ def baseline_level(
             session=session,
             detail=detail,
             after_hash=after_hash,
+            gen=(gen if first else uncosted) or None,
+            gen_kind=gen_kind,
+            accuracy=accuracy,
+            cost_error=cost_error if first else None,
         )
         recorded.append(step)
+    if costed and not recorded:
+        # Nothing changed on disk, but the provider still billed. A hash-less
+        # event is invisible to artifact_versions / lineage / restore by
+        # construction (P.8.5), so this reports the spend without inventing a
+        # version nobody can restore to.
+        provenance.record(
+            pack,
+            artifact_id=_artifact_id(stage_id, level_id, "level"),
+            op=op,
+            source="llm",
+            actor=actor,
+            session=session,
+            detail={**(detail or {}), "no_change": True},
+            gen=gen,
+            gen_kind=gen_kind,
+            accuracy=accuracy,
+            cost_error=cost_error,
+        )
     return {"level_id": level_id, "stage_id": stage_id, "baselined": recorded}
 
 
@@ -297,7 +371,7 @@ def baseline_level(
 #
 # The user paints collision TILE TYPES; terrain (autotile / water-deep slot
 # indices), background bands, and the hazards layer are re-DERIVED exactly the
-# way canon's own phases derive them (mirrors examples/platformer_pack/
+# way canon's own phases derive them (mirrors src/canon/packs/platformer/
 # layers.py::assign_level_terrain + paint_level_background). A round-trip on an
 # unedited grid is byte-identical — tests enforce that.
 # ---------------------------------------------------------------------------
@@ -422,12 +496,12 @@ def _derive_hazards(
 
 
 def _pack_adapter(pack: Path) -> JsonOutputAdapter:
-    """Godot-engine packs need the .grid.json siblings kept in sync."""
-    if (pack / "project.godot").is_file():
-        from canon.adapters.godot_adapter import GodotOutputAdapter
+    """Godot-engine packs need the .grid.json siblings kept in sync — the
+    one rule now lives in ``canon.write_core.pack_adapter`` (row P0-6);
+    this name stays for every caller that imports it."""
+    from canon.write_core import pack_adapter
 
-        return GodotOutputAdapter(pack)
-    return JsonOutputAdapter(pack)
+    return pack_adapter(pack)
 
 
 def _clamp_positions(level: dict, width: int, height: int) -> int:
@@ -1023,6 +1097,88 @@ def replace_asset(
     return {"target": target, "artifact_id": artifact_id, "pinned": pinned, **detail}
 
 
+#: Bare document artifacts the registry-era verbs journal (P.7.3) → file.
+#: ``world`` resolves per pack type inside ``_restore_document``.
+_DOCUMENT_TARGETS: dict[str, str] = {
+    "registry": ".canon/registry.json",
+    "manifest": "manifest.json",
+    "story": "story/story.json",
+    "narrative": "narrative.json",
+}
+
+
+def _restore_document(
+    pack: Path,
+    target: str,
+    kind: str,
+    rest: str,
+    data: bytes,
+    to_hash: str,
+    *,
+    actor: str,
+    session: str | None,
+) -> dict | None:
+    """Row P0-6: the registry-era restore families, resolved through the
+    pack registry — ``<kind>:<id>`` of a COLLECTION kind (the CAS unit is
+    the file: every row in it comes back; History labels it "restores
+    <file> (N rows)", P.4.1), and the bare document artifacts ``registry`` /
+    ``world`` / ``manifest`` / ``story`` / ``narrative`` (P.7.3). ``None``
+    when the target is one of the platformer families below (per-file rows,
+    sprites, sheets, bands), which keep their own branches."""
+    from canon.packs import PackTypeError, resolve_pack
+
+    try:
+        spec = resolve_pack(pack).spec
+    except PackTypeError:
+        return None
+    rel: str | None = None
+    artifact_id = target
+    lineage: Callable[[str], bool]
+    entity = spec.entities.get(kind) if rest else None
+    if entity is not None and (entity.layout or {}).get("mode") == "collection":
+        rel = str(entity.layout.get("path"))
+        artifact_id = f"{kind}:{rest}"
+
+        def lineage(aid: str) -> bool:
+            return aid.startswith(f"{kind}:")
+    elif not rest and (kind in _DOCUMENT_TARGETS or kind == "world"):
+        if kind == "world":
+            rel = "world.json" if (pack / "world.json").is_file() else "world_bible.json"
+        else:
+            rel = _DOCUMENT_TARGETS[kind]
+
+        def lineage(aid: str) -> bool:
+            return aid == kind
+    if rel is None:
+        return None
+    if not any(
+        lineage(str(e.get("artifact_id", ""))) and to_hash in (e.get("before_hash"), e.get("after_hash"))
+        for e in provenance.all_events(pack)
+    ):
+        raise ValueError(
+            f"{to_hash} is not part of {artifact_id}'s history — restore only rewinds an artifact's own lineage"
+        )
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError(f"version {to_hash} is not JSON — wrong hash?") from None
+    path = pack / rel
+    before = provenance.snapshot_file(pack, path)
+    _pack_adapter(pack).write_json_singleton(rel, document)
+    after = provenance.snapshot_file(pack, path)
+    if entity is not None:
+        rows = len(document) if isinstance(document, (list, dict)) else 0
+        detail: dict = {"kind": "row_restore", "to": to_hash, "file": rel, "rows": rows,
+                        "label": f"restores {rel} ({rows} rows)"}
+    else:
+        detail = {"kind": "document_restore", "to": to_hash, "file": rel}
+    provenance.record(
+        pack, artifact_id=artifact_id, op="restore", source="user", actor=actor, session=session,
+        detail=detail, before_hash=before, after_hash=after,
+    )
+    return {"target": target, "artifact_id": artifact_id, "pinned": False, **detail}
+
+
 def restore_asset(
     pack_dir: str | Path,
     target: str,
@@ -1049,6 +1205,10 @@ def restore_asset(
     adapter = _pack_adapter(pack)
     kind, _, rest = target.partition(":")
     is_png = data.startswith(_PNG_MAGIC)
+
+    generic = _restore_document(pack, target, kind, rest, data, to_hash, actor=actor, session=session)
+    if generic is not None:
+        return generic
 
     # Restore only rewinds an artifact's OWN lineage — without this, any PNG
     # in the store lands on any PNG target (fail-open). Moving bytes BETWEEN

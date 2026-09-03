@@ -1,4 +1,4 @@
-"""Unit tests for examples/mazeworld_pack/phases.py — MazeworldManifestPhase.
+"""Unit tests for src/canon/packs/dungeon/phases.py — MazeworldManifestPhase.
 
 Tests verify the observable output shape after field renames and type coercions.
 No re-implementation of the phase logic.  Uses a fixture bible with known
@@ -101,18 +101,18 @@ def _add_entity(
 
 
 def test_mazeworld_manifest_phase_importable():
-    from examples.mazeworld_pack.phases import MazeworldManifestPhase  # noqa: F401
+    from canon.packs.dungeon.phases import MazeworldManifestPhase  # noqa: F401
 
 
 def test_mazeworld_manifest_phase_is_subclass_of_base():
+    from canon.packs.dungeon.phases import MazeworldManifestPhase
     from canon.pipeline.phases.manifest import ManifestPhase
-    from examples.mazeworld_pack.phases import MazeworldManifestPhase
 
     assert issubclass(MazeworldManifestPhase, ManifestPhase)
 
 
 def test_mazeworld_manifest_phase_name_is_manifest():
-    from examples.mazeworld_pack.phases import MazeworldManifestPhase
+    from canon.packs.dungeon.phases import MazeworldManifestPhase
 
     assert MazeworldManifestPhase.name == "manifest"
 
@@ -124,17 +124,17 @@ def test_mazeworld_manifest_phase_name_is_manifest():
 
 class TestMazeworldSeedCoercion:
     def test_coerce_int_seed_unchanged(self):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         assert MazeworldManifestPhase._coerce_seed_to_int(42) == 42
 
     def test_coerce_numeric_string(self):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         assert MazeworldManifestPhase._coerce_seed_to_int("1234") == 1234
 
     def test_coerce_non_numeric_string_is_stable_int(self):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         result = MazeworldManifestPhase._coerce_seed_to_int("shadowspire_001")
         assert isinstance(result, int)
@@ -142,19 +142,19 @@ class TestMazeworldSeedCoercion:
         assert result == MazeworldManifestPhase._coerce_seed_to_int("shadowspire_001")
 
     def test_coerce_different_strings_produce_different_ints(self):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         a = MazeworldManifestPhase._coerce_seed_to_int("seed_a")
         b = MazeworldManifestPhase._coerce_seed_to_int("seed_b")
         assert a != b, "Different seed strings should produce different ints"
 
     def test_coerce_fallback_for_unknown_type(self):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         assert MazeworldManifestPhase._coerce_seed_to_int(None) == 0
 
     def test_manifest_seed_is_int(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path, seed="shadowspire_001")
         MazeworldManifestPhase().run(ctx)
@@ -164,7 +164,7 @@ class TestMazeworldSeedCoercion:
         )
 
     def test_manifest_seed_is_deterministic(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path, seed="shadowspire_001")
         MazeworldManifestPhase().run(ctx)
@@ -184,7 +184,7 @@ class TestMazeworldSeedCoercion:
 
 class TestMazeworldWorldBibleFieldRenames:
     def test_world_bible_has_entity_index(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         _add_entity(ctx.bible, "room_0", "npc", "Guard")
@@ -201,7 +201,7 @@ class TestMazeworldWorldBibleFieldRenames:
         per-room entity lists (rooms[].npcs, rooms[].monsters, etc.) as the
         authoritative catalog.  Emitting {} here matches that contract.
         """
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         # Add entities so there's something to index — should still be empty
@@ -214,7 +214,7 @@ class TestMazeworldWorldBibleFieldRenames:
         )
 
     def test_world_bible_has_player_classes(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -224,7 +224,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert len(wb["player_classes"]) == 1  # one archetype added in fixture
 
     def test_story_factions_renamed_to_faction(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -236,7 +236,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert story["faction"]["name"] == "The Order"
 
     def test_story_final_entity_id_renamed(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -247,7 +247,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert story["final_boss_name"] == "boss_whisper"
 
     def test_story_final_entity_lore_renamed(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -257,7 +257,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert "final_entity_lore" not in story, "story should not have 'final_entity_lore'"
 
     def test_story_key_character_names_renamed(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -268,7 +268,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert "Hero" in story["key_npc_names"]
 
     def test_story_beats_map_id_renamed_to_room_id(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path, num_maps=2)
         MazeworldManifestPhase().run(ctx)
@@ -278,7 +278,7 @@ class TestMazeworldWorldBibleFieldRenames:
             assert "map_id" not in beat, f"beat[{i}] should not have 'map_id'"
 
     def test_story_beats_beat_renamed_to_summary(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path, num_maps=2)
         MazeworldManifestPhase().run(ctx)
@@ -288,7 +288,7 @@ class TestMazeworldWorldBibleFieldRenames:
             assert "beat" not in beat, f"beat[{i}] should not have 'beat'"
 
     def test_story_beats_have_faction_presence_and_escalation(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path, num_maps=2)
         MazeworldManifestPhase().run(ctx)
@@ -299,7 +299,7 @@ class TestMazeworldWorldBibleFieldRenames:
             assert isinstance(beat["escalation"], int), f"beat[{i}] 'escalation' must be int"
 
     def test_story_has_story_level_stubs(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         MazeworldManifestPhase().run(ctx)
@@ -313,7 +313,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert isinstance(story["story_monsters"], list)
 
     def test_rooms_have_encounters_not_events(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         _add_entity(ctx.bible, "room_0", "event", "Battle")
@@ -325,7 +325,7 @@ class TestMazeworldWorldBibleFieldRenames:
         assert len(room["encounters"]) == 1
 
     def test_rooms_still_have_other_entity_buckets(self, tmp_path: Path):
-        from examples.mazeworld_pack.phases import MazeworldManifestPhase
+        from canon.packs.dungeon.phases import MazeworldManifestPhase
 
         ctx = _make_ctx(tmp_path)
         _add_entity(ctx.bible, "room_0", "npc")
@@ -345,8 +345,8 @@ class TestMazeworldWorldBibleFieldRenames:
 
 class TestParseEventDifficultyCoercion:
     def test_string_difficulty_coerced_to_int(self):
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -364,8 +364,8 @@ class TestParseEventDifficultyCoercion:
         assert result["difficulty"] == 2  # "medium" → 2
 
     def test_all_string_difficulties_map_correctly(self):
+        from canon.packs.dungeon.parsers import _DIFFICULTY_INT, parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import _DIFFICULTY_INT, parse_event
 
         for label, expected in _DIFFICULTY_INT.items():
             ctx = BuildContext(
@@ -383,8 +383,8 @@ class TestParseEventDifficultyCoercion:
             )
 
     def test_int_difficulty_passthrough(self):
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -399,8 +399,8 @@ class TestParseEventDifficultyCoercion:
         assert result["difficulty"] == 3
 
     def test_unknown_string_difficulty_defaults_to_2(self):
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -422,8 +422,8 @@ class TestParseEventDifficultyCoercion:
 
 class TestParseEventMonsterIds:
     def test_combat_event_has_monster_ids_field(self):
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -440,8 +440,8 @@ class TestParseEventMonsterIds:
 
     def test_combat_event_monster_ids_populated_from_map(self):
         """monster_ids are derived from monsters in ctx.map_obj.entities."""
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         class FakeEntity:
             def __init__(self, entity_type, entity_id):
@@ -473,8 +473,8 @@ class TestParseEventMonsterIds:
         assert 5001 in result["monster_ids"]
 
     def test_puzzle_event_has_no_monster_ids(self):
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -490,8 +490,8 @@ class TestParseEventMonsterIds:
 
     def test_combat_event_has_extra_fields(self):
         """parse_event adds x, y, room_level, time_gate, portrait_prompt, profile_image."""
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         ctx = BuildContext(
             map_id="room_0",
@@ -522,8 +522,8 @@ class TestParseEventMonsterIdsExtended:
     def test_two_monsters_in_map_returns_correct_ids(self):
         """With 2 monsters in ctx.map_obj.entities, parse_event samples up to
         monster_count and converts entity_id suffixes to MazeWorld int IDs."""
+        from canon.packs.dungeon.parsers import parse_event
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_event
 
         class FakeEntity:
             def __init__(self, entity_type, entity_id):
@@ -572,8 +572,8 @@ class TestParseQuestGiverNpcId:
 
     def test_giver_npc_id_from_first_npc(self):
         """When map has an NPC, giver_npc_id = NPC suffix int + 1000."""
+        from canon.packs.dungeon.parsers import parse_quest
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_quest
 
         class FakeEntity:
             def __init__(self, entity_type, entity_id):
@@ -606,8 +606,8 @@ class TestParseQuestGiverNpcId:
 
     def test_giver_npc_id_none_when_no_npcs(self):
         """When no NPCs in the room, giver_npc_id must be None (not crash)."""
+        from canon.packs.dungeon.parsers import parse_quest
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_quest
 
         class FakeEntity:
             def __init__(self, entity_type, entity_id):
@@ -638,8 +638,8 @@ class TestParseQuestGiverNpcId:
 
     def test_giver_npc_id_none_when_no_map_obj(self):
         """With no map_obj (global quest), giver_npc_id must be None."""
+        from canon.packs.dungeon.parsers import parse_quest
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_quest
 
         ctx = BuildContext(
             map_id=None,
@@ -655,8 +655,8 @@ class TestParseQuestGiverNpcId:
 
     def test_quest_has_room_id_from_map_obj(self):
         """parse_quest must set room_id to map_obj.map_id."""
+        from canon.packs.dungeon.parsers import parse_quest
         from canon.pipeline.phases.database import BuildContext
-        from examples.mazeworld_pack.parsers import parse_quest
 
         class FakeMapObj:
             map_id = "room_2"

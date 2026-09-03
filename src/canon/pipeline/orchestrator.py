@@ -308,7 +308,13 @@ def orchestrate(
     try:
         while pending or in_flight:
             progressed = False
-            for nid in list(pending):
+            # ⏹ Stop (row P1-A4.5, master §3.0-D: "start nothing new"). The
+            # node_item boundary check only reaches nodes with an item loop —
+            # a node without one would start and run to completion after the
+            # cancel file landed. In-flight nodes still finish at their own
+            # boundary; what landed stays. No cancel file named = unchanged.
+            stopping = steplog is not None and steplog.cancel_requested()
+            for nid in [] if stopping else list(pending):
                 node = node_map[nid]
                 if deps[nid] & dead:
                     continue  # blocked behind a failure

@@ -287,7 +287,7 @@ class TestAdapterInjection:
     ) -> None:
         """The mazeworld pack respects injected adapters too: placement's
         maze.json rewrite goes to the fake, and nothing lands on disk."""
-        from examples.mazeworld_pack.placement import MazeworldPlacementPhase
+        from canon.packs.dungeon.placement import MazeworldPlacementPhase
 
         fake = RecordingAdapter()
         ctx = _make_ctx(tmp_path, adapter=fake)

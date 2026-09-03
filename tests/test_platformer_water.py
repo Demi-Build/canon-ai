@@ -17,22 +17,22 @@ import pytest
 
 from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.bible.models import Bible
-from canon.pipeline.rng import derive_rng
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-from examples.platformer_pack.sections import (
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.packs.platformer.sections import (
     WaterLevelConfig,
     load_water_level_config,
     roll_water_level,
 )
-from examples.platformer_pack.tiles import DEFAULT_TILES
-from examples.platformer_pack.validate import (
+from canon.packs.platformer.tiles import DEFAULT_TILES
+from canon.packs.platformer.validate import (
     check_item_placements,
     flood_grid,
     reachable_cells,
 )
-from examples.run_platformer_slice import make_fake_responder
+from canon.pipeline.rng import derive_rng
+from canon.pipeline.runner import PipelineContext
 
 SEED = "emberfall_001"
 WATER_ID = DEFAULT_TILES.by_name["water"].id
@@ -150,7 +150,7 @@ class TestAquaticArchetypes:
     """W2 — reef/trench pool gating + underwater hazard tiles."""
 
     def test_pool_gating_by_water_topology(self) -> None:
-        from examples.platformer_pack.sections import DEFAULT_VOCAB, plan_sections
+        from canon.packs.platformer.sections import DEFAULT_VOCAB, plan_sections
 
         assert DEFAULT_VOCAB["reef"].water == "submerged"
         assert DEFAULT_VOCAB["trench"].water == "submerged"
@@ -189,7 +189,7 @@ class TestAquaticArchetypes:
     def test_flooded_levels_use_aquatic_sections_with_hazards(
         self, water_world
     ) -> None:
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             level_section_plan,
             level_water_spec,
         )
@@ -252,8 +252,8 @@ class TestSeabedPolicy:
     }
 
     def _check(self, placements, policy: str):
-        from examples.platformer_pack.rules import GameRules
-        from examples.platformer_pack.validate import check_placements
+        from canon.packs.platformer.rules import GameRules
+        from canon.packs.platformer.validate import check_placements
 
         return check_placements(
             _pool_grid(), placements, (2, 11), self.ENEMIES,
@@ -274,7 +274,7 @@ class TestSeabedPolicy:
     def test_deep_water_post_snaps_to_seabed(self) -> None:
         # A wader dropped in deep water is SNAPPED to the nearest submerged
         # flat (code repair, ticket 5a) rather than bounced back to the model.
-        from examples.platformer_pack.validate import seabed_cells
+        from canon.packs.platformer.validate import seabed_cells
 
         accepted, problems, repairs = self._check(
             [{"enemy_id": "beetle", "x": 17, "y": 11}], "seabed"
@@ -287,8 +287,8 @@ class TestSeabedPolicy:
     def test_wader_with_no_reachable_seabed_still_rejected(self) -> None:
         # Fail-closed: with no submerged flat within reach, the wader still
         # kicks back for a retry — the snap never invents a seabed.
-        from examples.platformer_pack.rules import GameRules
-        from examples.platformer_pack.validate import check_placements
+        from canon.packs.platformer.rules import GameRules
+        from canon.packs.platformer.validate import check_placements
 
         grid = np.zeros((8, 24), dtype=np.int8)
         grid[7, :] = WATER_ID  # bottom row all water — no solid floor
@@ -316,7 +316,7 @@ class TestSeabedPolicy:
         assert not problems and len(accepted) == 1
 
     def test_cruise_is_in_the_style_roll(self) -> None:
-        from examples.platformer_pack.phases import SWIM_STYLES
+        from canon.packs.platformer.phases import SWIM_STYLES
 
         assert "cruise" in {s for s, _w in SWIM_STYLES}
 
@@ -349,7 +349,7 @@ class TestWaterEndToEnd:
     def test_default_seed_rolls_both_topologies(self, water_world) -> None:
         """The canned $0 run must exercise the feature: at least one
         fully-submerged and one waterline level."""
-        from examples.platformer_pack.level import level_water_spec
+        from canon.packs.platformer.level import level_water_spec
 
         ctx, out = water_world
         topologies = {}
@@ -368,7 +368,7 @@ class TestWaterEndToEnd:
         assert "waterline" in topologies.values()
 
     def test_water_never_rolls_on_stage1_or_vertical(self, water_world) -> None:
-        from examples.platformer_pack.level import level_water_spec
+        from canon.packs.platformer.level import level_water_spec
 
         ctx, out = water_world
         stage1 = list(ctx.bible.stages.values())[0]
@@ -386,7 +386,7 @@ class TestWaterEndToEnd:
         """The durable Level.secret_rooms (stamp body's direct roll) and
         the recompute wrapper must agree — the multi-room determinism
         discipline extended to the water gate."""
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             level_secret_rooms,
             level_water_spec,
         )
@@ -409,7 +409,7 @@ class TestWaterEndToEnd:
     def test_rooms_never_flood_and_waterline_entrances_stay_dry(
         self, water_world
     ) -> None:
-        from examples.platformer_pack.level import level_water_spec
+        from canon.packs.platformer.level import level_water_spec
 
         ctx, out = water_world
         for stage in ctx.bible.stages.values():
@@ -431,7 +431,7 @@ class TestWaterEndToEnd:
     def test_flooded_levels_reach_exit_and_carry_items(
         self, water_world
     ) -> None:
-        from examples.platformer_pack.level import level_water_spec
+        from canon.packs.platformer.level import level_water_spec
 
         ctx, out = water_world
         checked = 0
@@ -464,8 +464,8 @@ class TestWaterEndToEnd:
         """Fully-submerged fauna (W3, seabed policy): flyers never (no
         open air), swimmers in water, and LAND enemies allowed — but
         ONLY posted on wet-standable seabed flats (the wading rule)."""
-        from examples.platformer_pack.level import level_water_spec
-        from examples.platformer_pack.validate import seabed_cells
+        from canon.packs.platformer.level import level_water_spec
+        from canon.packs.platformer.validate import seabed_cells
 
         ctx, out = water_world
         archetypes = {

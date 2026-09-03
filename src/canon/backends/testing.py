@@ -9,14 +9,31 @@ network calls and get deterministic, inspectable results::
     result = fake_img.generate_and_save("a red dragon", "/tmp/test.png", 256, 256)
     assert result is True
     assert len(fake_img.calls) == 1
+
+``FakeChatBackend`` (Phase 1 A1) is the scripted twin of the agent's chat
+backends — the $0 leg the eval runner and every loop test run on.
 """
 
 from __future__ import annotations
 
 import io
-from collections.abc import Callable
+import json
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from canon.llm.chat import (
+    ChatEvent,
+    ChatRequest,
+    ContentBlockDone,
+    MessageStart,
+    MessageStop,
+    TextDelta,
+    ThinkingDelta,
+    ToolInputDelta,
+    ToolUseStart,
+    Usage,
+)
 from canon.llm.request import LLMRequest
 
 # ---------------------------------------------------------------------------
@@ -473,3 +490,147 @@ class FakeSFXBackend:
             if mp3s:
                 return mp3s[0].read_bytes()
         return _MIN_MP3_BYTES
+
+
+# ---------------------------------------------------------------------------
+# FakeChatBackend
+# ---------------------------------------------------------------------------
+
+
+class FakeChatBackend:
+    """Deterministic scripted chat backend for testing (Phase 1 A1).
+
+    Implements ``canon.backends.base.ChatBackend`` the way ``FakeLLMBackend``
+    implements ``LLMBackend``: canned assistant turns, consumed in order,
+    every request recorded to ``.calls``. It streams the exact event order
+    the Protocol documents so loop code exercised against it is exercised
+    against the real contract — text arrives in at least two deltas, tool
+    inputs arrive as a JSON delta, every block gets a ``ContentBlockDone``,
+    and ``MessageStop`` carries the final content with ids filled in.
+
+    Two modes:
+
+    **List mode** — a list of turns played in order; ``IndexError`` once the
+    script is exhausted. A turn is either a list of canonical assistant
+    blocks (``stop_reason`` inferred: ``tool_use`` when any block is a
+    tool_use, else ``end_turn``) or a dict ``{"content": [...],
+    "stop_reason": "...", "stop_details": {...}}`` to script a refusal,
+    ``max_tokens``, etc.::
+
+        fake = FakeChatBackend([
+            [{"type": "tool_use", "name": "validate_level", "input": {"level_id": "l6"}}],
+            [{"type": "text", "text": "The exit is unreachable."}],
+        ])
+
+    **Callable mode** — ``(ChatRequest) -> turn`` for scripts that branch on
+    the history.
+
+    Tool-use blocks without an ``id`` get ``toolu_fake_<n>`` (``n`` counts
+    per backend instance). Usage on every turn is ``Usage()`` — zeros,
+    honestly: nothing was measured, and this backend is the $0 leg. No
+    randomness anywhere.
+
+    **Pacing (row P1-A7).** ``delay_s`` sleeps that long between the events
+    a turn yields, and ``pace`` is called with each event just before it is
+    yielded (either may be given; ``pace`` runs first). Both default OFF —
+    ``delay_s=0.0`` / ``pace=None`` — so every existing test keeps its exact
+    behaviour AND its exact timing. They exist so a turn can be genuinely
+    mid-stream when ⏹ Stop arrives: the row A4.5 gate could otherwise only
+    approximate that by blocking on an ask-tier permission chip. Keep any
+    delay in the tens of milliseconds; the loop closes the generator on
+    cancel, so a paced stream stops promptly rather than sleeping out its
+    script.
+
+    Attributes:
+        calls: Every ``ChatRequest`` passed to ``stream()``, in order.
+    """
+
+    #: Registry id the eval runner keys on; the picker never lists it.
+    id = "fake"
+    #: Scripted thinking blocks play back, so the flag is truthful.
+    supports_thinking = True
+
+    def __init__(
+        self,
+        turns: list | Callable[[ChatRequest], list | dict],
+        model: str = "fake-chat",
+        delay_s: float = 0.0,
+        pace: Callable[[ChatEvent], None] | None = None,
+    ) -> None:
+        self._turns = turns
+        self._index = 0
+        self._tool_counter = 0
+        self._message_counter = 0
+        self.model = model
+        self.delay_s = delay_s
+        self.pace = pace
+        self.calls: list[ChatRequest] = []
+
+    def stream(self, request: ChatRequest) -> Iterator[ChatEvent]:
+        """Record the request and stream the next scripted turn.
+
+        Raises:
+            IndexError: (list mode) if the script is exhausted.
+            TypeError: if ``turns`` was constructed with an unsupported type.
+        """
+        self.calls.append(request)
+        turn = self._next_turn(request)
+        return self._play(turn)
+
+    def _next_turn(self, request: ChatRequest) -> list | dict:
+        if callable(self._turns) and not isinstance(self._turns, (list, dict)):
+            return self._turns(request)
+        if isinstance(self._turns, list):
+            turn = self._turns[self._index]
+            self._index += 1
+            return turn
+        raise TypeError(f"FakeChatBackend: unsupported turns type {type(self._turns)}")
+
+    def _play(self, turn: list | dict) -> Iterator[ChatEvent]:
+        """The scripted events, paced. With ``pace``/``delay_s`` at their
+        defaults this is a plain pass-through, so an unpaced backend streams
+        exactly as it always did."""
+        for event in self._events(turn):
+            if self.pace is not None:
+                self.pace(event)
+            if self.delay_s:
+                time.sleep(self.delay_s)
+            yield event
+
+    def _events(self, turn: list | dict) -> Iterator[ChatEvent]:
+        if isinstance(turn, dict):
+            raw_blocks = list(turn.get("content", []))
+            stop_reason = turn.get("stop_reason")
+            stop_details = turn.get("stop_details")
+        else:
+            raw_blocks = list(turn)
+            stop_reason = None
+            stop_details = None
+
+        self._message_counter += 1
+        yield MessageStart(model=self.model, message_id=f"msg_fake_{self._message_counter}")
+
+        blocks: list[dict] = []
+        for index, raw in enumerate(raw_blocks):
+            block = dict(raw)
+            kind = block.get("type")
+            if kind == "text":
+                text = block.get("text", "")
+                mid = max(1, len(text) // 2)
+                yield TextDelta(index=index, text=text[:mid])
+                yield TextDelta(index=index, text=text[mid:])
+            elif kind == "tool_use":
+                if not block.get("id"):
+                    self._tool_counter += 1
+                    block["id"] = f"toolu_fake_{self._tool_counter}"
+                block.setdefault("input", {})
+                yield ToolUseStart(index=index, id=block["id"], name=block["name"])
+                yield ToolInputDelta(index=index, id=block["id"], partial_json=json.dumps(block["input"]))
+            elif kind == "thinking":
+                yield ThinkingDelta(index=index, text=block.get("thinking", ""))
+            yield ContentBlockDone(index=index, block=block)
+            blocks.append(block)
+
+        if stop_reason is None:
+            stop_reason = "tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn"
+        yield MessageStop(stop_reason=stop_reason, usage=Usage(), content=blocks, stop_details=stop_details)

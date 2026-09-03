@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -236,7 +236,7 @@ def publish(
                 **existing,
                 "name": name or existing.get("name"),
                 "tags": merged_tags,
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             }
             _append(updated)
             return {**updated, "deduped": True}
@@ -245,7 +245,7 @@ def publish(
     entry = {
         "schema": 1,
         "library_id": library_id,
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "kind": kind,
         "name": name or default_name,
         "tags": list(tags),

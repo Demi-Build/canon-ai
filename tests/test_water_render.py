@@ -16,8 +16,8 @@ from PIL import Image
 from pydantic import ValidationError
 
 from canon.bible.platformer import Level, Tileset, TileSlot
-from examples.platformer_pack.graphics import GraphicsSpec
-from examples.platformer_pack.render import (
+from canon.packs.platformer.graphics import GraphicsSpec
+from canon.packs.platformer.render import (
     SCALE,
     _band_shade,
     render_level,

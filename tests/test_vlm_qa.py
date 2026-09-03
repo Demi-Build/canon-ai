@@ -16,9 +16,9 @@ from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.backends.testing import FakeVLMBackend
 from canon.bible.models import Bible
 from canon.bible.platformer import EnemyDefinition
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.vlm_qa import (
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.packs.platformer.vlm_qa import (
     _STATE_BRIEF,
     _STATE_ORDER,
     ANIM_DEFAULT_FRAMES,
@@ -59,7 +59,7 @@ from examples.platformer_pack.vlm_qa import (
     review_animations,
     run_code_checks,
 )
-from examples.run_platformer_slice import make_fake_responder
+from canon.pipeline.runner import PipelineContext
 
 
 def _run_slice(output_dir: Path, vlm_judge=None) -> PipelineContext:
@@ -130,7 +130,7 @@ class TestAnimationAuthoring:
             assert spec[state]["motion"]
 
     def test_player_frame_budget_allows_more_frames(self) -> None:
-        from examples.platformer_pack.vlm_qa import (
+        from canon.packs.platformer.vlm_qa import (
             PLAYER_ANIM_FRAMES_MAX,
             PLAYER_ANIMATION_STATES,
         )
@@ -786,7 +786,7 @@ class TestPaletteDriftMeter:
         from PIL import Image
 
         from canon.bible.platformer import Tileset, TileSlot
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         by = {t.name: t for t in DEFAULT_TILES.tiles}
         palette = {
@@ -1043,9 +1043,9 @@ def _composite_ctx(
 
 
 def _composite(ctx: SimpleNamespace) -> list[dict]:
-    from examples.platformer_pack.graphics import DEFAULT_GRAPHICS
-    from examples.platformer_pack.tiles import DEFAULT_TILES
-    from examples.platformer_pack.variants import DEFAULT_VARIANTS
+    from canon.packs.platformer.graphics import DEFAULT_GRAPHICS
+    from canon.packs.platformer.tiles import DEFAULT_TILES
+    from canon.packs.platformer.variants import DEFAULT_VARIANTS
 
     return _composite_contrast_checks(
         ctx, "s", DEFAULT_TILES, DEFAULT_GRAPHICS, DEFAULT_VARIANTS
@@ -1339,7 +1339,7 @@ class TestCliFactoryEnv:
     def test_env_knob_builds_the_judge(self, monkeypatch) -> None:
         """CANON_PLAT_VLM_BACKEND mirrors --vlm-backend for the `canon
         run/resume/regen` factories — same explicit opt-in, empty = no QA."""
-        from examples.platformer_pack.dag import VlmQaDagPhase, cli_phases_factory
+        from canon.packs.platformer.dag import VlmQaDagPhase, cli_phases_factory
 
         monkeypatch.setenv("CANON_PLAT_VLM_BACKEND", "fake")
         phases = cli_phases_factory(None)

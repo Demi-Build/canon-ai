@@ -1,0 +1,51 @@
+{
+  "case": "a_animate_reuse_spec",
+  "kind": "asset",
+  "args": {
+    "builder": "tests.test_estimate._build_tree",
+    "seed": "emberfall_001",
+    "target": "enemy:ash_wraith",
+    "image": "fal",
+    "vlm": "anthropic",
+    "reuse_spec": true
+  },
+  "estimate": {
+    "scope": "animate",
+    "backends": {
+      "image": "fal",
+      "vlm": "anthropic"
+    },
+    "llm": {
+      "by_task": {},
+      "calls": 0.0,
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 4,
+        "usd": 0.16
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.16,
+        "worst": 0.16
+      }
+    },
+    "total_usd": {
+      "best": 0.16,
+      "worst": 0.16
+    },
+    "warnings": []
+  }
+}

@@ -33,6 +33,8 @@ import logging
 import os
 from pathlib import Path
 
+from canon import pricing as _pricing
+
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api.retrodiffusion.ai/v1/inferences"
@@ -105,6 +107,10 @@ class RetroDiffusionBackend:
         self.remove_bg = remove_bg
         self._api_key = api_key
         self.last_cost: float = 0.0
+        #: ``balance_cost`` is provider-reported per response — measured
+        #: (P0 paper P.8.8); the ``canon.pricing`` row's range is only the
+        #: pre-spend ESTIMATE.
+        self.last_cost_accuracy: str = _pricing.MEASURED
 
     def _resolve_api_key(self) -> str:
         """The key from the constructor or ``RD_API_KEY`` — checked here,

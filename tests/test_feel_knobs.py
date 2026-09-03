@@ -10,8 +10,8 @@ reachability sim, never less, so validation is untouched by design).
 
 from __future__ import annotations
 
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-from examples.platformer_pack.rules import DEFAULT_RULES, load_rules
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+from canon.packs.platformer.rules import DEFAULT_RULES, load_rules
 
 
 class TestCoyoteKnob:

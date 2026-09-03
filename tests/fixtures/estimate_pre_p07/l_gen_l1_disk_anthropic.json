@@ -1,0 +1,78 @@
+{
+  "case": "l_gen_l1_disk_anthropic",
+  "kind": "level",
+  "args": {
+    "builder": "tests.test_estimate._build_tree",
+    "seed": "emberfall_001",
+    "op": "generate",
+    "level_id": "l1",
+    "llm": "anthropic"
+  },
+  "estimate": {
+    "scope": "generate",
+    "backends": {
+      "llm": "anthropic"
+    },
+    "llm": {
+      "by_task": {
+        "plat:decorator": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 380,
+          "usd": 0.0028
+        },
+        "plat:item_placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 1800,
+          "output_tokens_per_call": 450,
+          "usd": 0.004
+        },
+        "plat:layout": {
+          "calls": 3.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 2600,
+          "output_tokens_per_call": 900,
+          "usd": 0.0639
+        },
+        "plat:placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 2200,
+          "output_tokens_per_call": 500,
+          "usd": 0.0047
+        }
+      },
+      "calls": 6.0,
+      "usd": {
+        "best": 0.0754,
+        "worst": 0.3018
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0754,
+      "worst": 0.3018
+    },
+    "warnings": []
+  }
+}

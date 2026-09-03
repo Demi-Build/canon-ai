@@ -17,12 +17,11 @@ import pytest
 
 from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.bible.models import Bible
-from canon.pipeline.rng import derive_rng
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-from examples.platformer_pack.rules import DEFAULT_RULES
-from examples.platformer_pack.sections import (
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+from canon.packs.platformer.rules import DEFAULT_RULES
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.packs.platformer.sections import (
     SECTION_OVERLAP,
     SecretRoomConfig,
     SecretRoomSpec,
@@ -30,14 +29,15 @@ from examples.platformer_pack.sections import (
     plan_sections,
     roll_secret_rooms,
 )
-from examples.platformer_pack.tiles import DEFAULT_TILES
-from examples.platformer_pack.validate import (
+from canon.packs.platformer.tiles import DEFAULT_TILES
+from canon.packs.platformer.validate import (
     _body_stand,
     place_room_entrances,
     reachable_cells,
     standable_cells,
 )
-from examples.run_platformer_slice import make_fake_responder
+from canon.pipeline.rng import derive_rng
+from canon.pipeline.runner import PipelineContext
 
 SEED = "emberfall_001"
 
@@ -167,7 +167,7 @@ def _flat_grid(width: int = 60, height: int = 14):
 def _sections(width: int = 60, n: int = 3):
     """Hand-built deterministic sections tiling ``width`` exactly (the
     roll's jitter would make the count flaky for these placement tests)."""
-    from examples.platformer_pack.sections import PlannedSection
+    from canon.packs.platformer.sections import PlannedSection
 
     if n == 1:
         return [PlannedSection("gauntlet", width, x_off=0, y_off=0)]
@@ -297,7 +297,7 @@ class TestVaultAndLairGeneration:
     def test_room_archetype_builds_reachable(
         self, tmp_path: Path, room_type: str, arch: str
     ) -> None:
-        from examples.platformer_pack.level import _generate_sectioned_level
+        from canon.packs.platformer.level import _generate_sectioned_level
 
         spec = SecretRoomSpec(
             room_id="l1r1", room_type=room_type, archetype_names=[arch],
@@ -332,7 +332,7 @@ class TestRoomContents:
 
     def test_vault_room_places_no_enemies(self, tmp_path: Path) -> None:
         from canon.bible.platformer import Level as LevelModel
-        from examples.platformer_pack.level import place_level_entities
+        from canon.packs.platformer.level import place_level_entities
 
         ctx = PipelineContext(
             bible=Bible.empty(seed=SEED),
@@ -374,7 +374,7 @@ class TestRoomContents:
         assert "ROOM DIRECTIVE" not in req3.user_message
 
     def test_fresh_estimate_prices_secret_rooms(self) -> None:
-        from examples.platformer_pack.estimate import (
+        from canon.packs.platformer.estimate import (
             _fresh_nodes,
             _sections_for_level,
         )
@@ -543,7 +543,7 @@ class TestRoomsEndToEnd:
         """The DAG-expansion / placement recompute must agree with what
         the layout body actually built — the zero-persisted-field
         discipline that keeps resume/regen honest."""
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             level_secret_rooms,
             level_section_plan,
         )
@@ -567,7 +567,7 @@ class TestRoomsEndToEnd:
         """The play harness's pure seams for rooms (C3): room ids resolve
         to the parent's stage, and the PLAT_ACTIONS env parses to the
         frame->action map both surfaces key scripted entries on."""
-        from examples.platformer_play import _Hooks, _stage_for
+        from canon.packs.platformer.play import _Hooks, _stage_for
 
         manifest = {
             "stages": [

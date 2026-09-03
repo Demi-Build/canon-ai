@@ -19,7 +19,12 @@ Example::
 
 # TODO(v0.2): prompt caching support — pass cache_control on system + examples for cost optimization
 # TODO(v0.2): streaming support — return generator from generate_stream()
-# TODO(v0.2): pricing table externalized into config so model bumps don't need code changes
+Pricing: ``PRICING`` is a per-token VIEW of ``canon.pricing.LLM`` (the
+product's only price source, master §3.0-C, row P0-7) — same name, same
+``{model: {"input", "output"}}`` per-token shape as before, built at import
+so existing readers keep working; a model bump lands in ``canon.pricing``,
+never here. Token counts are provider-reported, so ``last_cost`` is
+``measured`` (P0 paper P.8.8: counts × the table).
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+from canon import pricing as _pricing
 from canon.backends.registry import BackendRegistry
 from canon.llm.request import LLMRequest
 
@@ -41,18 +47,9 @@ logger = logging.getLogger(__name__)
 # Per CLAUDE.md guidance, default to latest capable models for AI app builders.
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
-# Pricing (per 1M tokens) — used for cost reporting in GenerationStats.
-# Verified against Anthropic's public models/pricing docs on 2026-07-30
-# (platform.claude.com/docs/en/about-claude/models/overview). Opus 4.6+ is
-# $5/$25 (NOT the $15/$75 of the Opus 3/4/4.1 era — that stale rate 3x-inflated
-# every Opus line here); Haiku 4.5 is $1/$5; Sonnet 4.6 is $3/$15. Update on
-# model bump, and re-verify against the docs rather than carrying forward.
-PRICING = {
-    "claude-sonnet-4-6": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
-    "claude-opus-4-8": {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
-    "claude-opus-4-7": {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
-    "claude-haiku-4-5-20251001": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
-}
+#: Per-token ``{model: {"input", "output"}}`` for every Anthropic row of
+#: ``canon.pricing.LLM`` — the re-export view (see the module docstring).
+PRICING = _pricing.llm_per_token_view("anthropic")
 
 
 class AnthropicBackend:
@@ -98,6 +95,8 @@ class AnthropicBackend:
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
         self.last_cost: float = 0.0
+        #: Token counts are provider-reported: counts × the table = measured.
+        self.last_cost_accuracy: str = _pricing.MEASURED
         self._unpriced_models: set[str] = set()
 
     def generate(self, request: LLMRequest) -> str:
@@ -146,10 +145,13 @@ class AnthropicBackend:
                 self._unpriced_models.add(model)
                 logger.warning(
                     "No PRICING entry for model %r — its calls report as "
-                    "$0. Add it to canon.backends.anthropic.PRICING.",
-                    model,
+                    "$0 (accuracy %r). Add it to canon.pricing.LLM.",
+                    model, _pricing.ESTIMATED,
                 )
             pricing = {"input": 0.0, "output": 0.0}
+            self.last_cost_accuracy = _pricing.ESTIMATED
+        else:
+            self.last_cost_accuracy = _pricing.MEASURED
         self.last_cost = (
             self.last_input_tokens * pricing["input"]
             + self.last_output_tokens * pricing["output"]

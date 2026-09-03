@@ -10,8 +10,8 @@ from PIL import Image
 
 from canon.backends.base import IMAGE_CAPABILITIES, backend_capabilities
 from canon.backends.testing import FakeImageBackend
-from examples.platformer_pack.graphics import GraphicsSpec
-from examples.platformer_pack.tileset_art import (
+from canon.packs.platformer.graphics import GraphicsSpec
+from canon.packs.platformer.tileset_art import (
     DiffusionSheetProducer,
     build_image_producer,
     grid_snap,
@@ -95,7 +95,7 @@ class TestProducerWiring:
         canvas. (The paid repro: PixelLab 422'd on a 512px gen_px
         request whose real target was a 64px player sprite.)"""
         from canon.backends.testing import FakeImageBackend
-        from examples.platformer_pack.tileset_art import (
+        from canon.packs.platformer.tileset_art import (
             DiffusionSheetProducer,
         )
 
@@ -162,7 +162,7 @@ class TestProducerWiring:
     def test_fake_sheet_pipeline_survives_grid_snap(self, tmp_path) -> None:
         """The $0 tile pipeline end-to-end with the snap in place —
         deterministic bytes, twice."""
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         producer = DiffusionSheetProducer(FakeImageBackend())
         tile = DEFAULT_TILES.by_name["floor"]

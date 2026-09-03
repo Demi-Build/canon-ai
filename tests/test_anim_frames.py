@@ -214,7 +214,7 @@ class TestOffsetsAreAdditive:
 
     def test_the_offset_contract_matches_durations_ms(self):
         """Absent or desynced ⇒ all-zero, never a partial shift."""
-        from examples.platformer_play import _anim_offsets
+        from canon.packs.platformer.play import _anim_offsets
 
         assert _anim_offsets({}, 3) == [(0, 0)] * 3
         assert _anim_offsets({"offsets": [[1, 2]]}, 3) == [(0, 0)] * 3, "desynced"
@@ -227,7 +227,7 @@ class TestOffsetsAreAdditive:
         """Pixel-level: the un-authored path and the zero-offset path produce
         the same surface, so shipping this field changes nothing on its own."""
         pygame = pytest.importorskip("pygame")
-        from examples.platformer_play import _atlas_frames
+        from canon.packs.platformer.play import _atlas_frames
 
         pygame.init()
         pygame.display.set_mode((8, 8))

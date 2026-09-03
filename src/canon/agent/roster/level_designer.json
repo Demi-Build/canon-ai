@@ -1,0 +1,14 @@
+{
+  "id": "level_designer",
+  "label": "Level designer",
+  "actor": "level_designer",
+  "model_tier": "top",
+  "tools": [
+    "describe_pack", "describe_level", "export_level", "validate_level",
+    "db_types", "db_schema", "db_row", "update_schema", "get_history", "get_versions",
+    "list_pack_files", "read_pack_file", "search_pack", "world_map",
+    "apply_level_edit", "import_level_grids", "create_level", "publish_level",
+    "edit_world_map", "restore",
+    "capture_frames", "run_trajectory"
+  ]
+}

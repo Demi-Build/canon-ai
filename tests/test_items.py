@@ -14,14 +14,14 @@ from canon.bible.models import Bible
 from canon.bible.platformer import ItemDefinition
 from canon.config import CanonConfig
 from canon.llm.client import LLMClient
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.phases import SCHEMAS_DIR
+from canon.packs.platformer.run_slice import make_fake_responder
 from canon.pipeline.orchestrator import mark_stale
 from canon.pipeline.rng import derive_rng
 from canon.pipeline.runner import PipelineContext, run_pipeline
 from canon.skeleton.core import roll_skeleton
 from canon.skeleton.loader import load_skeleton_spec
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.phases import SCHEMAS_DIR
-from examples.run_platformer_slice import make_fake_responder
 
 KINDS = {"coin", "heal", "shield", "double_jump", "run_boost"}
 
@@ -111,7 +111,7 @@ class TestItemGeneratorPhase:
 
 class TestEstimateKnowsItems:
     def test_fresh_forecast_prices_the_item_pool(self, tmp_path: Path) -> None:
-        from examples.platformer_pack.estimate import estimate_run
+        from canon.packs.platformer.estimate import estimate_run
 
         ctx = PipelineContext(
             bible=Bible.empty(seed="est"),

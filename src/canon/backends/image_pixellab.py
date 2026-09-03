@@ -34,6 +34,8 @@ import logging
 import os
 from pathlib import Path
 
+from canon import pricing as _pricing
+
 logger = logging.getLogger(__name__)
 
 API_BASE_URL = "https://api.pixellab.ai/v1"
@@ -122,6 +124,10 @@ class PixelLabBackend:
             os.environ["PIXELLAB_SECRET"] = api_key
         # Missing key is NOT an error here — fail at first generate call.
         self.last_cost: float = 0.0
+        #: ``usage.usd`` is provider-reported per response — measured
+        #: (P0 paper P.8.8); the ``canon.pricing`` row's range is only the
+        #: pre-spend ESTIMATE.
+        self.last_cost_accuracy: str = _pricing.MEASURED
 
     # -- request plumbing ----------------------------------------------------
 

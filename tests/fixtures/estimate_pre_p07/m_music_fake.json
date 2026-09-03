@@ -1,0 +1,45 @@
+{
+  "case": "m_music_fake",
+  "kind": "music",
+  "args": {
+    "music": "fake"
+  },
+  "estimate": {
+    "scope": "music",
+    "backends": {
+      "music": "fake"
+    },
+    "llm": {
+      "by_task": {},
+      "calls": 0.0,
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 1,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0,
+      "worst": 0.0
+    },
+    "warnings": []
+  }
+}

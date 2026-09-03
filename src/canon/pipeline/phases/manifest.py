@@ -29,6 +29,16 @@ class ManifestPhase:
 
     name: str = "manifest"
 
+    #: The writer's own pack id — the fallback for ``manifest.json.pack_type``
+    #: when the context carries none (legacy callers). Core carries NO pack id
+    #: (P0 paper P.4.1 puts the mirror on each pack's writer), so the base
+    #: phase emits no key unless ``ctx.pack_type`` is set; a pack's subclass
+    #: sets its registry id here (``MazeworldManifestPhase.pack_type =
+    #: "dungeon"``). The mirror rule: the registry is the source of truth, the
+    #: manifest key its mirror, rewritten on EVERY write so a stamp survives
+    #: ``--resume``.
+    pack_type: str | None = None
+
     def run(self, ctx: Any) -> None:
         output_dir = Path(getattr(ctx.config, "output_dir", "."))
         output_paths = getattr(ctx.config, "output_paths", {})
@@ -183,7 +193,10 @@ class ManifestPhase:
             else []
         )
 
+        pack_type = getattr(ctx, "pack_type", None) or self.pack_type
         manifest = {
+            # FIRST key by contract (P.4.1 mirror rule).
+            **({"pack_type": pack_type} if pack_type else {}),
             "seed": self._resolve_seed(ctx),
             "num_rooms": len(bible.maps),
             "environments": environments,

@@ -17,8 +17,28 @@ from pathlib import Path
 from typing import Any
 
 from canon.bible.models import BibleMetadata
+from canon.pipeline.steplog import RunCancelled, step
 
 logger = logging.getLogger(__name__)
+
+
+
+class _ItemProgress:
+    """Row P0-10 (master §3.0-E): the shared ``node_item`` counter for
+    AssetPhase's concurrent tasks. ``total`` is set once every task has been
+    built (before any is awaited); ``announce`` goes through the ONE emitter,
+    so a cancel file stops the phase at an asset boundary exactly the way it
+    stops a serial item loop — nothing already written is undone."""
+
+    def __init__(self, ctx: Any, node: str) -> None:
+        self.ctx = ctx
+        self.node = node
+        self.total = 0
+        self.done = 0
+
+    def announce(self, item: str) -> None:
+        self.done += 1
+        step(self.ctx, self.node, item, self.done, self.total or None)
 
 
 class AssetPhase:
@@ -76,25 +96,43 @@ class AssetPhase:
         sfx_backend = self._resolve_backend(ctx, "sfx")
 
         tasks: list = []
+        # Row P0-10 (§3.0-E/D): one shared ``node_item`` counter across the
+        # three asset families — each task announces the file it is about to
+        # write through the ONE emitter (progress + the A4.5 cancel boundary).
+        # ``total`` is filled once every task exists, which is before any of
+        # them is awaited.
+        progress = _ItemProgress(ctx, self.name)
 
         # 2. Image tasks (portraits for characters, entities, archetypes, maps)
         if image_backend and not self.skip_image:
-            tasks.extend(self._build_image_tasks(ctx, image_backend))
+            tasks.extend(self._build_image_tasks(ctx, image_backend, progress))
 
         # 3. Music tasks (one per environment + fixed tracks)
         if music_backend and not self.skip_music:
-            tasks.extend(self._build_music_tasks(ctx, music_backend))
+            tasks.extend(self._build_music_tasks(ctx, music_backend, progress))
 
         # 4. SFX tasks (fixed catalog + per-env ambience)
         if sfx_backend and not self.skip_sfx:
-            tasks.extend(self._build_sfx_tasks(ctx, sfx_backend))
+            tasks.extend(self._build_sfx_tasks(ctx, sfx_backend, progress))
 
         if not tasks:
             logger.warning("AssetPhase: no asset backends registered; nothing to do.")
             return
+        progress.total = len(tasks)
 
-        # 5. Fire it all in one gather — exceptions are captured, not re-raised
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # 5. Fire it all in one gather — a failed asset is captured, not
+        # re-raised (one dead sprite must not lose the other forty).
+        #
+        # A ⏹ STOP is the exception to that (row P0-10, master §3.0-D): the
+        # `node_item` emitter raises ``RunCancelled`` at the boundary, and
+        # `return_exceptions=True` would swallow it — the phase would report
+        # `node_done` and claim ``phase:assets`` in `kept` with zero files
+        # written. Re-raise it so the scheduler emits `node_failed` and the
+        # kept list stays true.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in results:
+            if isinstance(outcome, RunCancelled):
+                raise outcome
 
     def _resolve_backend(self, ctx: Any, kind: str) -> Any:
         """Resolve a backend from ctx.{kind}_backend or ctx.config.{kind}_backend."""
@@ -125,7 +163,7 @@ class AssetPhase:
     # Image task builders
     # ------------------------------------------------------------------
 
-    def _build_image_tasks(self, ctx: Any, backend: Any) -> list:
+    def _build_image_tasks(self, ctx: Any, backend: Any, progress: _ItemProgress) -> list:
         """Return a list of awaitable tasks for image generation."""
         portraits_dir = self._portraits_dir(ctx)
         sem = asyncio.Semaphore(self.image_concurrency)
@@ -138,6 +176,7 @@ class AssetPhase:
             on_success_attr: tuple[Any, str] | None,
         ) -> None:
             async with sem:
+                progress.announce(f"portrait · {filepath.stem}")
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 ok = await backend.generate_and_save_async(
                     prompt, str(filepath), width, height
@@ -195,7 +234,7 @@ class AssetPhase:
     # Music task builders
     # ------------------------------------------------------------------
 
-    def _build_music_tasks(self, ctx: Any, backend: Any) -> list:
+    def _build_music_tasks(self, ctx: Any, backend: Any, progress: _ItemProgress) -> list:
         """Return a list of awaitable tasks for music generation.
 
         Generates: combat, maze_<env> per unique env, puzzle_event,
@@ -207,6 +246,7 @@ class AssetPhase:
 
         async def _bounded(prompt: str, filepath: Path, duration: int) -> None:
             async with sem:
+                progress.announce(f"music · {filepath.stem}")
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 ok = await backend.generate_and_save_async(prompt, str(filepath), duration)
                 stats = getattr(ctx, "stats", None)
@@ -243,7 +283,7 @@ class AssetPhase:
     # SFX task builders
     # ------------------------------------------------------------------
 
-    def _build_sfx_tasks(self, ctx: Any, backend: Any) -> list:
+    def _build_sfx_tasks(self, ctx: Any, backend: Any, progress: _ItemProgress) -> list:
         """Fixed SFX catalog (matches mazeworld's standard effects) + per-env ambience."""
         sfx_dir = self._sfx_dir(ctx)
         sem = asyncio.Semaphore(self.sfx_concurrency)
@@ -253,6 +293,7 @@ class AssetPhase:
             prompt: str, filepath: Path, duration: float, loop: bool
         ) -> None:
             async with sem:
+                progress.announce(f"sfx · {filepath.stem}")
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 ok = await backend.generate_and_save_async(
                     prompt, str(filepath), duration, loop

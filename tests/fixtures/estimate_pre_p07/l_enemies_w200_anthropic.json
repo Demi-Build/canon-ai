@@ -1,0 +1,56 @@
+{
+  "case": "l_enemies_w200_anthropic",
+  "kind": "level",
+  "args": {
+    "op": "enemies",
+    "width": 200,
+    "axis": null,
+    "llm": "anthropic"
+  },
+  "estimate": {
+    "scope": "enemies",
+    "backends": {
+      "llm": "anthropic"
+    },
+    "llm": {
+      "by_task": {
+        "plat:placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 2200,
+          "output_tokens_per_call": 500,
+          "usd": 0.0047
+        }
+      },
+      "calls": 1.0,
+      "usd": {
+        "best": 0.0047,
+        "worst": 0.0188
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0047,
+      "worst": 0.0188
+    },
+    "warnings": []
+  }
+}

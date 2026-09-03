@@ -18,6 +18,10 @@ Usage::
     BackendRegistry.register_music("lyria", lambda: LyriaMusicBackend())
     BackendRegistry.register_sfx("elevenlabs", lambda: ElevenLabsSFXBackend())
 
+    # Register a chat (agent conversation) backend — Phase 1 A1
+    BackendRegistry.register_chat("anthropic", lambda: AnthropicChatBackend())
+    BackendRegistry.chat_ids()  # -> ["anthropic"]: the model picker's data
+
     # In tests — clear all registrations between test cases
     BackendRegistry.reset()
 """
@@ -26,11 +30,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from canon.backends.base import ImageBackend, LLMBackend, MusicBackend, SFXBackend
+from canon.backends.base import ChatBackend, ImageBackend, LLMBackend, MusicBackend, SFXBackend
 
 
 class BackendRegistry:
-    """Singleton registry for LLM, image, music, and SFX backend factories.
+    """Singleton registry for LLM, chat, image, music, and SFX backend factories.
 
     Backends are registered as factory callables (typically backend classes
     or zero-arg lambdas). Lazy instantiation: ``llm("name")`` constructs once
@@ -42,14 +46,24 @@ class BackendRegistry:
 
     rather than bare classes, which would require zero-arg construction.
 
+    The ``chat`` namespace (Phase 1 A1) holds ``ChatBackend`` factories for
+    the agent's conversation loop, following the same register/get/reset
+    idiom. ``chat_ids()`` is the ids-as-data surface the panel's provider
+    picker reads (Phase 1 §3.3) — provider ids are registry keys, never a
+    hardcoded union.
+
     Built-in registrations done at module import time:
         - ``"anthropic"`` -> ``AnthropicBackend`` (registered by
           ``canon.backends.anthropic`` when imported; canon does NOT
           auto-register it to avoid a hard ``anthropic`` dependency).
+        - the chat ``"anthropic"`` id likewise registers only via
+          ``canon.backends.chat_anthropic.register()``, never at import.
     """
 
     _llm_factories: dict[str, Callable[[], LLMBackend]] = {}
     _llm_instances: dict[str, LLMBackend] = {}
+    _chat_factories: dict[str, Callable[[], ChatBackend]] = {}
+    _chat_instances: dict[str, ChatBackend] = {}
     _image_factories: dict[str, Callable[[], ImageBackend]] = {}
     _image_instances: dict[str, ImageBackend] = {}
     _music_factories: dict[str, Callable[[], MusicBackend]] = {}
@@ -98,6 +112,56 @@ class BackendRegistry:
         if name not in cls._llm_instances:
             cls._llm_instances[name] = cls._llm_factories[name]()
         return cls._llm_instances[name]
+
+    @classmethod
+    def register_chat(cls, name: str, factory: Callable[[], ChatBackend]) -> None:
+        """Register a chat (conversation) backend factory under ``name``.
+
+        Args:
+            name: Registry key — the provider id the panel's picker shows.
+            factory: Zero-arg callable that returns a ``ChatBackend`` instance.
+
+        Note:
+            Re-registering an existing name replaces the factory **and** clears
+            any cached instance, so the new factory is used on next access.
+        """
+        cls._chat_factories[name] = factory
+        cls._chat_instances.pop(name, None)
+
+    @classmethod
+    def chat(cls, name: str) -> ChatBackend:
+        """Get a chat backend by registered name. Raises ``KeyError`` if unknown.
+
+        Lazy instantiation, same as ``llm()``: the factory runs once on first
+        access and the instance is cached.
+
+        Args:
+            name: Registry key used in ``register_chat``.
+
+        Returns:
+            The cached ``ChatBackend`` instance.
+
+        Raises:
+            KeyError: If ``name`` was never registered.
+        """
+        if name not in cls._chat_factories:
+            raise KeyError(
+                f"BackendRegistry: no chat backend registered for {name!r}. "
+                f"Known backends: {list(cls._chat_factories)}"
+            )
+        if name not in cls._chat_instances:
+            cls._chat_instances[name] = cls._chat_factories[name]()
+        return cls._chat_instances[name]
+
+    @classmethod
+    def chat_ids(cls) -> list[str]:
+        """The registered chat backend ids, in registration order.
+
+        This is the ids-as-data surface a provider picker reads — it never
+        instantiates anything, so a registered-but-keyless provider still
+        lists (and renders disabled-with-a-reason downstream).
+        """
+        return list(cls._chat_factories)
 
     @classmethod
     def register_image(cls, name: str, factory: Callable[[], ImageBackend]) -> None:
@@ -215,10 +279,12 @@ class BackendRegistry:
         """Clear all registrations and cached instances.
 
         Test-only helper. Call in ``setup``/``teardown`` to isolate registry
-        state between test cases. Clears LLM, image, music, and SFX state.
+        state between test cases. Clears LLM, chat, image, music, and SFX state.
         """
         cls._llm_factories.clear()
         cls._llm_instances.clear()
+        cls._chat_factories.clear()
+        cls._chat_instances.clear()
         cls._image_factories.clear()
         cls._image_instances.clear()
         cls._music_factories.clear()

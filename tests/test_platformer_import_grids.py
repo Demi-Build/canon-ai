@@ -32,8 +32,7 @@ def pack(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("plat_pack")
     subprocess.run(
         [
-            sys.executable,
-            str(REPO / "examples" / "run_platformer_slice.py"),
+            sys.executable, "-m", "canon.packs.platformer.run_slice",
             "--backend", "fake", "--engine", "json", "--image-backend", "fake",
             "--music-backend", "none", "--sfx-backend", "none",
             "--num-stages", "1", "--num-levels", "2", "--num-enemies", "2",

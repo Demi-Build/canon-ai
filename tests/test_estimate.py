@@ -17,22 +17,22 @@ from canon.bible.artifacts import ArtifactStatus
 from canon.bible.models import Bible
 from canon.config import CanonConfig
 from canon.llm.client import LLMClient
-from canon.pipeline.orchestrator import Node, initial_skips
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack.dag import run_orchestrated
-from examples.platformer_pack.estimate import (
+from canon.packs.platformer.dag import run_orchestrated
+from canon.packs.platformer.estimate import (
     _actuals_by_task,
     _sections_for_level,
     _task_calls,
     estimate_run,
 )
-from examples.platformer_pack.prompts import PlatformerPrompts
-from examples.run_platformer_slice import make_fake_responder
+from canon.packs.platformer.prompts import PlatformerPrompts
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.pipeline.orchestrator import Node, initial_skips
+from canon.pipeline.runner import PipelineContext
 
 CANON = [sys.executable, "-m", "canon.cli.main"]
-PIPELINE = "examples.platformer_pack.dag:cli_ctx_factory"
-PHASES = "examples.platformer_pack.dag:cli_phases_factory"
-ESTIMATOR = "examples.platformer_pack.estimate:estimate_run"
+PIPELINE = "canon.packs.platformer.dag:cli_ctx_factory"
+PHASES = "canon.packs.platformer.dag:cli_phases_factory"
+ESTIMATOR = "canon.packs.platformer.estimate:estimate_run"
 
 
 def _node(nid: str, always: bool = False, owns: tuple = ()) -> Node:
@@ -137,16 +137,24 @@ class TestEstimatorCounting:
         # Zero-token (fake) entries never calibrate.
         assert "plat:decorator" not in actuals
 
-    def test_world_art_node_prices_one_splash_image(self) -> None:
-        from examples.platformer_pack.estimate import _price_assets
+    def test_world_art_node_counts_one_splash_image(self) -> None:
+        """Counts only — the engine (canon.estimator) prices them through
+        canon.pricing; cost_model.json carries no dollar (row P0-7)."""
+        from canon.packs.platformer.estimate import _asset_counts
 
         bible = _StubBible(stages=1, enemies=0)
-        cost_model = {"assets": {"image_usd_per_call": 0.04, "images_world": 1}}
-        priced = _price_assets(
-            [_node("phase:plat:world_art")], bible, cost_model, []
-        )
-        assert priced["images"]["count"] == 1
-        assert _price_assets([], bible, cost_model, [])["images"]["count"] == 0
+        cost_model = {"assets": {"images_world": 1}}
+        counted = _asset_counts([_node("phase:plat:world_art")], bible, cost_model)
+        assert counted["images"] == 1
+        assert _asset_counts([], bible, cost_model)["images"] == 0
+
+    def test_cost_model_carries_no_price(self) -> None:
+        """§3.0-C: the data file keeps counts/tokens only; every dollar is
+        canon.pricing's."""
+        from canon.packs.platformer.estimate import load_cost_model
+
+        assets = load_cost_model()["assets"]
+        assert not [k for k in assets if "usd" in k], assets
 
     def test_fresh_mode_prices_the_fresh_plan(self, tmp_path: Path) -> None:
         ctx = PipelineContext(
@@ -284,8 +292,8 @@ class TestAnimateScope:
         are here because you "fixed" the estimator to multiply by frames,
         re-read `_animate_actor`: the frame loop is INSIDE one edit().
         """
-        from examples.platformer_pack.estimate import estimate_cradle
-        from examples.platformer_pack.ops import (
+        from canon.packs.platformer.estimate import estimate_cradle
+        from canon.packs.platformer.ops import (
             _animate_actor_spec,
             _sprite_bible,
             load_pack,
@@ -318,7 +326,7 @@ class TestAnimateScope:
         assert after["total_usd"] == est["total_usd"]
 
     def test_reuse_spec_drops_the_vlm_authoring_call(self, tmp_path: Path) -> None:
-        from examples.platformer_pack.estimate import estimate_cradle
+        from canon.packs.platformer.estimate import estimate_cradle
 
         out = tmp_path / "game"
         _build_tree(out)
@@ -340,7 +348,7 @@ class TestAnimateScope:
     ) -> None:
         """The "what an upgrade costs" UX: fake/none price at $0 with the
         image count still visible."""
-        from examples.platformer_pack.estimate import estimate_cradle
+        from canon.packs.platformer.estimate import estimate_cradle
 
         out = tmp_path / "game"
         _build_tree(out)

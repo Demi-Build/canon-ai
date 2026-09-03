@@ -22,10 +22,8 @@ from canon.backends.testing import FakeLLMBackend  # noqa: E402
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
-from canon.pipeline.orchestrator import mark_stale  # noqa: E402
-from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.combat import (  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.combat import (  # noqa: E402
     DEFAULT_COMBAT,
     CombatSpec,
     contact_hearts,
@@ -34,10 +32,12 @@ from examples.platformer_pack.combat import (  # noqa: E402
     occupancy,
     stomps_to_kill,
 )
-from examples.platformer_pack.dsl import stamp  # noqa: E402
-from examples.platformer_pack.rules import GameRules, load_rules  # noqa: E402
-from examples.platformer_pack.validate import check_placements  # noqa: E402
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.dsl import stamp  # noqa: E402
+from canon.packs.platformer.rules import GameRules, load_rules  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.validate import check_placements  # noqa: E402
+from canon.pipeline.orchestrator import mark_stale  # noqa: E402
+from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 
 W, H = 48, 16
 
@@ -253,7 +253,7 @@ class TestCombatShipsInOutputs:
             ), f"enemy regen did not cascade to {level_id} entities: {marked}"
 
     def test_dag_entities_node_requires_enemies_phase(self, tmp_path: Path) -> None:
-        from examples.platformer_pack.dag import LevelStepsDagPhase
+        from canon.packs.platformer.dag import LevelStepsDagPhase
 
         ctx = _slice(tmp_path / "run")
         nodes = LevelStepsDagPhase().expand(ctx)

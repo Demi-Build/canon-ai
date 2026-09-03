@@ -11,8 +11,8 @@ pytest.importorskip("PIL")
 
 from PIL import Image  # noqa: E402
 
-from examples.platformer_pack.art_sampling import run_art_sample  # noqa: E402
-from examples.platformer_pack.graphics import GraphicsSpec  # noqa: E402
+from canon.packs.platformer.art_sampling import run_art_sample  # noqa: E402
+from canon.packs.platformer.graphics import GraphicsSpec  # noqa: E402
 
 
 def _assert_png(path: str) -> Image.Image:

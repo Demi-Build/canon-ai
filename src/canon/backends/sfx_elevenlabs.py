@@ -17,10 +17,15 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from canon import pricing as _pricing
+
 if TYPE_CHECKING:
     pass  # no top-level elevenlabs import
 
-COST_PER_EFFECT = 0.04  # USD, ElevenLabs SFX, ~as of 2026-04
+#: USD per auto-duration effect — a VIEW of ``canon.pricing.SFX["elevenlabs"]``
+#: (the only price source, master §3.0-C, row P0-7); same name as before. A
+#: flat list price is ``estimated`` (P0 paper P.9 J3).
+COST_PER_EFFECT = _pricing.SFX["elevenlabs"]["usd"]
 
 
 class ElevenLabsSFXBackend:
@@ -60,6 +65,8 @@ class ElevenLabsSFXBackend:
             ) from e
         self._client = ElevenLabs(api_key=api_key or os.environ.get("ELEVENLABS_API_KEY"))
         self.last_cost: float = 0.0
+        #: Priced from the table, never provider-reported (P.9 J3).
+        self.last_cost_accuracy: str = _pricing.ESTIMATED
 
     def generate(self, prompt: str, duration_seconds: float, loop: bool) -> bytes:
         """Synchronously generate a sound effect.

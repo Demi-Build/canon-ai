@@ -1,0 +1,31 @@
+# canon.toml — generation spec for the mazeworld pack.
+#
+# Usage:
+#   python examples/run_mazeworld_full.py \
+#       --backend anthropic --assets none \
+#       --config src/canon/packs/dungeon/canon.toml
+#
+# Precedence: CLI flag > this file > pack default. Keep a baseline here and
+# override per-run on the command line (e.g. add `--events 6`).
+#
+# Consumed today: seed, num_maps, model, and the [counts] table.
+# backend / assets / output-dir are CLI-only (run-environment choices, not
+# part of the world definition). A future revision will also let the spec
+# declare the pack/game-type, story premise, and output layout (see the
+# requirement-schema TODO in src/canon/config.py).
+
+seed = "shadowspire_001"
+num_maps = 1
+model = "claude-opus-4-8"
+#model = "claude-haiku-4-5-20251001"   # cheapest; delete this line for the Sonnet default
+
+# Per-entity-type generation counts for the mazeworld pack. Keys are the entity
+# types this pack declares. Missing keys fall back to the pack defaults
+# (npc 2 / item 3 / monster 2 / event 4 / quest 2 / class 4).
+[counts]
+npc     = 2
+item    = 1
+monster = 2
+event   = 4   # type (combat / puzzle / skill) is a random weighted roll
+quest   = 1
+class   = 2

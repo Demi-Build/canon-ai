@@ -19,24 +19,39 @@ journal around the op — a fresh journal event means real new bytes, because
 Entry shape (``schema="cradle-jobs/v1"``)::
 
     {schema, ts, job_id, op, scope?, target?,
-     status: "ok" | "no_change" | "failed",
+     status: "ok" | "no_change" | "failed" | "cancelled",
      backends?, estimate?:{best,worst}, actual_usd?, duration_ms?,
-     changed: bool, changed_artifacts?:[..], error?}
+     changed: bool, changed_artifacts?:[..], error?,
+     identity?, session?, batchId?}
 
 The entry is otherwise passed through verbatim so cradle owns its shape (mirrors
-:mod:`canon.spend`). ``status`` is a two-tier success signal: ``ok`` = ran and
+:mod:`canon.spend`). ``status`` is a success signal: ``ok`` = ran and
 changed something, ``no_change`` = ran cleanly but produced identical bytes,
-``failed`` = the op errored.
+``failed`` = the op errored, ``cancelled`` = ⏹ Stop ended it (row P1-A4.5's
+contract; the VALUE joined at A6 — not a new schema, and :data:`STATUSES` is a
+data tuple for labels, never a type: a later status renders without an edit).
+
+Row P1-A6 (ASSUMPTION-8, P0 paper P.8.7) — **this file is RUN STATUS ONLY**.
+Its ``actual_usd`` is informational and is NEVER summed by the cost dashboard;
+money reconciles off the journal's ``costCents`` alone (one number, one
+source). The additive lane fields ``identity`` (``canon.provenance.identity_for``
+of the launching actor), ``session`` (the conversation id) and ``batchId`` let
+the tray attribute a run without a second cost path. :func:`summarize` is
+unchanged.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = "cradle-jobs/v1"
 LEDGER_NAME = "jobs.jsonl"
+
+#: Statuses the tray knows how to label, in reading order — DATA, never a type
+#: (P.8.8). ``cancelled`` joined at row P1-A6; an unknown status still renders.
+STATUSES: tuple[str, ...] = ("ok", "no_change", "failed", "cancelled")
 
 
 def _ledger_path(pack_dir: str | Path) -> Path:
@@ -44,7 +59,7 @@ def _ledger_path(pack_dir: str | Path) -> Path:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def record_job(pack_dir: str | Path, entry: dict, *, ts: str | None = None) -> dict:

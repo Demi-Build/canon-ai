@@ -1,0 +1,58 @@
+{
+  "_note": "Dungeon estimator data (row P0-7): counts and tokens ONLY — every dollar comes from canon.pricing by the selected backend's model (master §3.0-C). Tasks key the phase labels compose.py's pipeline emits (story / classes / db:<kind> / dialogue / spell_pool / narrative) plus classes:loadout for the per-archetype spell/ability batch calls (labelled <archetype>:spell|ability at run time).",
+  "_calibration": {
+    "method": "input_tokens / output_tokens per task = the per-phase actuals of a REAL anthropic run of this pipeline (2 rooms, 2 classes, 46 calls; generation_stats.json by_phase, token counts provider-reported) — measured beats guessed. The fake-mode measurement the row spec names (FakeLLMBackend, 1-map compose_pipeline, prompt chars / 4) is recorded beside it for comparison; fake prompts carry a near-empty cumulative context, so they under-read real inputs ~3x and real outputs ~4-10x (canned JSON vs prose).",
+    "real_run": "MazeWorld/data_canon/generation_stats.json (anthropic, 2 maps) — read 2026-09-01",
+    "fake_mode_1_map_chars_div_4": {
+      "story": {"input_tokens": 379, "output_tokens": 102},
+      "classes": {"input_tokens": 240, "output_tokens": 222},
+      "classes:loadout": {"input_tokens": 197, "output_tokens": 407},
+      "spell_pool": {"input_tokens": 195, "output_tokens": 361},
+      "db:item": {"input_tokens": 225, "output_tokens": 55},
+      "db:monster": {"input_tokens": 302, "output_tokens": 87},
+      "db:npc": {"input_tokens": 223, "output_tokens": 60},
+      "db:event": {"input_tokens": 274, "output_tokens": 155},
+      "db:quest": {"input_tokens": 202, "output_tokens": 111},
+      "dialogue": {"input_tokens": 279, "output_tokens": 111},
+      "narrative": {"input_tokens": 202, "output_tokens": 12}
+    },
+    "approximation": "chars / 4 ≈ tokens for the fake-mode figures; the real-run figures are exact provider token counts. Inputs grow with the cumulative context (more rooms/entities → larger later prompts, capped by CanonConfig.context_limit_chars = 20000 chars ≈ 5000 tokens). The engine's actuals calibration (canon.estimator.actuals_by_task) is NOT wired for the dungeon: no dungeon path passes actuals_dir, and the pipeline's per-archetype loadout labels (<archetype>:spell|ability) and spell_pool:<pool> labels would need the same normalisation the estimator test's _task_of applies before they could key these tasks. Wiring it is the spend-ledger refine below (master §5), not this row.",
+    "refine": "master §5 open item — refine against the spend ledger after the first paid runs."
+  },
+  "tasks": {
+    "story": {"input_tokens": 567, "output_tokens": 1103},
+    "classes": {"input_tokens": 673, "output_tokens": 209},
+    "classes:loadout": {"input_tokens": 575, "output_tokens": 640},
+    "spell_pool": {"input_tokens": 570, "output_tokens": 786},
+    "db:item": {"input_tokens": 876, "output_tokens": 186},
+    "db:monster": {"input_tokens": 1015, "output_tokens": 547},
+    "db:npc": {"input_tokens": 892, "output_tokens": 350},
+    "db:event": {"input_tokens": 984, "output_tokens": 446},
+    "db:quest": {"input_tokens": 933, "output_tokens": 270},
+    "dialogue": {"input_tokens": 1195, "output_tokens": 1145},
+    "narrative": {"input_tokens": 515, "output_tokens": 160}
+  },
+  "default_task": {"input_tokens": 900, "output_tokens": 400},
+  "worst_retries": 3,
+  "assets": {
+    "_note": "counts-per-unit knobs mirroring canon.pipeline.phases.asset.AssetPhase (portraits per entity stub / class / room environment; the fixed music + SFX catalogs; one env track + one env ambience per unique environment — environments cycle through compose._ENVIRONMENTS) and the dialogue phase (4 tree variants per quest giver; parse_quest makes a room's first NPC the giver of every quest).",
+    "portraits_per_entity": 1,
+    "portraits_per_class": 1,
+    "portraits_per_room": 1,
+    "music_fixed_tracks": 5,
+    "music_per_environment": 1,
+    "sfx_fixed_effects": 12,
+    "sfx_per_environment": 1,
+    "dialogue_variants_per_quest_giver": 4,
+    "quest_givers_per_room": 1
+  },
+  "fresh_plan": {
+    "rooms": 3,
+    "npc": 2,
+    "monster": 2,
+    "item": 3,
+    "event": 4,
+    "quest": 2,
+    "class": 4
+  }
+}

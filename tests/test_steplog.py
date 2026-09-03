@@ -18,12 +18,12 @@ from canon.backends.testing import FakeLLMBackend
 from canon.bible.models import Bible
 from canon.config import CanonConfig
 from canon.llm.client import LLMClient
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.run_slice import make_fake_responder
 from canon.pipeline.orchestrator import Node, orchestrate
 from canon.pipeline.runner import PipelineContext, run_pipeline
 from canon.pipeline.stats import GenerationStats
 from canon.pipeline.steplog import StepLog
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.run_platformer_slice import make_fake_responder
 from tests.treediff import assert_trees_byte_identical
 
 
@@ -179,7 +179,7 @@ def _fake_image_producer(tmp_path: Path):
     from PIL import Image
 
     from canon.backends.testing import FakeImageBackend
-    from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+    from canon.packs.platformer.tileset_art import DiffusionSheetProducer
 
     path = tmp_path / "blob.png"
     if not path.exists():
@@ -203,7 +203,7 @@ class TestSubPhaseProgress:
     """
 
     def test_step_is_a_noop_without_a_steplog(self) -> None:
-        from examples.platformer_pack.phases import step
+        from canon.packs.platformer.phases import step
 
         class _Bare:
             pass
@@ -213,7 +213,7 @@ class TestSubPhaseProgress:
     def test_step_carries_the_item_and_its_position(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.phases import step
+        from canon.packs.platformer.phases import step
 
         ctx = _ctx(tmp_path)
         step(ctx, "plat:sprite_art", "Cinder Beetle", index=3, total=15)

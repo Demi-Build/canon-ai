@@ -13,6 +13,7 @@ Code that only needs to check availability can use the lazy re-export from
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,14 +23,18 @@ if TYPE_CHECKING:
 
 # TODO(v0.2.x): handle response shape variations across genai SDK versions
 
+from canon import pricing as _pricing
+
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL_PRO = "lyria-3-pro-preview"
 DEFAULT_MODEL_CLIP = "lyria-3-clip-preview"
 
-# Pricing per call (as of 2026-04, sourced from Google AI pricing page)
-PRICING = {
-    DEFAULT_MODEL_PRO: 0.08,
-    DEFAULT_MODEL_CLIP: 0.04,
-}
+#: Per-track ``{model: usd}`` — a VIEW of ``canon.pricing.MUSIC`` (the only
+#: price source, master §3.0-C, row P0-7); same name and shape as before. A
+#: flat list price is ``estimated`` (P0 paper P.9 J3): Lyria reports no
+#: per-call cost.
+PRICING = {model: row["usd"] for model, row in _pricing.MUSIC.items()}
 
 
 class LyriaMusicBackend:
@@ -70,6 +75,27 @@ class LyriaMusicBackend:
         self.model_clip = model_clip
         self._client = genai.Client(api_key=api_key or os.environ.get("GOOGLE_API_KEY"))
         self.last_cost: float = 0.0
+        #: Priced from the table, never provider-reported (P.9 J3).
+        self.last_cost_accuracy: str = _pricing.ESTIMATED
+        self._unpriced_models: set[str] = set()
+
+    def _note_cost(self, model: str) -> None:
+        """Price the track that just returned from the table (Lyria reports
+        no cost); LOUD once per unpriced model, never a silent $0 (master
+        §3.0-B) — the same shape as ``image_fal._note_cost``."""
+        row = _pricing.music(model)
+        if row is None:
+            if model not in self._unpriced_models:
+                self._unpriced_models.add(model)
+                logger.warning(
+                    "No canon.pricing.MUSIC row for Lyria model %r — its calls "
+                    "report as $0 (accuracy %r). Add the row to canon.pricing.",
+                    model, _pricing.ESTIMATED,
+                )
+            self.last_cost = 0.0
+        else:
+            self.last_cost = float(row["usd"])
+        self.last_cost_accuracy = _pricing.ESTIMATED
 
     def _select_model(self, duration_seconds: int) -> str:
         """Return clip model for short requests, pro model for full-length."""
@@ -95,7 +121,7 @@ class LyriaMusicBackend:
             config={"response_modalities": ["AUDIO", "TEXT"]},
         )
         audio_bytes = self._extract_audio(response)
-        self.last_cost = PRICING.get(model, 0.0)
+        self._note_cost(model)
         return audio_bytes
 
     async def generate_async(self, prompt: str, duration_seconds: int) -> bytes:
@@ -118,7 +144,7 @@ class LyriaMusicBackend:
                 contents=prompt,
                 config={"response_modalities": ["AUDIO", "TEXT"]},
             )
-            self.last_cost = PRICING.get(model, 0.0)
+            self._note_cost(model)
             return self._extract_audio(response)
         import asyncio
 

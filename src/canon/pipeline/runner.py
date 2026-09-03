@@ -67,6 +67,13 @@ class PipelineContext:
         )
     )
     adapter: OutputAdapter | None = None
+    # The pack's registry id ("platformer" | "dungeon" | … — data, never a
+    # union). Each compose sets it from its PackSpec; every manifest writer
+    # mirrors it into manifest.json.pack_type on EVERY write (P0 paper P.4.1
+    # — the registry is the source of truth, the manifest key its mirror).
+    # None keeps every pre-P0-3 caller identical: a writer then stamps its
+    # own pack id, so legacy callers still stamp.
+    pack_type: str | None = None
 
     def __post_init__(self) -> None:
         # Default adapter rooted at config.output_dir, falling back to "."

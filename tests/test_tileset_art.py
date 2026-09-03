@@ -23,16 +23,16 @@ from canon.backends.testing import FakeImageBackend, FakeLLMBackend  # noqa: E40
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
-from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.graphics import DEFAULT_GRAPHICS  # noqa: E402
-from examples.platformer_pack.tiles import DEFAULT_TILES  # noqa: E402
-from examples.platformer_pack.tileset_art import (  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.graphics import DEFAULT_GRAPHICS  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.tiles import DEFAULT_TILES  # noqa: E402
+from canon.packs.platformer.tileset_art import (  # noqa: E402
     DiffusionSheetProducer,
     build_image_producer,
     conform_to_palette,
 )
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 
 SEED = "emberfall_001"
 STAGE = "ashen_depths"
@@ -278,7 +278,7 @@ class TestPngProvenance:
     """png_bytes + art_provenance — the G6 readable layer's encode seam."""
 
     def test_same_write_twice_is_byte_identical(self) -> None:
-        from examples.platformer_pack.tileset_art import (
+        from canon.packs.platformer.tileset_art import (
             art_provenance,
             png_bytes,
         )
@@ -297,7 +297,7 @@ class TestPngProvenance:
         assert decoded.text["canon:backend-model"] == ""  # no producer
 
     def test_empty_provenance_encodes_bare(self) -> None:
-        from examples.platformer_pack.tileset_art import png_bytes
+        from canon.packs.platformer.tileset_art import png_bytes
 
         img = Image.open(io.BytesIO(_textured_png()))
         buffer = io.BytesIO()
@@ -410,7 +410,7 @@ class TestGraphicsSpec:
         assert DEFAULT_GRAPHICS.posterize_levels == 16
 
     def test_unknown_keys_ride_inert_and_change_the_digest(self) -> None:
-        from examples.platformer_pack.graphics import GraphicsSpec
+        from canon.packs.platformer.graphics import GraphicsSpec
 
         spec = GraphicsSpec.model_validate(
             {"tile_px": 32, "sprite_px": 64}  # future knob, no enforcement yet
@@ -422,7 +422,7 @@ class TestGraphicsSpec:
         import pydantic
         import pytest
 
-        from examples.platformer_pack.graphics import GraphicsSpec
+        from canon.packs.platformer.graphics import GraphicsSpec
 
         with pytest.raises(pydantic.ValidationError):
             GraphicsSpec.model_validate({"tile_px": 4})
@@ -430,9 +430,10 @@ class TestGraphicsSpec:
             GraphicsSpec.model_validate({"render_filter": "cinematic"})
 
     def test_example_specs_prove_the_swap(self) -> None:
-        from examples.platformer_pack.graphics import load_graphics
+        from canon.packs.platformer import graphics as _graphics
+        from canon.packs.platformer.graphics import load_graphics
 
-        root = Path(__file__).parent.parent / "examples" / "graphics_specs"
+        root = Path(_graphics.__file__).parent / "graphics_specs"
         snes = load_graphics(root / "snes_pixel.json")
         hd = load_graphics(root / "rendered_hd.json")
         assert (snes.tile_px, snes.render_filter) == (16, "crisp")
@@ -443,9 +444,10 @@ class TestGraphicsSpec:
     def test_sheet_geometry_and_manifest_follow_the_spec(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.graphics import load_graphics
+        from canon.packs.platformer import graphics as _graphics
+        from canon.packs.platformer.graphics import load_graphics
 
-        root = Path(__file__).parent.parent / "examples" / "graphics_specs"
+        root = Path(_graphics.__file__).parent / "graphics_specs"
         for name, tile_px, filt in (
             ("snes_pixel", 16, "crisp"),
             ("rendered_hd", 128, "smooth"),
@@ -489,7 +491,7 @@ class TestGraphicsSpec:
         """Same placeholder bytes (tile_px unchanged), different art_style:
         the spec digest must invalidate provenance anyway — a graphics
         swap is a generation-input change like a model bump (§6.3)."""
-        from examples.platformer_pack.graphics import GraphicsSpec
+        from canon.packs.platformer.graphics import GraphicsSpec
 
         base = _run(tmp_path / "base")
         restyled_spec = GraphicsSpec.model_validate(
@@ -554,7 +556,7 @@ class TestBuildImageProducer:
 # through the same gate during development (89.0%→22.9%, 71.2%→24.1%,
 # and the correct mossy band untouched).
 
-from examples.platformer_pack.tileset_art import (  # noqa: E402
+from canon.packs.platformer.tileset_art import (  # noqa: E402
     ALPHA_GATE_RETRIES,
     ALPHA_RETRY_SUFFIX,
     alpha_gate,
@@ -625,7 +627,7 @@ class TestAlphaGateJudgement:
         assert ok and "auto-keyed" in note
         assert out.getpixel((128, 10))[3] == 0  # checker gone
         assert out.getpixel((128, 110))[3] == 255  # vines kept
-        from examples.platformer_pack.tileset_art import _opaque_fraction
+        from canon.packs.platformer.tileset_art import _opaque_fraction
 
         assert 0.2 <= _opaque_fraction(out) <= 0.3
 

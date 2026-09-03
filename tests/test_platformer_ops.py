@@ -22,9 +22,9 @@ from canon.skeleton.loader import load_skeleton_spec
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from examples.platformer_pack import ops  # noqa: E402
+from canon.packs.platformer import ops  # noqa: E402
 
-ENEMY_SCHEMA = REPO / "examples" / "platformer_pack" / "schemas" / "enemy.json"
+ENEMY_SCHEMA = Path(ops.__file__).parent / "schemas" / "enemy.json"
 
 
 @pytest.fixture(scope="module")
@@ -32,8 +32,7 @@ def pack(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("ops_pack")
     subprocess.run(
         [
-            sys.executable,
-            str(REPO / "examples" / "run_platformer_slice.py"),
+            sys.executable, "-m", "canon.packs.platformer.run_slice",
             "--backend", "fake", "--engine", "json", "--image-backend", "fake",
             "--music-backend", "none", "--sfx-backend", "none",
             "--num-stages", "1", "--num-levels", "1", "--num-enemies", "2",
@@ -306,6 +305,41 @@ def test_validate_level_passes_on_generated_pack(pack: Path):
     assert report["movement"]["jump_height"] >= 1  # merged physics rides along
 
 
+def test_describe_level_and_windowed_export_are_pure_reads(pack: Path):
+    """Row A3's read verbs: ``describe_level`` is a projection of the bundle
+    plus the validate verdict (never the grid), ``export_level_bundle(...,
+    window=)`` slices the same document — and neither writes a byte."""
+    import hashlib
+
+    from canon.adapters.platformer_read import describe_level, export_level_bundle
+
+    def tree() -> dict[str, str]:
+        return {
+            str(p.relative_to(pack)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(pack.rglob("*")) if p.is_file()
+        }
+
+    before = tree()
+    summary = describe_level(pack, "l1")
+    full = export_level_bundle(pack, "l1")
+    assert summary["dims"] == {"width": full["grid_width"], "height": full["grid_height"], "axis": "horizontal"}
+    assert sum(summary["tiles"]["by_category"].values()) == full["grid_width"] * full["grid_height"]
+    assert summary["entities"]["count"] == len(full["entities"])
+    assert summary["items"]["count"] == len(full["items"])
+    assert summary["validation"] == {
+        "ok": True, "problems": {"terrain": 0, "enemies": 0, "items": 0}, "repair_count": 0, "rooms": [],
+    }
+    assert summary["revision"] == full["revision"] and "grids" not in summary
+    assert summary["platforms"] and all(band["rows"][0] <= band["rows"][1] for band in summary["platforms"])
+
+    windowed = export_level_bundle(pack, "l1", window=(1, 1, 8, 6))
+    assert windowed["window"] == {"x0": 1, "y0": 1, "w": 8, "h": 6}
+    assert windowed["grid_width"] == full["grid_width"] and windowed["grid_height"] == full["grid_height"]
+    assert windowed["grids"]["collision"] == [row[1:9] for row in full["grids"]["collision"][1:7]]
+    assert all(1 <= e["x"] < 9 and 1 <= e["y"] < 7 for e in windowed["entities"])
+    assert tree() == before
+
+
 def test_validate_level_catches_hand_broken_edits(pack: Path, tmp_path: Path):
     import shutil
 
@@ -431,7 +465,7 @@ def test_generator_phases_resolve_pack_schema_override(pack: Path):
     the phases resolve schemas/<kind>.json under output_dir at run time."""
     from types import SimpleNamespace as NS
 
-    from examples.platformer_pack.phases import SCHEMAS_DIR, _schema_for
+    from canon.packs.platformer.phases import SCHEMAS_DIR, _schema_for
 
     default = SCHEMAS_DIR / "enemy.json"
     (pack / "schemas").mkdir(exist_ok=True)
@@ -568,10 +602,10 @@ def test_lineage_requested_prefers_row_over_animation_facet(pack: Path, tmp_path
     priority, not alphabetical order."""
     import shutil
 
+    from PIL import Image
+
     from canon.adapters.platformer_read import asset_lineage
     from canon.adapters.platformer_write import replace_asset
-
-    from PIL import Image
 
     p = tmp_path / "facet_pack"
     shutil.copytree(pack, p)
@@ -1029,7 +1063,7 @@ def test_improve_terrain_change_signal(pack: Path, tmp_path):
 
 
 def test_estimate_world_is_backend_and_count_aware():
-    from examples.platformer_pack.estimate import estimate_cradle
+    from canon.packs.platformer.estimate import estimate_cradle
 
     counts = {"num_stages": 3, "num_levels": 9, "num_enemies": 7, "num_items": 5}
     fake = estimate_cradle(
@@ -1063,7 +1097,7 @@ def test_estimate_world_is_backend_and_count_aware():
 
 
 def test_estimate_level_op_scopes(pack: Path):
-    from examples.platformer_pack.estimate import estimate_cradle
+    from canon.packs.platformer.estimate import estimate_cradle
 
     fake = estimate_cradle(
         "generate", pack_dir=pack, level_id="l1", backends={"llm": "fake"}
@@ -1159,7 +1193,7 @@ def test_music_section_model_is_additive_and_roundtrips():
 
 def test_active_music_resolves_section_then_level_then_stage():
     # The parity-critical pure resolver — main.gd ports it verbatim.
-    from examples.platformer_play import _active_music
+    from canon.packs.platformer.play import _active_music
 
     level = {
         "music_path": "level.mp3",
@@ -1197,7 +1231,7 @@ def test_apply_edit_music_path_and_sections_persist_and_journal(pack: Path, tmp_
 def test_generate_level_music_writes_track_repoints_and_costs(pack: Path, tmp_path: Path):
     import shutil
 
-    from examples.platformer_pack import ops
+    from canon.packs.platformer import ops
 
     p = tmp_path / "music_gen"
     shutil.copytree(pack, p)
@@ -1214,7 +1248,7 @@ def test_generate_level_music_captures_real_audio_cost(pack: Path, tmp_path: Pat
     the wiring a real Lyria run exercises (fake reports $0)."""
     import shutil
 
-    from examples.platformer_pack import ops
+    from canon.packs.platformer import ops
 
     class _StubMusic:
         model = "stub-music"
@@ -1224,7 +1258,7 @@ def test_generate_level_music_captures_real_audio_cost(pack: Path, tmp_path: Pat
             return b"ID3stub-mp3"
 
     monkeypatch.setattr(
-        "examples.platformer_pack.audio_phases.build_music_producer",
+        "canon.packs.platformer.audio_phases.build_music_producer",
         lambda kind: _StubMusic(),
     )
     p = tmp_path / "music_cost"
@@ -1235,7 +1269,7 @@ def test_generate_level_music_captures_real_audio_cost(pack: Path, tmp_path: Pat
 
 
 def test_estimate_music_scope_is_backend_masked():
-    from examples.platformer_pack.estimate import estimate_cradle
+    from canon.packs.platformer.estimate import estimate_cradle
 
     assert estimate_cradle("music", backends={"music": "fake"})["total_usd"]["best"] == 0.0
     assert estimate_cradle("music", backends={"music": "lyria"})["total_usd"]["best"] > 0.0
@@ -1407,7 +1441,7 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
 
         def generate(self, prompt, width, height):
             prompts.append(prompt)
-            from examples.platformer_pack.tileset_art import build_image_producer
+            from canon.packs.platformer.tileset_art import build_image_producer
 
             return build_image_producer("fake").backend.generate(prompt, width, height)
 
@@ -1424,9 +1458,9 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
     enemy_id = next(iter(ops._load_defs(p, "enemy")))
 
     monkeypatch.setattr(
-        "examples.platformer_pack.tileset_art.build_image_producer",
+        "canon.packs.platformer.tileset_art.build_image_producer",
         lambda *a, **k: __import__(
-            "examples.platformer_pack.tileset_art", fromlist=["DiffusionSheetProducer"]
+            "canon.packs.platformer.tileset_art", fromlist=["DiffusionSheetProducer"]
         ).DiffusionSheetProducer(_SpyImage()),
     )
     ops.generate_asset(
@@ -1437,7 +1471,7 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
 
     prompts.clear()
     monkeypatch.setattr(
-        "examples.platformer_pack.audio_phases.build_music_producer",
+        "canon.packs.platformer.audio_phases.build_music_producer",
         lambda kind: _SpyMusic(),
     )
     ops.generate_level_music(
@@ -1449,7 +1483,7 @@ def test_sprite_and_music_prompt_overrides_reach_the_producer(pack: Path, tmp_pa
 
 def _spy_animation_author(monkeypatch) -> list[str | None]:
     """Record the prompt_override each animate run hands the VLM author."""
-    import examples.platformer_pack.vlm_qa as vq
+    import canon.packs.platformer.vlm_qa as vq
 
     seen: list[str | None] = []
 
@@ -1483,7 +1517,7 @@ def test_animate_prompt_override_reaches_the_vlm_author(pack: Path, tmp_path, mo
 def test_animate_without_override_is_byte_identical(pack: Path, tmp_path, monkeypatch):
     """ADDITIVE guarantee: no override, None, and "" all send the built prompt
     unchanged — the same promise the sprite/system overrides make."""
-    from examples.platformer_pack.vlm_qa import animate_prompt, author_animation_spec
+    from canon.packs.platformer.vlm_qa import animate_prompt, author_animation_spec
 
     sent: list[str] = []
     enemy_id = next(iter(ops._load_defs(pack, "enemy")))

@@ -25,11 +25,11 @@ from canon.backends.testing import FakeLLMBackend  # noqa: E402
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.dag import run_orchestrated  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
 from canon.pipeline.orchestrator import detect_edits  # noqa: E402
 from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.dag import run_orchestrated  # noqa: E402
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
 from tests.treediff import tree_files  # noqa: E402
 
 CANON = [sys.executable, "-m", "canon.cli.main"]
@@ -429,8 +429,8 @@ class TestRegenVerb:
         result = subprocess.run(
             CANON + [
                 "regen", str(run / "bible.json"), "l2",
-                "--pipeline", "examples.platformer_pack.dag:cli_ctx_factory",
-                "--phases", "examples.platformer_pack.dag:cli_phases_factory",
+                "--pipeline", "canon.packs.platformer.dag:cli_ctx_factory",
+                "--phases", "canon.packs.platformer.dag:cli_phases_factory",
             ],
             capture_output=True, text=True,
             env={**os.environ, "CANON_PLAT_OUT": str(run), "CANON_PLAT_SEED": SEED},
@@ -454,7 +454,7 @@ class TestRegenVerb:
         nothing else in the Bible touched."""
         import hashlib
 
-        from examples.platformer_pack.dag import regen_field
+        from canon.packs.platformer.dag import regen_field
 
         run = tmp_path / "run"
         ctx, _ = _orchestrate_fresh(run)
@@ -479,7 +479,7 @@ class TestRegenVerb:
     def test_field_regen_unknown_field_names_supported(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.dag import regen_field
+        from canon.packs.platformer.dag import regen_field
 
         run = tmp_path / "run"
         ctx, _ = _orchestrate_fresh(run)
@@ -495,8 +495,8 @@ class TestRegenVerb:
             CANON + [
                 "regen", str(run / "bible.json"),
                 "enemy:cinder_beetle#flavor",
-                "--pipeline", "examples.platformer_pack.dag:cli_ctx_factory",
-                "--field-ops", "examples.platformer_pack.dag:regen_field",
+                "--pipeline", "canon.packs.platformer.dag:cli_ctx_factory",
+                "--field-ops", "canon.packs.platformer.dag:regen_field",
             ],
             capture_output=True, text=True,
             env={**os.environ, "CANON_PLAT_OUT": str(run), "CANON_PLAT_SEED": SEED},
@@ -544,8 +544,8 @@ class TestCliRegen:
         result = subprocess.run(
             CANON + [
                 "resume", str(run / "bible.json"),
-                "--pipeline", "examples.platformer_pack.dag:cli_ctx_factory",
-                "--phases", "examples.platformer_pack.dag:cli_phases_factory",
+                "--pipeline", "canon.packs.platformer.dag:cli_ctx_factory",
+                "--phases", "canon.packs.platformer.dag:cli_phases_factory",
             ],
             capture_output=True, text=True,
             env={**os.environ, "CANON_PLAT_OUT": str(run), "CANON_PLAT_SEED": SEED},

@@ -1,0 +1,11 @@
+{
+  "id": "writer",
+  "label": "Writer",
+  "actor": "writer",
+  "model_tier": "cheap",
+  "tools": [
+    "describe_pack", "db_types", "db_schema", "db_row", "get_history", "get_versions",
+    "list_pack_files", "read_pack_file", "search_pack",
+    "update_row", "complete_row", "estimate", "restore"
+  ]
+}

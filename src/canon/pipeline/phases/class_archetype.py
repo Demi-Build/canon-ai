@@ -18,6 +18,7 @@ from canon.bible.models import Ability, BibleMetadata, ClassArchetype, Spell
 from canon.llm.parsing import extract_json_object
 from canon.pipeline.phases.spell_pool import generate_named_entries
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
+from canon.pipeline.steplog import step
 from canon.skeleton.core import SkeletonSpec, roll_skeleton
 from canon.stats import fix_stats
 
@@ -162,12 +163,16 @@ class ClassPhase:
         context_text = ctx.bible.get_context("")  # global story context, no map binding
 
         if self.loadout_specs:
-            for spec in self.loadout_specs:
+            # Row P0-10 (§3.0-E/D): announce each archetype through the one
+            # ``node_item`` emitter (progress + the A4.5 cancel boundary).
+            for i, spec in enumerate(self.loadout_specs, start=1):
+                step(ctx, self.name, spec.archetype, i, len(self.loadout_specs))
                 archetype = self._generate_loadout(ctx, spec, context_text, max_retries)
                 ctx.bible.class_archetypes[archetype.archetype_id] = archetype
                 ctx.archetypes[archetype.archetype_id] = archetype
         else:
             for i in range(self.archetype_count):
+                step(ctx, self.name, f"archetype {i + 1}", i + 1, self.archetype_count)
                 archetype = self._generate_one(ctx, context_text, max_retries, index=i)
                 if archetype is None:
                     logger.warning("ClassPhase: archetype %d generation failed entirely", i)

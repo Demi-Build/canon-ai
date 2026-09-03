@@ -1,0 +1,56 @@
+{
+  "case": "l_layout_w96_vertical",
+  "kind": "level",
+  "args": {
+    "op": "layout",
+    "width": 96,
+    "axis": "vertical",
+    "llm": "anthropic"
+  },
+  "estimate": {
+    "scope": "layout",
+    "backends": {
+      "llm": "anthropic"
+    },
+    "llm": {
+      "by_task": {
+        "plat:layout": {
+          "calls": 5.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 2600,
+          "output_tokens_per_call": 900,
+          "usd": 0.1065
+        }
+      },
+      "calls": 5.0,
+      "usd": {
+        "best": 0.1065,
+        "worst": 0.426
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.1065,
+      "worst": 0.426
+    },
+    "warnings": []
+  }
+}

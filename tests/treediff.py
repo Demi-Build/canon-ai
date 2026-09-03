@@ -5,11 +5,21 @@ OUTSIDE the byte-determinism contract, matched by basename anywhere in
 the tree:
 
 - ``bible.json`` — ``generated_at`` + scheduler state (the original,
-  sole exemption).
-- ``log.jsonl`` — the ``.canon/`` step log; wall-clock timestamps by
-  design.
+  sole exemption). Row P0-10 makes the orchestrated scheduler the create
+  DEFAULT (master §8 Q6), so a fresh create tree now carries one: the
+  amended doctrine 7 reads "existing artifacts byte-identical; bible
+  additive."
 - ``generation_stats.json`` — call ordering is scheduler-shaped, and
   wired runs carry token/cost actuals.
+
+``EXCLUDED_DIRS`` is the whole ``.canon/`` directory (P0 paper P.9 R14,
+decided 2026-09-01), replacing the by-basename ``log.jsonl`` exemption it
+subsumes. The instance registry (``.canon/registry.json``, stamped at
+create by P0-10), the journal + its CAS objects and the step log are
+per-instance observability and provenance — timestamped, id-bearing, and
+outside canon's byte-determinism contract by the same reasoning that
+always exempted the step log. The fixtures compare the EMITTED PACK TREE:
+what the generator wrote, which is what a byte-identical claim is about.
 
 Everything else in an output tree must be byte-identical across
 same-command runs and across schedulers.
@@ -25,15 +35,23 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
     "generation_stats.json",
 )
 
+#: Directory names excluded wholesale, matched as a path component (P.9 R14).
+EXCLUDED_DIRS: frozenset[str] = frozenset({".canon"})
+
 
 def tree_files(
-    root: Path, exclude: tuple[str, ...] = DEFAULT_EXCLUDES
+    root: Path,
+    exclude: tuple[str, ...] = DEFAULT_EXCLUDES,
+    exclude_dirs: frozenset[str] = EXCLUDED_DIRS,
 ) -> list[Path]:
-    """Every file under *root* (relative paths), minus excluded basenames."""
+    """Every file under *root* (relative paths), minus excluded basenames and
+    anything under an excluded directory."""
     return sorted(
         p.relative_to(root)
         for p in root.rglob("*")
-        if p.is_file() and p.name not in exclude
+        if p.is_file()
+        and p.name not in exclude
+        and not (exclude_dirs & set(p.relative_to(root).parts[:-1]))
     )
 
 

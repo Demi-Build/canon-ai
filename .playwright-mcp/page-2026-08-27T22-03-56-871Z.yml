@@ -1,0 +1,110 @@
+- generic [ref=e566]:
+  - banner [ref=e567]:
+    - generic [ref=e568]:
+      - button "cradle" [ref=e569] [cursor=pointer]
+      - generic [ref=e570]: /
+      - generic [ref=e571]: start
+    - generic [ref=e572]:
+      - button "Notes & docs" [ref=e573] [cursor=pointer]
+      - button "Toggle theme" [ref=e576] [cursor=pointer]
+  - main [ref=e579]:
+    - generic [ref=e585]:
+      - generic [ref=e593]:
+        - generic [ref=e594]: Cradle
+        - generic [ref=e595]: v0.1
+      - paragraph [ref=e596]: Last world
+      - heading "The Wandering Wick" [level=1] [ref=e597]
+      - paragraph [ref=e598]: A lantern-lit autumn forest where the light you carry is the only thing keeping the hollows at bay. Three areas, nine levels, and something older than the grove waiting at the end.
+      - generic [ref=e599]:
+        - button "Enter world ⏎" [ref=e600] [cursor=pointer]:
+          - text: Enter world
+          - generic [ref=e601]: ⏎
+        - button "＋ New project" [ref=e602] [cursor=pointer]
+        - button "Open another…" [ref=e603] [cursor=pointer]
+    - generic [ref=e606]:
+      - generic [ref=e607]:
+        - text: Recent
+        - generic [ref=e608]: · 0
+      - generic [ref=e609]:
+        - button [disabled] [ref=e610]
+        - button [disabled] [ref=e613]
+      - button "All projects →" [ref=e616] [cursor=pointer]
+    - button "Open world from disk ⌘O" [ref=e618] [cursor=pointer]:
+      - generic [ref=e619]:
+        - generic [ref=e622]: Open world from disk
+        - generic [ref=e623]: ⌘O
+  - contentinfo [ref=e624]:
+    - generic [ref=e625]: idle
+    - generic [ref=e627]: last opened 3m ago
+    - generic [ref=e628]: cradle v0.1
+    - generic [ref=e629]: canon 0.4
+    - generic [ref=e630]: tauri 2.0
+  - complementary [ref=e631]:
+    - generic [ref=e632]:
+      - generic [ref=e633]:
+        - button "What's new" [ref=e634] [cursor=pointer]
+        - button "Updates" [ref=e635] [cursor=pointer]
+        - button "Links" [ref=e636] [cursor=pointer]
+      - button "close" [ref=e637] [cursor=pointer]
+    - generic [ref=e640]:
+      - generic [ref=e641]:
+        - generic [ref=e642]: v0.2
+        - generic [ref=e643]:
+          - heading "new Level editor" [level=4] [ref=e644]:
+            - generic [ref=e645]: new
+            - text: Level editor
+          - paragraph [ref=e646]: The map is the surface. Paint tile types, place and move enemies, items and checkpoints, resize the grid, and save the batch with ⌘S. Three render modes (Blocks / Art / Overlay) all drive the same edits. Right-click always erases. Tool rail, bottom dock, minimap, audio lane, bounds and rulers — all toggleable, and the floating panels remember where you put them.
+      - generic [ref=e647]:
+        - generic [ref=e648]: v0.2
+        - generic [ref=e649]:
+          - heading "new World map" [level=4] [ref=e650]:
+            - generic [ref=e651]: new
+            - text: World map
+          - paragraph [ref=e652]: Place levels, group them into areas, wire typed paths (two-way, one-way, conditional, planned) and drop path stops. Two canvas treatments over one graph — Schematic for authoring, Overworld for how it reads in game. The map is recomputed from the seed on every run, so anything you place is written as a durable override; the header tracks how many human edits it's carrying and can hand them back.
+      - generic [ref=e653]:
+        - generic [ref=e654]: v0.2
+        - generic [ref=e655]:
+          - heading "new Generation, without the freeze" [level=4] [ref=e656]:
+            - generic [ref=e657]: new
+            - text: Generation, without the freeze
+          - paragraph [ref=e658]: New projects, new levels, regenerate a layout blind, or Improve one with the LLM looking at what's there. Everything runs as a background job — the queue tray shows what ran, what it cost, how long it took, and whether it actually changed anything. Generators default to $0; turning one up shows a live estimate and asks before it spends.
+      - generic [ref=e659]:
+        - generic [ref=e660]: v0.2
+        - generic [ref=e661]:
+          - heading "new Play and validate" [level=4] [ref=e662]:
+            - generic [ref=e663]: new
+            - text: Play and validate
+          - paragraph [ref=e664]: ▶ Play a level in pygame (following your current view mode, so Blocks plays without art), ▶ Play game boots the whole loop in Godot, and ✓ Validate runs canon's real checks — reachability simulation included — against the level on disk.
+      - generic [ref=e665]:
+        - generic [ref=e666]: v0.2
+        - generic [ref=e667]:
+          - heading "new History you can walk back" [level=4] [ref=e668]:
+            - generic [ref=e669]: new
+            - text: History you can walk back
+          - paragraph [ref=e670]: "Every asset carries a lineage tree: what generated it, the prompt it came from, where it's used, and every version since. Compare two side by side with an onion-skin blend and restore any of them — restoring branches, it never deletes."
+      - generic [ref=e671]:
+        - generic [ref=e672]: v0.2
+        - generic [ref=e673]:
+          - heading "new Chrome" [level=4] [ref=e674]:
+            - generic [ref=e675]: new
+            - text: Chrome
+          - paragraph [ref=e676]: ⌘K command palette, tooltips on every icon button, collapsible nav (⌘B) and inspector (⌘I), focus mode (⌘.). Colour now comes from one token file — including the canvases, which used to carry their own dark-theme values and stayed dark in light mode.
+      - generic [ref=e677]:
+        - generic [ref=e678]: v0.1.0
+        - generic [ref=e679]:
+          - heading "First read-only release" [level=4] [ref=e680]
+          - paragraph [ref=e681]: Start screen with recent projects, four-lane NPC dialogue (default / complete / incomplete / failed) with quest-gate routing, monster stat blocks, NPC combat forms, quest contract cards with type-driven objectives, room hero (entry portrait + maze map), events with puzzle tab, items with per-category stats tables, classes with ability and spell pools, bible hero with clickable beats.
+      - generic [ref=e682]:
+        - generic [ref=e683]: v0.3
+        - generic [ref=e684]:
+          - heading "next Animation and feel" [level=4] [ref=e685]:
+            - generic [ref=e686]: next
+            - text: Animation and feel
+          - paragraph [ref=e687]: An animation tab with QA badges, per-actor custom states, dust and VFX, and a game-feel tuning panel for momentum, gravity and per-tile friction.
+      - generic [ref=e688]:
+        - generic [ref=e689]: v0.3
+        - generic [ref=e690]:
+          - heading "next Live dialogue" [level=4] [ref=e691]:
+            - generic [ref=e692]: next
+            - text: Live dialogue
+          - paragraph [ref=e693]: Talk to loaded NPCs via their dialogue tree at runtime, with the full state machine running against the LLM.

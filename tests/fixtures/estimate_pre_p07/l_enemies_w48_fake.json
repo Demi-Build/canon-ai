@@ -1,0 +1,56 @@
+{
+  "case": "l_enemies_w48_fake",
+  "kind": "level",
+  "args": {
+    "op": "enemies",
+    "width": 48,
+    "axis": null,
+    "llm": "fake"
+  },
+  "estimate": {
+    "scope": "enemies",
+    "backends": {
+      "llm": "fake"
+    },
+    "llm": {
+      "by_task": {
+        "plat:placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 2200,
+          "output_tokens_per_call": 500,
+          "usd": 0.0
+        }
+      },
+      "calls": 1.0,
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0,
+      "worst": 0.0
+    },
+    "warnings": []
+  }
+}
