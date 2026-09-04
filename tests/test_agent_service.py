@@ -318,6 +318,42 @@ class TestHttpBasics:
         assert listed == [{"id": conversation_id, "created": transcript[0]["created"], "turns": 0}]
         assert_only_transcripts_changed(before, snapshot(pack))
 
+    def test_the_webview_origins_are_allowed_to_read_the_answer(self, pack: Path) -> None:
+        """Cradle fetches this service from the webview, so every request is
+        cross-origin and a missing header makes the browser drop a 200 —
+        which the panel can only report as a service that never started.
+        Node's ``fetch`` does not enforce CORS, so nothing else catches it."""
+        client, _ = app_for(pack, [])
+        for origin in ("http://localhost:1420", "http://127.0.0.1:5173", "tauri://localhost"):
+            response = client.get("/health", headers={"Origin": origin})
+            assert response.status_code == 200
+            assert response.headers.get("access-control-allow-origin") == origin, origin
+
+    def test_a_json_post_can_preflight(self, pack: Path) -> None:
+        """A JSON body preflights, so ``OPTIONS`` has to answer for the
+        streaming message route or the turn never leaves the panel."""
+        client, _ = app_for(pack, [])
+        response = client.options(
+            "/conversations/conv_00000000/messages",
+            headers={
+                "Origin": "http://localhost:1420",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,accept",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:1420"
+        assert "POST" in response.headers["access-control-allow-methods"]
+
+    def test_a_page_on_the_open_internet_is_not_allowed_to_read_it(self, pack: Path) -> None:
+        """The sidecar binds loopback, and the allowance is never wider than
+        the socket: a page the user happens to have open cannot read a 200
+        out of their own project."""
+        client, _ = app_for(pack, [])
+        for origin in ("http://evil.com", "http://localhost.evil.com", "tauri://localhost.evil"):
+            response = client.get("/health", headers={"Origin": origin})
+            assert "access-control-allow-origin" not in response.headers, origin
+
     def test_create_without_body_has_no_system(self, pack: Path) -> None:
         client, _ = app_for(pack, [])
         conversation_id = client.post("/conversations").json()["id"]

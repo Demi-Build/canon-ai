@@ -4,9 +4,13 @@ One FastAPI app around ``run_conversation``, served by uvicorn on
 ``127.0.0.1:<port>``. Cradle spawns it the way it spawns the play harness
 (the play-process precedent), reads the FIRST stdout line —
 ``{"port": N, "pid": P}`` — and talks to that port directly from the
-webview (``tauri.conf.json`` has ``csp: null``; no proxy). The sidecar
-watches cradle's pid and exits when it is gone, so an orphaned service
-never outlives the app.
+webview (``tauri.conf.json`` has ``csp: null``; no proxy). Direct means
+CROSS-ORIGIN — the webview's origin is a dev server or Tauri's own
+scheme, never this port — so the app carries CORS for the loopback
+origins in ``ALLOWED_ORIGIN_RE``; without them the browser drops every
+response and the panel reads it as a service that never started. The
+sidecar watches cradle's pid and exits when it is gone, so an orphaned
+service never outlives the app.
 
 Routes::
 
@@ -105,6 +109,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -139,6 +144,18 @@ FAKE_BACKEND_ID = "fake"
 
 #: Watchdog poll interval (seconds).
 WATCHDOG_INTERVAL = 0.5
+
+#: The origins the webview fetches us FROM. Cradle talks to this port
+#: directly rather than through a Rust proxy, so every request the panel
+#: makes is cross-origin and the browser drops the response without these
+#: headers: a Vite dev origin (`http://localhost:1420`, any port, since Vite
+#: walks upward when one is taken) in development, and Tauri's own scheme in
+#: a bundled app (`tauri://localhost` on macOS/iOS/Linux,
+#: `http://tauri.localhost` on Windows/Android). Loopback-only, matching the
+#: `HOST` the service binds — the allowance is never wider than the socket.
+ALLOWED_ORIGIN_RE = (
+    r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|tauri://localhost|http://tauri\.localhost)$"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +612,15 @@ def create_app(
         log.warning("skill refused: %s", problem)
 
     app = FastAPI(title="canon agent service", docs_url=None, redoc_url=None)
+    # No credentials: the panel sends no cookies and no auth header, so the
+    # allowance stays a plain origin check. `OPTIONS` is here because a JSON
+    # POST preflights, and `accept` because the SSE requests set it.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=ALLOWED_ORIGIN_RE,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["content-type", "accept"],
+    )
     app.state.pack_dir = pack
     app.state.backend_id = backend_id
     app.state.model = shown_model
