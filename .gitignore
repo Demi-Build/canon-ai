@@ -72,8 +72,6 @@ ENV/
 # Jupyter
 .ipynb_checkpoints/
 
-docs/
-docs/*
 ROADMAP_HANDOFF.md
 .claude/
 

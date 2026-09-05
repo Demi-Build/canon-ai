@@ -1,0 +1,26 @@
+# Paste-able starter prompt for the next Claude Code session
+
+Continue the Canon platformer work. Repo: ~/Documents/projects/canon-ai.
+
+READ FIRST, in order (trust DISK over docs):
+- Memory via MEMORY.md — especially: project_run_up_momentum, project_reachability_simulation, project_canon_schema_model, feedback_code_not_llm_for_computation, feedback_no_git_operations, project_real_run_cli_footguns, project_canon_platformer_prd.
+- The APPROVED PLAN for the current phase: ~/.claude/plans/cosmic-floating-tower.md (sectioned levels + section archetypes). This is the roadmap — follow its chunks A→F.
+- docs/HANDOFF.md — the "Verification bar", key file map, and §0d (reachability jump-arc simulation) + §0e (run-up momentum) — the two features shipped last session.
+- docs/platformer_prd.md (§6, §7).
+
+WHAT SHIPPED LAST SESSION (context, don't redo):
+- TASK 1 — reachability jump-arc SIMULATION replaced the arc_clear heuristic (validate.py reachable_cells/_successors); catches unbeatable levels; verified.
+- RUN-UP MOMENTUM + run button (SHIFT): horizontal accel/momentum, jump preserves vx, weak air control; walk jump ~4 / run jump ~6.6 needs ~5-cell runway; reachability gates wide gaps on RUNWAY. Both consumers (platformer_play.py + main.gd), PARITY PROVEN 0.001 cell (verify godot headless with --fixed-fps 60, NOT --write-movie which crashes). Layout prompt teaches it. Full bar green (suite 1750). Tunables are DATA on PlayerMovementSpec — user tunes feel by playtest.
+- ★ STATUS 2026-07-12: momentum + reachability + animation + sections-core are now COMMITTED (tree clean, branch `updated_level_const` @ `ad34faa`). The "confirm committed before piling on" gate is satisfied — proceed to the sections integration. (The user still handles all git — feedback_no_git_operations — remind them to commit each new chunk.)
+
+CURRENT PHASE — sectioned levels (plan: cosmic-floating-tower.md). Model: FEATURES (existing DSL ops) → SECTIONS (typed sub-regions, an axis + feature-mix + entry/exit-height seam) → LEVELS (a sequence of sections; may repeat). Fully SKELETON-DRIVEN: section vocab is data (sections.json), composition is a deterministic code roll (plan_sections), the LLM only arranges KNOWN features within a bounded section; parsers/validators reject anything invented. Placeholder-block render first (art stays at loop end). Chunks: A section model+horizontal stitcher, B archetype character (cave/islands/feature_bias/encounter), C REAL vertical sections (y-stitch, exit-at-top, height-aware camera), D breakable floors (a feature carrying a mechanic, both surfaces), E floating water clouds + secret alcoves, F widen dims+tune+docs. Deferred: moving family (auto-scroll/elevators/rails/rising-tide), darkness, boss rooms, backtrack/key-door, multi-exit/branching.
+
+CHUNK A STATUS — CORE DONE, INTEGRATION NEXT:
+- DONE (new files, ruff clean, 7 tests green, nothing else touched): examples/platformer_pack/sections.json (archetype vocab: runway/gauntlet/cave/islands/climb), sections.py (SectionArchetype spec, plan_sections deterministic roll, composite sub-grid stitcher with non-empty-wins seams), tests/test_platformer_sections.py.
+- NEXT (the integration, edits the momentum files — do AFTER the user commits momentum): in examples/platformer_pack/level.py stamp_level_collision, replace the single-blob layout generation with the section loop — per section: derive_rng(seed, phase, level_id, section_idx) → per-section layout_generation (prompts.py, carrying the archetype flavor + local dims + the PREVIOUS section's SEAM SUMMARY [standable columns + entry/exit height + player state, never a raw grid] + feature_bias-weighted op list) → stamp each section local → composite() into the full grid → whole-level check_level (momentum reachability) + auto_bridge/snap on the whole grid → a validator failure maps to the owning section by x-range, only THAT section retries. Teach the fake responder / _fake_layout (examples/run_platformer_slice.py) to emit per-section via a "### SECTION" marker so the loop runs at $0. Then the whole-level BLOCK RENDER must be LOOKED at, byte-identical fake + orch==seq.
+
+VERIFICATION BAR (per chunk): full suite green (--deselect tests/test_backend_lyria.py::TestLyriaMusicBackendRegister::test_register_adds_lyria_to_registry) · two fake runs byte-identical (bible.json exempt for generated_at) · orch==seq minus bible.json · canned fake exercises every new path at $0 · godot --headless --check-only · ruff (only the 2 pre-existing test_llm_parsing) · block render of a stitched level LOOKED at; for consumer changes (C, D) also PLAT_LEVEL (godot --fixed-fps 60) + PLAT_CAPTURE (pygame) LOOKED at on BOTH surfaces + PLAT_TRAJ parity. src/canon touched only where core.
+
+HOUSE RULES: YOU never run git (stop at staging boundary; remind to commit). Paid backends are USER-run only; fake/$0 for you. Plan-mode + sign-off before phase-sized work (the plan is already approved). Land in verifiable chunks, full bar per chunk. Update HANDOFF + memory at session end.
+
+FIRST: momentum is committed (confirmed 2026-07-12) — go straight to the Chunk A integration (level.py section loop). NOTE: sections-core (sections.py/sections.json + 7 tests) is committed but imported NOWHERE yet; `stamp_level_collision` is still single-blob — the integration is genuinely un-started. The task list has chunks A–F.
