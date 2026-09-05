@@ -1,3 +1,0 @@
-[      83ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5199/node_modules/.vite/deps/react-dom_client.js?v=6abc20b1:20102
-[     107ms] [LOG] [cradle] loadWorldByPath called with: mock://plat_pack @ http://localhost:5199/src/store.ts:244
-[     162ms] [LOG] [cradle] backend returned summary: {requested: mock://plat_pack, summaryPath: mock://plat_pack, name: The Wandering Wick, counts: Array(7)} @ http://localhost:5199/src/store.ts:250

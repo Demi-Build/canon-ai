@@ -81,6 +81,13 @@ ROADMAP_HANDOFF.md
 # the repo; plat_slice_output is the runner default that lands here otherwise
 # (a dropped `\` on --output-dir is the foot-gun that committed one before).
 /plat_*/
+# The same rule, for the other trees a run leaves behind: /out is the spike
+# scratch (meshy_spike's .glb/.png), /canon_output is a generated pack, and
+# /exit is what a stray `> exit` redirect writes. All four were committed once.
+/out/
+/canon_output/
+/exit
+.playwright-mcp/
 
 # OS
 .DS_Store
