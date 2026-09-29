@@ -1,6 +1,6 @@
 """Cost forecasting for the platformer pack — the pack's COUNT FUNCTION plus
 thin ``estimate_run`` / ``estimate_cradle`` wrappers over the shared engine
-(``canon.estimator``, row P0-7; PRD §9.2's estimator hook).
+(``canon.estimator``; the estimator hook).
 
 Since P0-7 this module only answers "which nodes fire how many times":
 LLM calls per task label across a would-run node list (level layouts
@@ -17,6 +17,13 @@ paid/backend mask, the retry multiplier, the summation and the breakdown
 shape; ``ESTIMATOR`` is the ``PackSpec.estimator`` pair this pack registers.
 A fresh bible (no stages yet) prices the ``fresh_plan`` shape instead — the
 two-pass bootstrap means its per-level nodes don't exist to count.
+
+The two SINGLE-UNIT scopes (``asset``, ``row``) count off the pipeline rather
+than off a knob, because the pipeline has no knob for them either: one
+``asset generate`` target's units come from the phase that runs it plus the
+pack's graphics spec (:func:`_asset_units`), and one ``db complete`` is one
+call at the kind's OWN ``phase_label`` — the same label the run stamps, so the
+pack's recorded runs calibrate it.
 """
 
 from __future__ import annotations
@@ -26,8 +33,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from canon import pricing
 from canon.backends.anthropic import DEFAULT_MODEL
-from canon.estimator import Estimator, actuals_by_task, estimate
+from canon.estimator import Estimator, actuals_by_task, db_row_task, estimate
 from canon.packs.platformer.models import DEFAULT_MODELS_PATH
 
 DEFAULT_COST_MODEL_PATH = Path(__file__).parent / "cost_model.json"
@@ -132,7 +140,10 @@ def _asset_counts(nodes: list, bible: Any, cost_model: dict) -> dict:
     whose layout re-runs (their renders change), worst = every level (a
     graphics/model change re-judges all). Animation QA (per actor, v1
     always-cadence) and the authoring pass (when sprite_animation runs) are
-    additional per-actor families."""
+    additional per-actor families. Each family names its ``task`` — the
+    phase-label prefix the run's metered judge records that call under
+    (``by_phase`` → ``actuals_by_task``), so a pack's own recorded runs are
+    the calibration row for it, the way the LLM tasks are keyed."""
     a = cost_model.get("assets", {})
     node_ids = {n.node_id for n in nodes}
     num_stages = max(len(getattr(bible, "stages", {}) or {}), 1)
@@ -165,18 +176,36 @@ def _asset_counts(nodes: list, bible: Any, cost_model: dict) -> dict:
             if n.node_id.startswith("level:")
         })
         actors = num_enemies + 1  # + the player
+        tasks = _vlm_tasks()
         vlm = {
             "level_judgments": {
                 "best": min(changed_levels, num_levels), "worst": num_levels,
-                "tokens": "vlm_per_level",
+                "tokens": "vlm_per_level", "task": tasks["level_judgments"],
             },
-            "animation_qa": {"count": actors, "tokens": "vlm_per_actor"},
+            "animation_qa": {
+                "count": actors, "tokens": "vlm_per_actor",
+                "task": tasks["animation_qa"],
+            },
             "animation_authoring": {
                 "count": actors if "phase:plat:sprite_animation" in node_ids else 0,
-                "tokens": "vlm_per_actor",
+                "tokens": "vlm_per_actor", "task": tasks["animation_authoring"],
             },
         }
     return {"images": images, "music": music, "sfx": sfx, "vlm": vlm}
+
+
+def _vlm_tasks() -> dict[str, str]:
+    """VLM family → the phase-label prefix the pipeline records it under —
+    read off the phase and the labels themselves, never restated here, so
+    the calibration key IS the recorded key. (Function-level import: the
+    pack's spec module imports this one at load.)"""
+    from canon.packs.platformer.vlm_qa import ANIMATE_LABEL, ANIMATE_QA_LABEL, VlmQaPhase
+
+    return {
+        "level_judgments": VlmQaPhase.name,
+        "animation_qa": ANIMATE_QA_LABEL,
+        "animation_authoring": ANIMATE_LABEL,
+    }
 
 
 class _FreshNode:
@@ -270,6 +299,69 @@ def _synthetic_op_bible(level_id: str, width: int, axis: str) -> Any:
     )
 
 
+def _asset_units(pack_dir: str | Path, target: str, *, music: bool, sfx: bool) -> dict:
+    """ONE ``asset generate`` target's units, counted off the phase that runs
+    it and the pack's OWN graphics spec — never a knob in ``cost_model.json``,
+    because the pipeline does not read one here either:
+
+    - ``enemy:<id>`` / ``item:<id>`` / ``player`` — ``SpriteArtPhase`` over a
+      bible filtered to that one target (``_sprite_bible`` pins the rest), so
+      the count is that phase's own unpinned-candidate sum;
+    - ``backdrop:<stage>`` — ``BackdropArtPhase``'s ``graphics.backdrop_bands``
+      parallax bands (0 = gradient sky only, and a $0 call);
+    - ``audio:<stage>`` — ``AudioPhase``'s one theme plus the ``SFX_EVENTS``
+      catalog, each half only when the call actually selected that backend.
+
+    ``label`` names the units AT THEIR SIZE — the sprite's own pixels, the
+    band's own canvas — and ``image_px`` carries the DIFFUSION request size
+    (``graphics.gen_px``) so a size-billed row picks its real tier. The two
+    differ for sprites on purpose: a general model draws the big canvas and the
+    phase conforms it down, while a pixel-art backend redraws at the art's own
+    size — and no pixel-art row in ``canon.pricing`` bills by resolution, so
+    the tier lookup only ever fires where gen_px IS the request.
+
+    Raises (unknown target, missing enemy/stage) for anything unpriceable —
+    the caller renders that as unknown, never as $0.
+    """
+    from canon.packs.platformer.art_phases import sprite_candidates
+    from canon.packs.platformer.audio_phases import SFX_EVENTS
+    from canon.packs.platformer.ops import _parse_target, _sprite_bible, load_pack
+    from canon.pipeline.orchestrator import pinned_ids
+
+    info = load_pack(pack_dir)
+    kind, rest = _parse_target(target)
+    gen_px = int(getattr(info.graphics, "gen_px", 0) or 0)
+    if kind in ("enemy", "item", "player"):
+        bible = _sprite_bible(info, kind, rest)
+        # THE phase's own candidate count, called not copied: whatever
+        # SpriteArtPhase.run is about to generate for this filtered bible is
+        # what this forecast prices.
+        images = sprite_candidates(bible, pinned_ids(bible))
+        art_px = int(info.graphics.sprite_size())
+        return {"images": images, "image_px": gen_px, "music": 0, "sfx": 0,
+                "primary": "image",
+                "label": f"{images} sprite{'s' if images != 1 else ''} at {art_px}px"}
+    if kind == "backdrop":
+        if rest not in info.stages:
+            raise FileNotFoundError(f"stage {rest!r} not found")
+        bands = int(getattr(info.graphics, "backdrop_bands", 0) or 0)
+        return {"images": bands, "image_px": gen_px, "music": 0, "sfx": 0,
+                "primary": "image",
+                "label": (f"{bands} backdrop band{'s' if bands != 1 else ''} "
+                          f"at {gen_px}×{gen_px // 2}")}
+    if rest not in info.stages:
+        raise FileNotFoundError(f"stage {rest!r} not found")
+    tracks = 1 if music else 0
+    effects = len(SFX_EVENTS) if sfx else 0
+    if not (tracks or effects):
+        raise ValueError("audio targets need a music and/or sfx backend")
+    parts = ([f"{tracks} track"] if tracks else []) + (
+        [f"{effects} sound effect{'s' if effects != 1 else ''}"] if effects else []
+    )
+    return {"images": 0, "music": tracks, "sfx": effects,
+            "primary": "music" if tracks else "sfx", "label": " + ".join(parts)}
+
+
 def _animate_edits(pack_dir: str | Path, target: str) -> int:
     """ONE actor's animation run, PRICED BY STATES, NOT FRAMES:
     `_sheet_frames` issues exactly one ImageEditBackend.edit() per state
@@ -310,7 +402,11 @@ def count_platformer(params: dict, bible: Any = None) -> dict:
       target level so layouts price by real width; no assets;
     - ``animate`` — one actor's img2img edits (by states) + one VLM
       authoring call unless ``reuse_spec``;
-    - ``music`` — one track.
+    - ``music`` — one track;
+    - ``asset`` — ONE ``asset generate`` target's images / track / effects
+      (:func:`_asset_units`);
+    - ``row`` — ONE ``db complete`` call, at ``params["task"]`` (the kind's
+      own ``phase_label``).
 
     ``params["cost_model"]`` is injected by the engine (the knobs live there).
     """
@@ -335,15 +431,38 @@ def count_platformer(params: dict, bible: Any = None) -> dict:
         # The VLM authors the motion spec once per run — unless --reuse-spec
         # replays the stored one, which skips the vision call entirely.
         vlm = {} if params.get("reuse_spec") else {
-            "animation_authoring": {"count": 1, "tokens": "vlm_per_actor"},
+            "animation_authoring": {
+                "count": 1, "tokens": "vlm_per_actor",
+                "task": _vlm_tasks()["animation_authoring"],
+            },
         }
         return {"llm": {}, "images": edits, "music": 0, "sfx": 0, "vlm": vlm}
+
+    if scope == "asset":
+        # estimate_cradle counts these to build the label and pick the primary
+        # category; it hands them down rather than re-reading the pack.
+        units = params.get("units") or _asset_units(
+            params["pack_dir"], params["target"],
+            music=bool(params.get("music")), sfx=bool(params.get("sfx")),
+        )
+        return {
+            "llm": {}, "images": int(units["images"]), "music": int(units["music"]),
+            "sfx": int(units["sfx"]), "vlm": empty_vlm,
+            **({"image_px": units["image_px"]} if units.get("image_px") else {}),
+        }
+
+    if scope == "row":
+        # ONE anchored builder call per completion (`db complete` runs the
+        # kind's generation body once), priced at the very task label the
+        # pipeline stamps on it — so this pack's own recorded runs calibrate it.
+        return {"llm": {params["task"]: 1}, "images": 0, "music": 0, "sfx": 0, "vlm": empty_vlm}
 
     if scope == "music":
         return {"llm": {}, "images": 0, "music": 1, "sfx": 0, "vlm": empty_vlm}
 
     raise ValueError(
-        f"unknown estimate scope {scope!r} (world|music|animate|{'|'.join(_OP_STEPS)})"
+        f"unknown estimate scope {scope!r} "
+        f"(world|music|animate|asset|row|{'|'.join(_OP_STEPS)})"
     )
 
 
@@ -356,8 +475,39 @@ ESTIMATOR = Estimator(
     models_env="CANON_PLAT_MODELS",
 )
 
-#: The category whose backend/model the top-level §3.0-E keys report per scope.
+#: The category whose backend/model the top-level additive keys report per scope
+#: (``asset`` resolves per TARGET — art or audio — so it is not in this map).
 _PRIMARY_KIND = {"animate": "image", "music": "music"}
+
+#: How the ``calibration`` flag reads on the card's one "work" line. Copy only.
+_CALIBRATION_COPY = {
+    "actuals": "measured from this pack's runs",
+    "defaults": "default rates",
+}
+
+
+def _spends_on(lane: str, params: dict[str, Any], backends: dict[str, str]) -> bool:
+    """Whether the money this scope prices runs through ``lane`` at all.
+
+    Two ways it does not. An unpaid backend (fake / none / local) is a real $0
+    whatever model is named on it. And only the ``asset`` scope can be handed a
+    model for a lane it does not spend through: ``generate_asset`` carries ONE
+    ``image_model`` field, and an ``audio:<stage>`` target makes no images — so
+    an image model named there prices nothing and must not fail the estimate."""
+    if not pricing.is_paid(lane, backends.get(lane)):
+        return False
+    units = params.get("units")
+    if lane == "image" and isinstance(units, dict):
+        return bool(units.get("images"))
+    return True
+
+
+def _produces(backend: str | None) -> bool:
+    """Whether an audio half runs at all for this selection — the same test
+    ``build_music_producer`` / ``build_sfx_producer`` apply (unset / ``none``
+    = silence, so no unit). A ``fake`` backend still PRODUCES: it makes a unit
+    that costs $0, which the engine's mask already shows as "count, $0"."""
+    return bool(backend) and backend != "none"
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +531,9 @@ def estimate_cradle(
     axis: str | None = None,
     target: str | None = None,
     reuse_spec: bool = False,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Price ONE cradle op, backend- and count-aware.
 
@@ -388,15 +541,33 @@ def estimate_cradle(
     (stages/levels/enemies/items) — the New Project surface. The per-op scopes
     (``generate`` / ``layout`` / ``enemies`` / ``items``) price the LLM steps a
     single level op runs against an existing ``pack_dir``/``level_id``.
-    ``animate`` prices one actor's animation run (``target``). In every
+    ``animate`` prices one actor's animation run (``target``); ``asset`` ONE
+    ``asset generate`` target (``target``, art or audio); ``row`` ONE
+    ``db complete`` (``entity_type`` + ``entity_id``). In every
     case the returned USD reflects the chosen ``backends`` ($0 for fake/none).
     Same output schema as estimate_run plus ``scope`` + echoed ``backends``
-    (+ the additive §3.0-E keys, row P0-7).
+    (+ the additive estimate keys).
+
+    Every scope that names a ``pack_dir`` calibrates off that pack's own
+    ``generation_stats.json``; the estimate's ``calibration`` says whether it
+    bit, and ``unitLabel`` names the units it counted.
+
+    ``model`` prices (and quotes) THIS model instead of the one the pack's
+    tables would pick, on the lane the scope spends through: the IMAGE model
+    for ``asset``/``animate``, the LLM model everywhere else. Pass it only when
+    the run really will use it — the art ops take ``image_model`` straight to
+    the backend, and ``world new --model`` disables the per-agent table for the
+    whole run, but a per-op LLM call does NOT (``build_llm`` always attaches
+    that table and its resolver answers every label, so the tier wins). An id
+    ``canon.pricing`` has no row for is ignored, loudly; on the two per-unit
+    scopes it is refused outright, because there the price really is unknown.
     """
     backends = dict(backends or {})
     params: dict[str, Any] = {"scope": scope}
     bible: Any = None
     actuals_dir: Path | None = None
+    unit_label: str | None = None
+    primary_kind = _PRIMARY_KIND.get(scope, "llm")
 
     if scope == "world":
         params["counts"] = dict(counts or {})
@@ -417,17 +588,68 @@ def estimate_cradle(
         if not (pack_dir and target):
             raise ValueError("scope 'animate' needs pack_dir + target")
         params.update({"pack_dir": pack_dir, "target": target, "reuse_spec": reuse_spec})
+    elif scope == "asset":
+        if not (pack_dir and target):
+            raise ValueError("scope 'asset' needs pack_dir + target")
+        # An audio target generates only the halves whose backend the call
+        # actually selected, so the counts read the selection, not a knob.
+        params.update({
+            "pack_dir": pack_dir, "target": target,
+            "music": _produces(backends.get("music")), "sfx": _produces(backends.get("sfx")),
+        })
+        units = _asset_units(pack_dir, target,
+                             music=params["music"], sfx=params["sfx"])
+        if units["images"] and not _produces(backends.get("image")):
+            # The same guard the op raises — an art target with no image
+            # backend does not run, so it has no price, not a $0 one.
+            raise ValueError("sprite and backdrop targets need an image backend")
+        params["units"] = units
+        unit_label = str(units["label"])
+        # The primary category is what THIS target makes — art or audio — so
+        # the card names the backend the money actually goes to.
+        primary_kind = str(units["primary"])
+        actuals_dir = Path(pack_dir)
+    elif scope == "row":
+        if not (pack_dir and entity_type):
+            raise ValueError("scope 'row' needs pack_dir + entity_type")
+        task, label = db_row_task(pack_dir, entity_type)
+        params["task"] = task
+        unit_label = f"1 {label} row" + (f" · {entity_id}" if entity_id else "")
+        actuals_dir = Path(pack_dir)
     elif scope != "music":
         raise ValueError(
             f"unknown estimate scope {scope!r} "
-            f"(world|music|animate|{'|'.join(_OP_STEPS)})"
+            f"(world|music|animate|asset|row|{'|'.join(_OP_STEPS)})"
         )
 
+    # The art scopes spend through the image lane, everything else through the
+    # LLM one — so a named model prices the lane the op actually bills on. On an
+    # `audio:<stage>` target the image lane counts nothing, so an image model
+    # named there prices nothing either.
+    lane = "image" if scope == "asset" else _PRIMARY_KIND.get(scope, "llm")
+    if model and scope in ("asset", "row") and _spends_on(lane, params, backends):
+        # The two per-unit scopes exist to answer "what will THIS one call
+        # spend", so a model whose rate canon does not know is an UNKNOWN the
+        # caller renders as such — never the routing table's model quoted
+        # beside the routing table's price for a call that will run something
+        # else. (The whole-op scopes keep pricing at the table's model behind
+        # the warning: their card prices a chain, not this one model.)
+        if pricing.price_for(lane, model, []) is None:
+            raise ValueError(
+                f"no {lane} price row for model {model!r}: this call's cost is unknown"
+            )
     result = estimate(
         ESTIMATOR, params, bible, backends=backends,
-        primary_kind=_PRIMARY_KIND.get(scope, "llm"), actuals_dir=actuals_dir,
-        template="platformer",
+        primary_kind=primary_kind, actuals_dir=actuals_dir,
+        template="platformer", unit_label=unit_label,
+        models={lane: model} if model else None,
     )
+    if unit_label is not None:
+        # The card renders ONE "work" line, so the calibration source rides on
+        # it beside the units it describes: a forecast that counted per call
+        # must not be silent about which of its numbers were measured.
+        source = result["calibration"]
+        result["unitLabel"] += f" · {_CALIBRATION_COPY.get(source, source)}"
     return {"scope": scope, "backends": backends, **result}
 
 
@@ -443,5 +665,7 @@ def estimate_run(ctx: Any, nodes: list, bible: Any) -> dict:
         ESTIMATOR, params, bible, backends=None,
         actuals_dir=None if fresh else output_dir, template="platformer",
     )
-    calibration = "actuals" if (not fresh and actuals_by_task(output_dir)) else "defaults"
-    return {"mode": "fresh" if fresh else "tree", "calibration": calibration, **result}
+    # The engine decides `calibration` now (ONE rule — "did it actually bite",
+    # not "does a stats file exist"); naming it here only keeps the run shape's
+    # original key ORDER, with the engine's value riding through.
+    return {"mode": "fresh" if fresh else "tree", "calibration": result["calibration"], **result}

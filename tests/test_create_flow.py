@@ -21,7 +21,7 @@ from canon.packs import PACKS, pack_templates, resolve_pack
 from canon.packs.dungeon.spec import PHASE_LABELS as DUNGEON_LABELS
 from canon.packs.platformer.spec import PHASE_LABELS as PLATFORMER_LABELS
 from canon.pipeline.steplog import CANCEL_FILE_ENV, EXIT_CANCELLED
-from tests.treediff import EXCLUDED_DIRS, tree_files
+from tests.treediff import EXCLUDED_DIRS, assert_trees_byte_identical, tree_files
 
 REPO = Path(__file__).resolve().parents[1]
 CANON = [sys.executable, "-m", "canon.cli.main"]
@@ -142,6 +142,46 @@ class TestPackTemplates:
             copy_text = " ".join([template["description"], *template["vocab"]]).lower()
             assert "floor" not in copy_text, template["id"]
 
+    @pytest.mark.parametrize("template_id", sorted(t for t, s in PACKS.items() if s.estimator is not None))
+    def test_world_estimate_prices_the_wizard_defaults(self, template_id: str) -> None:
+        """One source of default counts: `world estimate` with no count flag
+        forecasts exactly the world `pack templates` seeds the wizard with and
+        `world new` builds — not the cost model's `fresh_plan`, which on the
+        platformer was 3 stages / 9 levels / 7 enemies / 5 items ($5.52) for a
+        create that really makes 1 / 2 / 4 / 4 ($2.56). Asserted for every
+        registered template, through the CLI: the document with no flags
+        equals the document with the wizard's defaults passed explicitly, and
+        differs from the `fresh_plan` one wherever the two sets disagree."""
+        from canon.cli.main import _ESTIMATE_COUNT_FLAGS, _count_key, _estimate_default_counts
+
+        spec = PACKS[template_id]
+        wizard = next(t for t in run_canon("pack", "templates")["templates"] if t["id"] == template_id)
+        flag_table = _ESTIMATE_COUNT_FLAGS[template_id]
+        # The helper the verb seeds from answers the wizard's numbers, keyed
+        # for the count function.
+        seeded = _estimate_default_counts(spec, template_id)
+        assert seeded == {
+            count_key: wizard["defaults"][_count_key(spec, flag)] for flag, count_key in flag_table.items()
+        }
+        assert set(seeded) == set(flag_table.values()), "every estimate flag has a wizard default"
+        backends = ["--template", template_id, "--llm-backend", "anthropic", "--image-backend", "fal"]
+        bare = run_canon("world", "estimate", *backends)["estimate"]
+        explicit_flags = [
+            arg for flag in flag_table for arg in (f"--{flag}", str(wizard["defaults"][_count_key(spec, flag)]))
+        ]
+        explicit = run_canon("world", "estimate", *backends, *explicit_flags)["estimate"]
+        assert bare == explicit, "the bare estimate must price the wizard's counts"
+        assert bare["total_usd"]["best"] > 0
+        fresh = spec.estimator.fresh_plan()
+        fresh_counts = {k: fresh[k] for k in flag_table.values() if k in fresh}
+        if fresh_counts != seeded:
+            fresh_flags = [
+                arg for flag, key in flag_table.items() if key in fresh_counts
+                for arg in (f"--{flag}", str(fresh_counts[key]))
+            ]
+            fresh_doc = run_canon("world", "estimate", *backends, *fresh_flags)["estimate"]
+            assert bare["total_usd"] != fresh_doc["total_usd"], "the bare estimate priced fresh_plan, not the wizard"
+
 
 # ---------------------------------------------------------------------------
 # Phase labels as template data (§3.0-E)
@@ -242,15 +282,28 @@ class TestDungeonCreate:
 
     def test_the_seed_reaches_the_runner(self, tmp_path: Path) -> None:
         """W2's papercut: the seed used to be dropped. Two creates on one seed
-        produce the same tree."""
+        produce the same tree — the same FILES and the same BYTES.
+
+        The byte half is the regression: this compared file lists only, and
+        under it `manifest.json` carried a wall clock (`generated_at`, and the
+        `validation_report.timestamp` copied into it). Emitted pack content is
+        outside `.canon/` and inside the determinism contract, so a same-seed
+        create must reproduce it exactly. A seed cannot reproduce a clock and a
+        seed-derived stand-in is read as a creation date it is not, so neither
+        key is emitted: the pack's real creation time stays in `.canon/`, where
+        a timestamp is allowed to be a timestamp.
+        """
         a, b = tmp_path / "a", tmp_path / "b"
         for out in (a, b):
             run_canon("world", "new", str(out), "--template", "dungeon",
                       "--rooms", "1", "--seed", "same-seed", "--name", "Twin")
-        files = tree_files(a)
-        assert files == tree_files(b)
-        assert json.loads((a / "manifest.json").read_text())["seed"] == \
-            json.loads((b / "manifest.json").read_text())["seed"]
+        assert tree_files(a) == tree_files(b)
+        assert_trees_byte_identical(a, b)
+        manifest = json.loads((a / "manifest.json").read_text())
+        assert manifest["seed"] == json.loads((b / "manifest.json").read_text())["seed"]
+        # Pinned by name, because a file list would not have caught either.
+        assert "generated_at" not in manifest
+        assert "timestamp" not in manifest["validation_report"]
 
     def test_a_platformer_flag_is_refused_by_name_not_dropped(self, tmp_path: Path) -> None:
         """Doctrine 4 — disabled WITH a reason."""
@@ -494,6 +547,70 @@ class TestDungeonCancel:
         # What landed stays on disk, and the log is the record of what it was.
         ends = [e for e in log_events(out) if e["event"] == "run_end"]
         assert len(ends) == 1 and ends[0]["cancelled"] is True
+        # A stop before the manifest phase leaves no generation_stats.json, so
+        # the run's money is UNMEASURED: the key is absent (never a $0 that
+        # looks measured) and the document says why.
+        assert not (out / "generation_stats.json").exists()
+        assert "actual_usd" not in result and "actual_split_usd" not in result
+        assert any("generation_stats.json" in w and "unmeasured" in w for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# What a create records: the money it really spent (never a $0 for unknown)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateReportsWhatItSpent:
+    """The platformer create used to record $0 for a $2.60 run: every reader
+    of a create's actual looked for an EMBEDDED `manifest.generation_stats`
+    block — a dungeon convention — while the platformer writes only the
+    standalone `generation_stats.json` (the path canon itself declares
+    canonical). `world new` now reports `actual_usd` from that file through
+    the estimator's one reader, for every template alike."""
+
+    @pytest.mark.parametrize(
+        ("template_id", "flags"),
+        [
+            # The platformer wires its VLM judge (fake, $0) so the run meters
+            # every lane the split has to carry.
+            ("platformer", ["--stages", "1", "--levels", "1", "--enemies", "1", "--items", "1",
+                            "--vlm-backend", "fake"]),
+            ("dungeon", ["--rooms", "1"]),
+        ],
+    )
+    def test_actual_usd_is_the_stats_file_s_total(self, tmp_path: Path, template_id: str, flags: list[str]) -> None:
+        out = tmp_path / template_id
+        result = run_canon(
+            "world", "new", str(out), "--template", template_id, "--name", "Metered",
+            "--seed", f"money-{template_id}", *flags,
+        )
+        stats = json.loads((out / "generation_stats.json").read_text(encoding="utf-8"))
+        # Present AND equal: a fake run measures a real $0, which is a
+        # different fact from "unmeasured".
+        assert "actual_usd" in result
+        assert result["actual_usd"] == stats["total_cost_usd"] == 0.0
+        assert result["actual_split_usd"] == {
+            "llm": stats["llm_cost_usd"], "vlm": stats["vlm_cost_usd"],
+            "image": stats["image_cost_usd"], "audio": stats["audio_cost_usd"],
+        }
+        # The split carries EVERY lane the stats file meters (read off the
+        # file, not a list here), which is what makes it sum to the total on
+        # a metered run and not only on this $0 one.
+        metered = {k.removesuffix("_cost_usd") for k in stats if k.endswith("_cost_usd")} - {"total"}
+        assert set(result["actual_split_usd"]) == metered
+        assert sum(result["actual_split_usd"].values()) == pytest.approx(result["actual_usd"])
+        assert stats["failures"] == [], "a clean run states it lost nothing"
+        assert not any("generation_stats" in w for w in result.get("warnings", []))
+
+    def test_the_platformer_manifest_keeps_no_embedded_block(self, platformer_pack: Path) -> None:
+        """Pinned on purpose: real wizard creates run the DAG scheduler on a
+        thread pool, so an embedded `by_phase` would land in a
+        non-deterministic order and break emitted-content reproducibility.
+        The standalone file is the platformer's only stats record — which is
+        exactly why every reader has to go through it."""
+        manifest = json.loads((platformer_pack / "manifest.json").read_text(encoding="utf-8"))
+        assert "generation_stats" not in manifest
+        assert (platformer_pack / "generation_stats.json").is_file()
 
     def test_a_stop_inside_the_asset_phase_does_not_claim_the_phase_landed(
         self, tmp_path: Path

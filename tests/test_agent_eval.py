@@ -12,7 +12,7 @@ from dataclasses import replace
 import pytest
 
 from canon.agent.eval import FAKE_COST_NOTE, EvalResult, main, run_scripted
-from canon.agent.evals import CONVERSATIONS, ScriptedConversation, conversation
+from canon.agent.evals import CONVERSATIONS, ScriptedConversation, conversation, ordered_groups
 from canon.agent.loop import MAX_TOOL_ROUNDS_STOP, ConversationResult, run_conversation
 from canon.backends import BackendRegistry, FakeChatBackend
 from canon.llm.chat import (
@@ -30,6 +30,30 @@ from canon.llm.chat import (
 # ---------------------------------------------------------------------------
 
 PROBE = ToolSpec(name="probe", description="probe", input_schema={"type": "object", "properties": {}})
+
+
+class Silent:
+    """A NON-fake backend that answers one text turn per request and reports
+    ``usage`` on each — the smallest thing the cost note has to price. It
+    carries ``model`` / ``id`` only when given, like the real backends
+    (anthropic's has no ``id``; a bare test double has neither)."""
+
+    def __init__(self, *, usage: Usage | None = None, model: str | None = None, id: str | None = None) -> None:
+        self.usage = usage or Usage(10, 20)
+        if model is not None:
+            self.model = model
+        if id is not None:
+            self.id = id
+
+    def stream(self, request: ChatRequest):
+        yield MessageStart("m")
+        yield MessageStop("end_turn", self.usage, [{"type": "text", "text": "permission chip"}])
+
+
+def flat_names(conv: ScriptedConversation) -> list[str]:
+    """The expected tool names flattened in group order — what the fake
+    scripts (written in that order) actually call."""
+    return [call["name"] for group in ordered_groups(conv.expected_tool_calls) for call in group]
 
 
 def run_builtin(name: str, **kwargs) -> tuple[ConversationResult, FakeChatBackend]:
@@ -79,7 +103,7 @@ class TestBuiltinConversations:
         result = run_scripted(conv, FakeChatBackend(conv.fake_turns))
         assert result.failures == []
         assert result.passed is True
-        assert result.tool_calls == [call["name"] for call in conv.expected_tool_calls]
+        assert result.tool_calls == flat_names(conv)
         assert result.usage == Usage()
         assert result.cost_note == FAKE_COST_NOTE
 
@@ -282,9 +306,10 @@ class TestRunScripted:
 
     def test_wrong_input_subset_fails(self) -> None:
         base = conversation("unbeatable-level")
-        calls = [dict(base.expected_tool_calls[0], input_subset={"level_id": "l7"}), base.expected_tool_calls[1]]
+        validate, describe = base.expected_tool_calls[0]  # one group of two reads
+        calls = [[dict(validate, input_subset={"level_id": "l7"}), describe]]
         result = run_scripted(replace(base, expected_tool_calls=calls), FakeChatBackend(base.fake_turns))
-        assert any("lacks {'level_id': 'l7'}" in f for f in result.failures)
+        assert any("tool call 0 (validate_level)" in f and "lacks {'level_id': 'l7'}" in f for f in result.failures)
 
     def test_wrong_text_expectation_fails_and_is_freed_by_strict_text_false(self) -> None:
         conv = replace(conversation("just-talking"), expected_text_contains=["definitely not said"])
@@ -379,22 +404,171 @@ class TestRunScripted:
         result = run_scripted(conv, Broken())
         assert result.passed is False
         assert result.failures == ["backend error (retryable): rate limited"]
-        assert result.cost_note.startswith("measured tokens")
-
-    def test_cost_note_for_non_fake_backend_names_the_price_module(self) -> None:
-        class Silent:
-            def stream(self, request: ChatRequest):
-                yield MessageStart("m")
-                yield MessageStop("end_turn", Usage(10, 20), [{"type": "text", "text": "permission chip"}])
-
-        result = run_scripted(conversation("just-talking"), Silent())
-        assert result.passed is True
-        assert result.cost_note == (
-            "measured tokens in=20/out=40 (cache read=0, creation=0); priced by the §3.0-C module from P0-7"
-        )
+        assert result.cost_note == "measured tokens in=0/out=0 (cache read=0, creation=0); nothing to price"
 
     def test_eval_result_has_no_cost_number(self) -> None:
+        """The figure in the note is ``canon.pricing``'s; the result carries
+        no cost field of this module's own."""
         assert not any(name.endswith("_cost") or name == "cost" for name in EvalResult.__dataclass_fields__)
+
+
+# ---------------------------------------------------------------------------
+# The cost note: measured counts + canon.pricing's figure, never a doc cite
+# ---------------------------------------------------------------------------
+
+
+class TestCostNote:
+    def test_a_real_backend_is_priced_through_canon_pricing(self) -> None:
+        """Two turns of Usage(10, 20) on gpt-5.1 ($1.25 / $10 per 1M):
+        20 × 1.25e-6 + 40 × 10e-6 = $0.000425, flagged measured."""
+        result = run_scripted(conversation("just-talking"), Silent(model="gpt-5.1", id="openai"))
+        assert result.passed is True
+        assert result.cost_note == (
+            "measured tokens in=20/out=40 (cache read=0, creation=0); $0.000425 measured at gpt-5.1"
+        )
+
+    def test_the_figure_is_the_journal_pricer_s_not_a_second_arithmetic(self) -> None:
+        """Doctrine 2: the note prices through ``provenance.token_gen_block``
+        — the same function the agent journal prices a turn with — so the
+        cache-read rate and the creation-at-input rate are inherited, not
+        re-derived. Usage(10, 20, 4, 2) × 2 turns on gpt-5.1: (20 + 4) ×
+        1.25e-6 + 40 × 10e-6 + 8 × 0.125e-6 = $0.000431."""
+        from dataclasses import asdict
+
+        from canon.provenance import token_gen_block
+
+        result = run_scripted(conversation("just-talking"), Silent(usage=Usage(10, 20, 4, 2), model="gpt-5.1"))
+        priced = token_gen_block("openai", "gpt-5.1", asdict(result.usage))
+        assert priced is not None and priced["gen"]["cost_usd"] == 0.000431
+        assert result.cost_note == (
+            "measured tokens in=20/out=40 (cache read=8, creation=4); $0.000431 measured at gpt-5.1"
+        )
+
+    def test_an_unpriced_model_on_a_paid_backend_is_named_not_a_silent_zero(self) -> None:
+        result = run_scripted(conversation("just-talking"), Silent(model="gpt-nope", id="openai"))
+        assert result.cost_note.startswith("measured tokens in=20/out=40 (cache read=0, creation=0); unpriced — ")
+        assert "no llm price row for 'gpt-nope'" in result.cost_note
+        assert "$" not in result.cost_note
+
+    def test_the_cli_backend_id_decides_paid_when_the_backend_has_no_id(self) -> None:
+        """The anthropic backend carries ``model`` but no ``id``; ``main``
+        passes ``--backend`` through so an unpriced model on it is still a
+        named gap, not $0."""
+        result = run_scripted(conversation("just-talking"), Silent(model="claude-nope"), backend_id="anthropic")
+        assert "unpriced — anthropic: no llm price row for 'claude-nope'" in result.cost_note
+
+    def test_a_backend_reporting_no_model_is_unpriced(self) -> None:
+        result = run_scripted(conversation("just-talking"), Silent())
+        assert result.cost_note == (
+            "measured tokens in=20/out=40 (cache read=0, creation=0); "
+            "unpriced — the backend reports no model id to price by"
+        )
+
+    def test_no_note_cites_a_planning_document(self) -> None:
+        """A section sign, a PRD row id or a phase number in a user-visible
+        line is a document cite; "price row" is canon.pricing's own table
+        vocabulary and is fine."""
+        import re
+
+        document_cite = re.compile(r"§|\bP0-\d|\brow [A-Z]\d|\bPhase \d|\bmaster\b")
+        notes = [
+            FAKE_COST_NOTE,
+            run_scripted(conversation("just-talking"), Silent(model="gpt-5.1", id="openai")).cost_note,
+            run_scripted(conversation("just-talking"), Silent(model="gpt-nope", id="openai")).cost_note,
+            run_scripted(conversation("just-talking"), Silent()).cost_note,
+        ]
+        for note in notes:
+            assert not document_cite.search(note), note
+
+
+# ---------------------------------------------------------------------------
+# Ordered groups: complete in sequence, free order inside a group
+# ---------------------------------------------------------------------------
+
+
+class TestOrderedGroups:
+    def test_a_bare_call_is_a_group_of_one_and_a_list_is_a_group(self) -> None:
+        a, b, c = {"name": "a"}, {"name": "b"}, {"name": "c"}
+        assert ordered_groups([a, [b, c]]) == [[a], [b, c]]
+        assert ordered_groups([a, b]) == [[a], [b]]  # a strictly-ordered expectation is untouched
+        assert ordered_groups([]) == []
+        assert ordered_groups(["artist", ["level_designer", "writer"]]) == [["artist"], ["level_designer", "writer"]]
+
+    def test_the_corpus_groups_follow_the_task_not_the_script(self) -> None:
+        shapes = {c.name: [len(g) for g in ordered_groups(c.expected_tool_calls)] for c in CONVERSATIONS}
+        assert shapes["create-ice-world"] == [1, 1], "plan before a paid create is ESSENTIAL — strict"
+        assert shapes["routing-design-and-art"] == [1, 2], "describe first, then two delegates in one turn"
+        assert shapes["routing-art-only"] == [1, 1]
+        assert shapes["unbeatable-level"] == [2], "two independent reads real models flip"
+        assert shapes["parallel-reads"] == [2]
+        assert shapes["routing-question-delegates-to-nobody"] == [2]
+        assert shapes["just-talking"] == shapes["refusal-surfaces"] == []
+        assert shapes["tool-error-recovers"] == [1]
+
+    def test_reversed_order_inside_a_group_passes(self) -> None:
+        conv = conversation("unbeatable-level")
+        (text, validate), (describe,), final = conv.fake_turns
+        flipped = replace(conv, fake_turns=[[text, describe], [validate], final])
+        result = run_scripted(flipped, FakeChatBackend(flipped.fake_turns))
+        assert result.failures == []
+        assert result.tool_calls == ["describe_level", "validate_level"]
+
+    def test_a_group_may_spill_across_turns_in_either_order(self) -> None:
+        """Free order is about the SEQUENCE of calls, not about one turn."""
+        conv = conversation("parallel-reads")
+        (db_row, view_asset), final = conv.fake_turns
+        split = replace(conv, fake_turns=[[view_asset], [db_row], final])
+        result = run_scripted(split, FakeChatBackend(split.fake_turns))
+        assert result.failures == []
+
+    def test_a_call_from_group_two_before_group_one_fails(self) -> None:
+        conv = conversation("routing-design-and-art")
+        probe, fan_out, final = conv.fake_turns
+        early = replace(conv, fake_turns=[fan_out, probe, final])
+        result = run_scripted(early, FakeChatBackend(early.fake_turns), strict_text=False)
+        assert result.passed is False
+        assert result.failures == [
+            "tool calls: expected ['describe_level', ['delegate', 'delegate']] "
+            "got ['delegate', 'delegate', 'describe_level']"
+        ]
+
+    def test_create_before_plan_fails(self) -> None:
+        conv = conversation("create-ice-world")
+        clarify, plan, create, final = conv.fake_turns
+        canned = {"propose_plan": {"decision": "approved"}, "create_project": {"pack_dir": "scratch"}}
+        reordered = replace(conv, fake_turns=[clarify, create, plan, final], tool_results=canned)
+        result = run_scripted(reordered, FakeChatBackend(reordered.fake_turns), strict_text=False)
+        assert result.passed is False
+        assert result.failures == [
+            "tool calls: expected ['propose_plan', 'create_project'] got ['create_project', 'propose_plan']"
+        ]
+        # …and the script as written still passes on the same canned results.
+        canned_only = replace(conv, tool_results=canned)
+        assert run_scripted(canned_only, FakeChatBackend(canned_only.fake_turns)).failures == []
+
+    def test_duplicate_names_in_a_group_are_told_apart_by_their_subsets(self) -> None:
+        """Two ``delegate`` calls reversed inside their group: each expected
+        subset is matched to the call that satisfies it, so the flip passes
+        — and a subset nothing satisfies is still named on the right step."""
+        conv = conversation("routing-design-and-art")
+        probe, (text, designer, artist), final = conv.fake_turns
+        swapped = replace(conv, fake_turns=[probe, [text, artist, designer], final])
+        assert run_scripted(swapped, FakeChatBackend(swapped.fake_turns)).failures == []
+
+        describe, (want_designer, want_artist) = conv.expected_tool_calls
+        want_painter = dict(want_artist, input_subset={"specialist": "painter"})
+        wrong = replace(swapped, expected_tool_calls=[describe, [want_designer, want_painter]])
+        result = run_scripted(wrong, FakeChatBackend(wrong.fake_turns))
+        lacks = [f for f in result.failures if "lacks" in f]
+        assert len(lacks) == 1 and lacks[0].startswith("tool call 1 (delegate)") and "'painter'" in lacks[0]
+        assert not any(f.startswith("tool calls:") for f in result.failures), "the names did match"
+
+    def test_a_missing_call_is_a_names_failure_with_the_group_shape(self) -> None:
+        conv = conversation("unbeatable-level")
+        (text, validate), (_describe,), final = conv.fake_turns
+        short = replace(conv, fake_turns=[[text, validate], final])
+        result = run_scripted(short, FakeChatBackend(short.fake_turns))
+        assert "tool calls: expected [['validate_level', 'describe_level']] got ['validate_level']" in result.failures
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +632,17 @@ class TestMain:
         assert main(["--backend", "scripted", "--only", "unbeatable-level"]) == 0
         out = capsys.readouterr().out
         assert "PASS" in out and "backend=scripted" in out
+
+    def test_a_real_backend_s_lines_carry_the_priced_cost(self, capsys) -> None:
+        """A non-fake registered backend: every conversation line and the
+        summary print the measured counts and ``canon.pricing``'s figure —
+        by the backend's ``model``, with ``--backend`` as the id."""
+        BackendRegistry.register_chat("silent", lambda: Silent(model="gpt-5.1"))
+        assert main(["--backend", "silent", "--only", "just-talking"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("$0.000425 measured at gpt-5.1") == 2  # the PASS line and the summary
+        assert "backend=silent" in out
+        assert "§" not in out and "P0-" not in out
 
     def test_failure_returns_one(self, capsys, monkeypatch) -> None:
         import canon.agent.eval as eval_module

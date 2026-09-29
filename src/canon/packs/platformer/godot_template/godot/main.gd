@@ -6,7 +6,7 @@
 #   - combat tuning      <- manifest.json  "combat" block (combat.json):
 #                           hearts, stomp damage/bounce, i-frames, spawn
 #                           shield seconds — the arithmetic mirrors
-#                           examples/platformer_pack/combat.py (keep in
+#                           src/canon/packs/platformer/combat.py (keep in
 #                           sync); combat POLICIES (checkpoint enemy
 #                           reset, spawn grace) are GameRules keys
 #   - tile appearance    <- TERRAIN layer (slot indices) + tilesheet regions

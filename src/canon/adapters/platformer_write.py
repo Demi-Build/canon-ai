@@ -19,7 +19,6 @@ painting goes through a separate grid-import path. This is the sparse-layer half
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1119,40 +1118,43 @@ def _restore_document(
     session: str | None,
 ) -> dict | None:
     """Row P0-6: the registry-era restore families, resolved through the
-    pack registry — ``<kind>:<id>`` of a COLLECTION kind (the CAS unit is
-    the file: every row in it comes back; History labels it "restores
-    <file> (N rows)", P.4.1), and the bare document artifacts ``registry`` /
-    ``world`` / ``manifest`` / ``story`` / ``narrative`` (P.7.3). ``None``
-    when the target is one of the platformer families below (per-file rows,
-    sprites, sheets, bands), which keep their own branches."""
+    pack registry — ``<kind>:<id>`` of a COLLECTION kind, which is the ROW's
+    own restore (``db_ops.restore_db_row``: the target row is lifted out of
+    the stored bytes and dropped into the CURRENT file, so sibling rows keep
+    the edits made since) — and the bare document artifacts ``registry`` /
+    ``world`` / ``manifest`` / ``story`` / ``narrative`` (P.7.3), where the
+    file IS the artifact and the whole document goes back. ``None`` when the
+    target is one of the platformer families below (per-file rows, sprites,
+    sheets, bands), which keep their own branches."""
     from canon.packs import PackTypeError, resolve_pack
 
     try:
         spec = resolve_pack(pack).spec
     except PackTypeError:
         return None
-    rel: str | None = None
-    artifact_id = target
-    lineage: Callable[[str], bool]
     entity = spec.entities.get(kind) if rest else None
     if entity is not None and (entity.layout or {}).get("mode") == "collection":
-        rel = str(entity.layout.get("path"))
-        artifact_id = f"{kind}:{rest}"
+        # The caller picked ONE row. The stored version is the whole file —
+        # every sibling row as it stood then — so writing those bytes back
+        # here would silently revert every edit made to every other row in
+        # the collection since. `restore_db_row` is the scoped restore (the
+        # room-step fix one level down): it takes the row's own slot out of
+        # the version, leaves the siblings alone, and goes through the
+        # ordinary write pipeline, so the result is validated, journaled and
+        # versioned like any other write. Taking the WHOLE file back is
+        # `db_ops.restore_db_collection` — a separate, labelled action.
+        from canon import db_ops
 
-        def lineage(aid: str) -> bool:
-            return aid.startswith(f"{kind}:")
-    elif not rest and (kind in _DOCUMENT_TARGETS or kind == "world"):
-        if kind == "world":
-            rel = "world.json" if (pack / "world.json").is_file() else "world_bible.json"
-        else:
-            rel = _DOCUMENT_TARGETS[kind]
-
-        def lineage(aid: str) -> bool:
-            return aid == kind
-    if rel is None:
+        return db_ops.restore_db_row(pack, kind, rest, to_hash, actor=actor, session=session)
+    if rest or not (kind in _DOCUMENT_TARGETS or kind == "world"):
         return None
+    if kind == "world":
+        rel = "world.json" if (pack / "world.json").is_file() else "world_bible.json"
+    else:
+        rel = _DOCUMENT_TARGETS[kind]
+    artifact_id = target
     if not any(
-        lineage(str(e.get("artifact_id", ""))) and to_hash in (e.get("before_hash"), e.get("after_hash"))
+        str(e.get("artifact_id", "")) == kind and to_hash in (e.get("before_hash"), e.get("after_hash"))
         for e in provenance.all_events(pack)
     ):
         raise ValueError(
@@ -1166,12 +1168,7 @@ def _restore_document(
     before = provenance.snapshot_file(pack, path)
     _pack_adapter(pack).write_json_singleton(rel, document)
     after = provenance.snapshot_file(pack, path)
-    if entity is not None:
-        rows = len(document) if isinstance(document, (list, dict)) else 0
-        detail: dict = {"kind": "row_restore", "to": to_hash, "file": rel, "rows": rows,
-                        "label": f"restores {rel} ({rows} rows)"}
-    else:
-        detail = {"kind": "document_restore", "to": to_hash, "file": rel}
+    detail = {"kind": "document_restore", "to": to_hash, "file": rel}
     provenance.record(
         pack, artifact_id=artifact_id, op="restore", source="user", actor=actor, session=session,
         detail=detail, before_hash=before, after_hash=after,

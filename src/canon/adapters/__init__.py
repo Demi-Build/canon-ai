@@ -81,6 +81,28 @@ GRID_ROLLERS: dict[str, str] = {
 #: this?" pointer for any table a future template leaves empty).
 GRID_ROOM_ROW = "P0-8"
 
+#: Pack type → the verb that answers "every asset this pack ON DISK owns" as
+#: ``canon.pipeline.phases.asset.AssetJob`` records (``plan_assets(pack,
+#: spec, fallback=…)``). ``canon.db_ops.generate_asset`` — the ``asset
+#: generate`` verb for every non-platformer pack — dispatches here to plan a
+#: ``--target missing`` repair or a single ``<kind>:<id>`` reroll, then runs
+#: the jobs through the pipeline's own ``AssetPhase`` executor. The
+#: platformer has no entry: its asset verbs live on
+#: ``canon.packs.platformer.ops`` (sprite / backdrop / audio phases), which
+#: ``_pack_ops`` already routes a platformer pack to. A third template
+#: registers one planner here and never a branch on ``pack_type``.
+ASSET_PLANNERS: dict[str, str] = {
+    "dungeon": "canon.packs.dungeon.assets:plan_assets",
+}
+
+#: Pack type → the builder that turns ``(image, music, sfx)`` backend NAMES
+#: into backend objects the way that template's ``world new`` runner does
+#: (``none`` / ``fake`` / a provider id), so a repair spends through exactly
+#: the backends a create would. Same shape as every table above.
+ASSET_BACKEND_BUILDERS: dict[str, str] = {
+    "dungeon": "canon.packs.dungeon.run_world:build_asset_backends",
+}
+
 
 def grid_verb(table: dict[str, str], kind: str) -> Callable[..., Any] | None:
     """The verb ``table`` registers for GridKind ``kind``, imported on demand;
@@ -125,6 +147,8 @@ class OutputAdapter(Protocol):
 
 
 __all__ = [
+    "ASSET_BACKEND_BUILDERS",
+    "ASSET_PLANNERS",
     "GRID_DESCRIBERS",
     "GRID_EDITORS",
     "GRID_IMPORTERS",

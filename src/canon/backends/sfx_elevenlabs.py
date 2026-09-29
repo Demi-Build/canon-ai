@@ -13,14 +13,28 @@ Code that only needs to check availability can use the lazy re-export from
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from canon import pricing as _pricing
+from canon.backends.failures import AssetError, classify_exception
 
 if TYPE_CHECKING:
     pass  # no top-level elevenlabs import
+
+logger = logging.getLogger(__name__)
+
+#: The registry id this backend answers to (stamped on failure records).
+PROVIDER_ID = "elevenlabs"
+
+#: ElevenLabs accepts ``duration_seconds`` in [0.5, 30] only — a request
+#: outside it is refused as ``invalid_generation_settings`` every time, so it
+#: is refused HERE, before the call, and by every catalog validator upstream
+#: (``canon.pipeline.phases.asset.validate_sfx_catalog``). The provider owns
+#: its own limit; nothing else restates the numbers.
+SFX_DURATION_BOUNDS: tuple[float, float] = (0.5, 30.0)
 
 #: USD per auto-duration effect — a VIEW of ``canon.pricing.SFX["elevenlabs"]``
 #: (the only price source, master §3.0-C, row P0-7); same name as before. A
@@ -67,6 +81,22 @@ class ElevenLabsSFXBackend:
         self.last_cost: float = 0.0
         #: Priced from the table, never provider-reported (P.9 J3).
         self.last_cost_accuracy: str = _pricing.ESTIMATED
+        #: WHY the most recent ``generate_and_save[_async]`` returned False
+        #: (``None`` after a success) — read right after the call, like
+        #: ``last_cost``.
+        self.last_error: AssetError | None = None
+
+    @staticmethod
+    def check_duration(duration_seconds: float) -> None:
+        """Refuse a duration the provider cannot serve, as a NON-retryable
+        ``AssetError`` naming the bound — nothing is sent, nothing is billed."""
+        lo, hi = SFX_DURATION_BOUNDS
+        if not (lo <= float(duration_seconds) <= hi):
+            raise AssetError(
+                f"duration {duration_seconds}s is outside ElevenLabs' {lo}–{hi}s range; "
+                "the request was not sent",
+                retryable=False, status=None, kind="ValueError", provider=PROVIDER_ID,
+            )
 
     def generate(self, prompt: str, duration_seconds: float, loop: bool) -> bytes:
         """Synchronously generate a sound effect.
@@ -80,6 +110,7 @@ class ElevenLabsSFXBackend:
         Returns:
             Raw audio bytes (typically MP3).
         """
+        self.check_duration(duration_seconds)
         kwargs: dict = {"text": prompt, "duration_seconds": duration_seconds}
         if loop:
             kwargs["loop"] = True  # if SDK supports it; harmless if ignored
@@ -104,27 +135,43 @@ class ElevenLabsSFXBackend:
         """Generate a sound effect and write it to ``filepath``.
 
         Creates parent directories as needed. Returns ``True`` on success,
-        ``False`` on any exception (network error, API error, etc.).
+        ``False`` on any exception (network error, API error, etc.) — and
+        then ``last_error`` says which, classified for retry.
         """
+        self.last_error = None
         try:
             data = self.generate(prompt, duration_seconds, loop)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
 
     async def generate_and_save_async(
         self, prompt: str, filepath: str, duration_seconds: float, loop: bool
     ) -> bool:
         """Async variant of ``generate_and_save``."""
+        self.last_error = None
         try:
             data = await self.generate_async(prompt, duration_seconds, loop)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
+
+    def _note_failure(self, exc: BaseException, filepath: str) -> None:
+        """Record the reason a save failed: ``last_error`` for the caller
+        that reads it, and one log line so the console is never silent."""
+        self.last_error = classify_exception(exc, provider=PROVIDER_ID)
+        logger.warning(
+            "ElevenLabs SFX generation failed for %s: %s%s (%s)",
+            Path(filepath).name, self.last_error.kind,
+            f" {self.last_error.status}" if self.last_error.status else "",
+            "retryable" if self.last_error.retryable else "not retryable",
+        )
 
     def _safe_convert(self, **kwargs):
         """Call ``text_to_sound_effects.convert``, dropping unsupported kwargs.

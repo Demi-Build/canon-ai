@@ -14,22 +14,32 @@ the gate is hermetic, keyless and $0. Any other id is a real provider and a
 paid leg (doctrine: paid legs are user-run); it resolves through
 ``canon.agent.providers.resolve_chat_backend`` — the registrar map
 (anthropic, openai, kimi — data) shared with the A2 service, then
-``BackendRegistry.chat(id)``. On a real backend the tool order stays
-strict and the wording check is freed (row A8's provider-swap rule).
+``BackendRegistry.chat(id)``. On a real backend the tool-order check stays
+on and the wording check is freed (row A8's provider-swap rule).
+
+Tool order is checked as ORDERED GROUPS (``evals.ordered_groups``): a
+conversation's expectation is a sequence of groups, each of which must
+complete before the next begins, with the order INSIDE a group free. Two
+independent reads a real model flips between runs are one group; a plan
+that must precede a paid create is two strict groups of one. The same
+reading applies to the delegation check.
 
 Cost is reported honestly and never computed here: the fake's note is
 "$0 — nothing measured"; a real backend's note carries the measured token
-counts and names the §3.0-C module (row P0-7) as the thing that prices them.
+counts and the price ``canon.pricing`` puts on them, through the same
+``token_gen_block`` the agent's journal prices a turn with — an unpriced
+model is named as unpriced, never a silent $0.
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import sys
 from dataclasses import asdict, dataclass, field
 
-from canon.agent.evals import CONVERSATIONS, ScriptedConversation
+from canon.agent.evals import CONVERSATIONS, ScriptedConversation, ordered_groups
 from canon.agent.loop import MAX_TOOL_ROUNDS_STOP, ConversationResult, run_conversation
 from canon.agent.providers import resolve_chat_backend
 from canon.agent.runs import DELEGATE_TOOL
@@ -37,6 +47,7 @@ from canon.backends.base import ChatBackend
 from canon.backends.registry import BackendRegistry
 from canon.backends.testing import FakeChatBackend
 from canon.llm.chat import ChatError, Usage
+from canon.provenance import token_gen_block
 
 FAKE_COST_NOTE = "$0 — fake backend, nothing measured"
 
@@ -51,7 +62,8 @@ class EvalResult:
         failures: Named, human-readable failures (empty on pass).
         tool_calls: Tool names actually called, in order.
         usage: Measured tokens summed over the conversation.
-        cost_note: What the run cost, stated honestly — never a number this
+        cost_note: What the run cost, stated honestly — the measured counts
+            and ``canon.pricing``'s figure for them; never a number this
             module computed.
     """
 
@@ -88,16 +100,74 @@ def _is_subset(subset: dict, actual: dict) -> bool:
     return all(key in actual and actual[key] == value for key, value in subset.items())
 
 
+def _format_groups(groups: list[list[str]]) -> str:
+    """Groups as the failure line prints them: a group of one is its bare
+    name (so a strictly-ordered expectation reads exactly as it always
+    did), a wider group is a nested list."""
+    return str([group[0] if len(group) == 1 else group for group in groups])
+
+
+def _group_windows(groups: list[list], actual: list) -> list[tuple[list, list]]:
+    """Pair each group with the run of ``actual`` it must account for — the
+    next ``len(group)`` items — in order. The last pair is the overrun:
+    ``([], leftovers)``, empty when the groups consumed everything."""
+    windows: list[tuple[list, list]] = []
+    position = 0
+    for group in groups:
+        windows.append((group, actual[position : position + len(group)]))
+        position += len(group)
+    windows.append(([], actual[position:]))
+    return windows
+
+
+def _groups_matched(groups: list[list[str]], actual: list[str]) -> bool:
+    """Whether ``actual`` is ``groups`` played in sequence with free order
+    inside each group: every window holds exactly its group's names (as a
+    multiset) and nothing is left over."""
+    return all(sorted(window) == sorted(group) for group, window in _group_windows(groups, actual))
+
+
+def _input_failures(group: list[dict], window: list[dict], offset: int) -> list[str]:
+    """The ``input_subset`` failures for one group whose NAMES already
+    matched its window. Order inside the group is free, so each expected
+    call is matched to a same-named step in the window; with duplicate
+    names (two ``delegate`` calls told apart only by their subsets) the
+    pairing that satisfies the most subsets is the one reported, so a
+    reversed pair passes and a genuinely wrong input is still named.
+    Groups are a handful of calls, so trying every pairing is cheap."""
+    best: list[str] | None = None
+    for order in itertools.permutations(range(len(window))):
+        pairs = [(expected, offset + j, window[j]) for expected, j in zip(group, order, strict=True)]
+        if any(expected["name"] != step["tool"] for expected, _, step in pairs):
+            continue
+        found = [
+            f"tool call {position} ({step['tool']}): input {step['input']} lacks {expected['input_subset']}"
+            for expected, position, step in pairs
+            if expected.get("input_subset") and not _is_subset(expected["input_subset"], step["input"])
+        ]
+        if best is None or len(found) < len(best):
+            best = found
+        if not best:
+            break
+    return best or []
+
+
 def _tool_call_failures(conv: ScriptedConversation, result: ConversationResult) -> list[str]:
+    """Tool names as ordered groups (``evals.ordered_groups``), then each
+    matched group's ``input_subset`` checks. A group whose names did not
+    match is named once by the ``tool calls:`` line and not re-litigated
+    per input."""
     failures: list[str] = []
+    groups = ordered_groups(conv.expected_tool_calls)
+    name_groups = [[call["name"] for call in group] for group in groups]
     actual_names = [step["tool"] for step in result.steps]
-    expected_names = [call["name"] for call in conv.expected_tool_calls]
-    if actual_names != expected_names:
-        failures.append(f"tool calls: expected {expected_names} got {actual_names}")
-    for position, (expected, step) in enumerate(zip(conv.expected_tool_calls, result.steps, strict=False)):
-        subset = expected.get("input_subset")
-        if subset and expected["name"] == step["tool"] and not _is_subset(subset, step["input"]):
-            failures.append(f"tool call {position} ({step['tool']}): input {step['input']} lacks {subset}")
+    if not _groups_matched(name_groups, actual_names):
+        failures.append(f"tool calls: expected {_format_groups(name_groups)} got {actual_names}")
+    offset = 0
+    for group, window in _group_windows(groups, result.steps):
+        if group and sorted(call["name"] for call in group) == sorted(step["tool"] for step in window):
+            failures += _input_failures(group, window, offset)
+        offset += len(group)
     return failures
 
 
@@ -122,18 +192,20 @@ def _delegations(result: ConversationResult) -> list[str]:
 
 def _delegation_failures(conv: ScriptedConversation, result: ConversationResult) -> list[str]:
     """Row A7's routing contract: the delegations a conversation makes must
-    be exactly the ones the corpus expects, in order — the same strict rule
-    ``_tool_call_failures`` applies to tool names, read at the level the
-    routing question is actually asked at (WHICH specialist, not "a delegate
-    call happened"). ``[]`` is a real expectation: a pure question must
-    delegate to nobody. Checked on every backend — routing is precisely what
-    the provider-swap leg measures, so it is never freed with the wording."""
+    be exactly the ones the corpus expects, as the same ordered groups
+    ``_tool_call_failures`` applies to tool names (two delegations fanned
+    out in one turn are one group), read at the level the routing question
+    is actually asked at (WHICH specialist, not "a delegate call
+    happened"). ``[]`` is a real expectation: a pure question must delegate
+    to nobody. Checked on every backend — routing is precisely what the
+    provider-swap leg measures, so it is never freed with the wording."""
     if conv.expected_delegations is None:
         return []
+    groups = ordered_groups(conv.expected_delegations)
     actual = _delegations(result)
-    if actual == conv.expected_delegations:
+    if _groups_matched(groups, actual):
         return []
-    return [f"delegations: expected {conv.expected_delegations} got {actual}"]
+    return [f"delegations: expected {_format_groups(groups)} got {actual}"]
 
 
 def _stop_reason_failures(conv: ScriptedConversation, result: ConversationResult) -> list[str]:
@@ -184,14 +256,35 @@ def _request_history_failures(backend: ChatBackend) -> list[str]:
     return failures
 
 
-def _cost_note(backend: ChatBackend, usage: Usage) -> str:
+def _cost_note(backend: ChatBackend, usage: Usage, *, backend_id: str | None = None) -> str:
+    """The measured counts and what ``canon.pricing`` says they cost.
+
+    The price comes from ``canon.provenance.token_gen_block`` — the one
+    function the agent's journal already prices a turn with — so this
+    runner carries no rate arithmetic of its own. ``backend_id`` is the id
+    the run was asked for (``--backend``), which is what decides whether an
+    unpriced model is a silent $0 or a named gap; it falls back to the
+    backend's own ``id`` when the caller has none. The model is the
+    backend's constructed ``model`` (``--model`` or the provider default),
+    and a backend that reports none is said to be unpriced rather than
+    priced at nothing.
+    """
     if isinstance(backend, FakeChatBackend):
         return FAKE_COST_NOTE
-    return (
+    counts = (
         f"measured tokens in={usage.input_tokens}/out={usage.output_tokens} "
-        f"(cache read={usage.cache_read_input_tokens}, creation={usage.cache_creation_input_tokens}); "
-        "priced by the §3.0-C module from P0-7"
+        f"(cache read={usage.cache_read_input_tokens}, creation={usage.cache_creation_input_tokens})"
     )
+    model = getattr(backend, "model", None)
+    resolved_id = backend_id or str(getattr(backend, "id", "") or "")
+    priced = token_gen_block(resolved_id, model, asdict(usage))
+    if priced is None:
+        return f"{counts}; nothing to price"
+    if not model:
+        return f"{counts}; unpriced — the backend reports no model id to price by"
+    if priced["cost_error"]:
+        return f"{counts}; unpriced — {priced['cost_error']}"
+    return f"{counts}; ${priced['gen']['cost_usd']:.6f} {priced['accuracy']} at {model}"
 
 
 # ---------------------------------------------------------------------------
@@ -199,15 +292,22 @@ def _cost_note(backend: ChatBackend, usage: Usage) -> str:
 # ---------------------------------------------------------------------------
 
 
-def run_scripted(conv: ScriptedConversation, backend: ChatBackend, *, strict_text: bool = True) -> EvalResult:
+def run_scripted(
+    conv: ScriptedConversation,
+    backend: ChatBackend,
+    *,
+    strict_text: bool = True,
+    backend_id: str | None = None,
+) -> EvalResult:
     """Run one scripted conversation on ``backend`` and judge it.
 
-    Checks, each a named failure: tool names in the expected order; each
-    expected ``input_subset`` ⊆ the actual input; the DELEGATIONS in the
-    expected order with the expected specialists (row A7's routing contract,
-    checked on every backend); the final assistant text
+    Checks, each a named failure: tool names as the expected ordered groups
+    (each group complete before the next, any order inside a group); each
+    expected ``input_subset`` ⊆ the input of the call it matches; the
+    DELEGATIONS as the expected groups of specialists (row A7's routing
+    contract, checked on every backend); the final assistant text
     contains every expected substring (skipped when ``strict_text`` is off —
-    the provider-swap gate keeps tool order strict and frees the wording);
+    the provider-swap gate keeps the tool check on and frees the wording);
     the recorded stop reasons match ``expected_stop_reasons`` (also freed
     with ``strict_text``); tool results paired one-message-per-turn, both
     in the loop's history and in every request the backend recorded; and
@@ -215,6 +315,9 @@ def run_scripted(conv: ScriptedConversation, backend: ChatBackend, *, strict_tex
     the backend is a named failure, not a crash — one flaky provider call
     must not take the whole corpus down — and so is any other exception a
     backend lets escape (an SDK that dies before its first request, say).
+
+    ``backend_id`` is the id the backend was asked for (``main`` passes
+    ``--backend``); it only shapes the cost note — see :func:`_cost_note`.
     """
     try:
         result = run_conversation(
@@ -229,14 +332,14 @@ def run_scripted(conv: ScriptedConversation, backend: ChatBackend, *, strict_tex
             name=conv.name,
             passed=False,
             failures=[f"backend error ({'retryable' if exc.retryable else 'not retryable'}): {exc}"],
-            cost_note=_cost_note(backend, Usage()),
+            cost_note=_cost_note(backend, Usage(), backend_id=backend_id),
         )
     except Exception as exc:  # noqa: BLE001 — a crashing backend is a named failure, never a dead corpus
         return EvalResult(
             name=conv.name,
             passed=False,
             failures=[f"backend crashed ({type(exc).__name__}): {exc}"],
-            cost_note=_cost_note(backend, Usage()),
+            cost_note=_cost_note(backend, Usage(), backend_id=backend_id),
         )
 
     failures = _tool_call_failures(conv, result)
@@ -255,7 +358,7 @@ def run_scripted(conv: ScriptedConversation, backend: ChatBackend, *, strict_tex
         failures=failures,
         tool_calls=[step["tool"] for step in result.steps],
         usage=result.usage,
-        cost_note=_cost_note(backend, result.usage),
+        cost_note=_cost_note(backend, result.usage, backend_id=backend_id),
     )
 
 
@@ -314,13 +417,17 @@ def main(argv: list[str] | None = None) -> int:
             backend: ChatBackend = FakeChatBackend(conv.fake_turns, model=args.model or "fake-chat")
             results.append(run_scripted(conv, backend, strict_text=True))
         else:
-            results.append(run_scripted(conv, real_backend, strict_text=False))
+            results.append(run_scripted(conv, real_backend, strict_text=False, backend_id=args.backend))
 
     passed = sum(1 for r in results if r.passed)
     total_usage = Usage()
     for r in results:
         total_usage = total_usage + r.usage
-    summary_cost = FAKE_COST_NOTE if real_backend is None else _cost_note(real_backend, total_usage)
+    summary_cost = (
+        FAKE_COST_NOTE
+        if real_backend is None
+        else _cost_note(real_backend, total_usage, backend_id=args.backend)
+    )
 
     if args.json:
         document = {

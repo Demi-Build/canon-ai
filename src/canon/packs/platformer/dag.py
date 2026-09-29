@@ -656,6 +656,7 @@ def cli_ctx_factory(bible: Any):
     out = os.environ.get("CANON_PLAT_OUT", ".")
     stats = GenerationStats(
         llm_backend="fake",
+        vlm_backend=os.environ.get("CANON_PLAT_VLM_BACKEND", ""),
         image_backend=os.environ.get("CANON_PLAT_IMAGE_BACKEND", ""),
         music_backend=os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""),
         sfx_backend=os.environ.get("CANON_PLAT_SFX_BACKEND", ""),
@@ -710,9 +711,14 @@ def cli_phases_factory(ctx: Any) -> list:
     )
     music = build_music_producer(os.environ.get("CANON_PLAT_MUSIC_BACKEND", ""))
     sfx = build_sfx_producer(os.environ.get("CANON_PLAT_SFX_BACKEND", ""))
+    # Metered on the context's stats (the same object cli_ctx_factory wires
+    # into the LLM client) so a `canon run` with a judge records its vision
+    # calls beside its text calls; a factory probed without a context (tests)
+    # gets the bare backend.
     vlm = build_vlm_judge(
         os.environ.get("CANON_PLAT_VLM_BACKEND", ""),
         os.environ.get("CANON_PLAT_VLM_MODEL") or None,
+        stats=getattr(ctx, "stats", None),
     )
     graphics_path = os.environ.get("CANON_PLAT_GRAPHICS")
     graphics = load_graphics(graphics_path) if graphics_path else DEFAULT_GRAPHICS

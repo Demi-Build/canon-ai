@@ -64,7 +64,7 @@ OPENAI_API_KEY=... uv run python -m canon.agent.eval --backend openai --only jus
 MOONSHOT_API_KEY=... uv run python -m canon.agent.eval --backend kimi --only just-talking
 ```
 
-Expected: PASS lines with a cost note of the form `measured tokens in=…/out=… (cache read=…); priced by the §3.0-C module from P0-7`, no dollar figure. A tool-using conversation (`--only unbeatable-level`) proves the tool round-trip on a real model; a real model may word things differently, which is fine.
+Expected: PASS lines with a cost note of the form `measured tokens in=…/out=… (cache read=…, creation=…); $0.00… measured at gpt-5.1` (or `… at kimi-k2.6`) — the measured counts, priced through `canon.pricing`; a model that table cannot price reads `…; unpriced — …`, never a silent $0. A tool-using conversation (`--only unbeatable-level`) proves the tool round-trip on a real model; a real model may word things differently, which is fine.
 
 ## E. Decisions (also listed in chat)
 

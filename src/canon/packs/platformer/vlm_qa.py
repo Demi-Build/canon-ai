@@ -161,6 +161,16 @@ ANIMATION_QA_DIMENSIONS: tuple[str, ...] = ("consistency", "motion", "readabilit
 #: warnings re-derive from it on disk, the durable qa_report pattern.
 ANIM_QA_REPORT_REL = "review/animation_qa.json"
 
+#: The phase labels the two per-actor VLM tasks record under (``<label>:<actor>``
+#: — the same per-label ``by_phase`` entries a text call gets, and the task
+#: prefixes the estimator's calibration keys on). Level judgments record under
+#: ``VlmQaPhase.name``.
+ANIMATE_LABEL = "plat:animate"
+ANIMATE_QA_LABEL = "plat:animate_qa"
+
+#: The ``GenerationStats.record_call`` lane every vision call rolls up into.
+VLM_LANE = "vlm"
+
 #: A sliced animation frame whose opaque area falls below this is blank — a
 #: botched edit or a segmentation that grabbed empty canvas.
 ANIM_FRAME_MIN_OPAQUE = 0.01
@@ -1055,6 +1065,7 @@ def author_animation_spec(
     prompt = (prompt_override or "").strip() or animate_prompt(
         actor_id, subject, states, frames_max
     )
+    label = f"{ANIMATE_LABEL}:{actor_id}"
 
     def generate(feedback: list[str] | None = None) -> str:
         text = prompt
@@ -1062,7 +1073,7 @@ def author_animation_spec(
             text += "\n\nYour previous response was rejected:\n" + "\n".join(
                 f"- {reason}" for reason in feedback
             )
-        return judge.judge(text, [sprite_bytes])
+        return _judge(judge, text, [sprite_bytes], label=label)
 
     raw = retry_with_feedback(
         generate_fn=generate,
@@ -1071,7 +1082,7 @@ def author_animation_spec(
         ),
         fallback="",
         max_retries=max_retries,
-        label=f"plat:animate:{actor_id}",
+        label=label,
     )
     obj = extract_json_object(raw) if raw else None
     if obj is None:
@@ -1523,17 +1534,20 @@ def review_animations(ctx: Any, judge: Any, max_retries: int = 3) -> dict:
                     ),
                 })
             prompt = animate_qa_prompt(actor_id, name, rendered)
+            label = f"{ANIMATE_QA_LABEL}:{actor_id}"
             raw = retry_with_feedback(
-                generate_fn=lambda feedback=None, p=prompt, s=sheet: judge.judge(
+                generate_fn=lambda feedback=None, p=prompt, s=sheet, lb=label: _judge(
+                    judge,
                     p if not feedback
                     else p + "\n\nYour previous response was rejected:\n"
                     + "\n".join(f"- {r}" for r in feedback),
                     [s],
+                    label=lb,
                 ),
                 validate_fn=_validate_animation_verdict,
                 fallback="",
                 max_retries=max_retries,
-                label=f"plat:animate_qa:{actor_id}",
+                label=label,
             )
             obj = extract_json_object(raw) if raw else None
             if obj is None:
@@ -1712,17 +1726,82 @@ def write_play_scale_crops(
     return rels
 
 
-def build_vlm_judge(kind: str | None, model: str | None = None):
+class MeteredJudge:
+    """A ``VLMBackend`` fronted by the stats wiring ``LLMClient`` gives text
+    backends: every ``judge()`` records the backend's provider-reported
+    ``last_input_tokens`` / ``last_output_tokens`` / ``last_cost`` (the
+    backend prices those through ``canon.pricing``, the same way the text
+    backends do) into the shared ``GenerationStats`` via ``record_call`` on
+    the ``vlm`` lane — the per-label ``by_phase`` entry a text call gets,
+    counted under ``vlm_calls`` / ``vlm_cost_usd`` instead of the ``llm_*``
+    pair. A backend that surfaces no usage (the fake) records the CALL with
+    zero tokens, so a $0 run still shows how many vision calls it made.
+
+    Everything else is the backend's: ``model`` (report provenance), the
+    fake's ``calls`` ledger, a paid backend's ``last_cost_accuracy`` — all
+    reach through, so a metered judge reads exactly like the bare one.
+    """
+
+    def __init__(self, backend: Any, stats: Any, phase: str) -> None:
+        self.backend = backend
+        self.stats = stats
+        #: Default label for a call that names none (``VlmQaPhase.name``).
+        self.phase = phase
+
+    @property
+    def model(self) -> str:
+        return str(getattr(self.backend, "model", type(self.backend).__name__))
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for names this wrapper does not define itself.
+        return getattr(self.backend, name)
+
+    def judge(
+        self,
+        prompt: str,
+        images: list[bytes],
+        max_tokens: int = 1024,
+        *,
+        phase: str | None = None,
+    ) -> str:
+        response = self.backend.judge(prompt, images, max_tokens)
+        if self.stats is not None:
+            self.stats.record_call(
+                phase=phase or self.phase,
+                input_tokens=getattr(self.backend, "last_input_tokens", 0),
+                output_tokens=getattr(self.backend, "last_output_tokens", 0),
+                cost=getattr(self.backend, "last_cost", 0.0),
+                lane=VLM_LANE,
+            )
+        return response
+
+
+def _judge(judge: Any, prompt: str, images: list[bytes], *, label: str) -> str:
+    """ONE vision call, labelled — the choke point the three VLM tasks share.
+    A metered judge records the call under ``label``; a bare backend (tests
+    hand ``VlmQaPhase`` one directly) is called as-is and records nothing."""
+    if isinstance(judge, MeteredJudge):
+        return judge.judge(prompt, images, phase=label)
+    return judge.judge(prompt, images)
+
+
+def build_vlm_judge(kind: str | None, model: str | None = None, *, stats: Any = None):
     """CLI/env wiring: a vlm-backend name → judge, or ``None`` for no QA.
     Paid backends only from an explicit flag; missing keys die at launch,
-    before any generation money is spent."""
+    before any generation money is spent.
+
+    ``stats`` — the run's shared ``GenerationStats`` — meters the judge
+    (:class:`MeteredJudge`): every vision call then lands in the same stats
+    the LLM client records into, so ``generation_stats.json``, the op cost
+    block and the estimator's calibration all see it. Without ``stats`` the
+    bare backend is returned, unchanged."""
     if not kind or kind == "none":
         return None
     if kind == "fake":
         from canon.backends.testing import FakeVLMBackend
 
-        return FakeVLMBackend(make_fake_vlm_responder())
-    if kind == "anthropic":
+        backend = FakeVLMBackend(make_fake_vlm_responder())
+    elif kind == "anthropic":
         import os
 
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -1733,8 +1812,12 @@ def build_vlm_judge(kind: str | None, model: str | None = None):
             )
         from canon.backends.vlm_anthropic import AnthropicVLMBackend
 
-        return AnthropicVLMBackend(model) if model else AnthropicVLMBackend()
-    raise ValueError(f"unknown vlm backend {kind!r} (none|fake|anthropic).")
+        backend = AnthropicVLMBackend(model) if model else AnthropicVLMBackend()
+    else:
+        raise ValueError(f"unknown vlm backend {kind!r} (none|fake|anthropic).")
+    if stats is None:
+        return backend
+    return MeteredJudge(backend, stats, phase=VlmQaPhase.name)
 
 
 # ---------------------------------------------------------------------------
@@ -1943,20 +2026,22 @@ class VlmQaPhase:
             items=getattr(ctx.bible, "items", {}),
         )
 
+        label = f"{self.name}:{level.level_id}"
+
         def generate(feedback: list[str] | None = None) -> str:
             text = prompt
             if feedback:
                 text += "\n\nYour previous response was rejected:\n" + "\n".join(
                     f"- {reason}" for reason in feedback
                 )
-            return self.judge.judge(text, images)
+            return _judge(self.judge, text, images, label=label)
 
         raw = retry_with_feedback(
             generate_fn=generate,
             validate_fn=_validate_verdict,
             fallback="",
             max_retries=getattr(ctx.config, "max_retries", 3),
-            label=f"{self.name}:{level.level_id}",
+            label=label,
         )
         obj = extract_json_object(raw) if raw else None
         if obj is None:

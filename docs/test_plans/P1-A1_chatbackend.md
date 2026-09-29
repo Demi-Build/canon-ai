@@ -130,8 +130,10 @@ ANTHROPIC_API_KEY=... uv run python -m canon.agent.eval --backend anthropic --on
 ```
 
 Expected: tool order strict (none for this conversation), wording not checked, and a cost note
-of the form `measured tokens in=…/out=… (cache read=…, creation=…); priced by the §3.0-C module
-from P0-7` — no dollar figure, by design. Without a key you get one named line
+of the form `measured tokens in=…/out=… (cache read=…, creation=…); $0.00… measured at
+claude-sonnet-5` — the measured counts, priced through `canon.pricing` (the same table the
+agent's journal prices a turn with). A model that table cannot price reads `…; unpriced — …`,
+never a silent $0. Without a key you get one named line
 (`anthropic: no credential — set ANTHROPIC_API_KEY …`) and exit 1, never a traceback.
 
 ## F. Decisions to confirm (state them if you disagree)

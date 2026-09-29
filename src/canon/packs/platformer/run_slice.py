@@ -1170,15 +1170,17 @@ def main(argv: list[str] | None = None) -> int:
         adapter = GodotOutputAdapter(output_dir)
 
     # Observability: one GenerationStats shared by the LLM client (which
-    # records per-phase-label tokens/cost into it) and the manifest phase
-    # (which snapshots it to generation_stats.json), plus the .canon/
-    # log.jsonl step log. Both sit outside the byte-determinism contract.
+    # records per-phase-label tokens/cost into it), the VLM judge (metered
+    # the same way, on the vlm lane) and the manifest phase (which snapshots
+    # it to generation_stats.json), plus the .canon/ log.jsonl step log. Both
+    # sit outside the byte-determinism contract.
     from canon.packs.platformer.models import load_models
     from canon.pipeline.stats import GenerationStats
     from canon.pipeline.steplog import StepLog
 
     stats = GenerationStats(
         llm_backend=args.backend,
+        vlm_backend=args.vlm_backend,
         image_backend=args.image_backend,
         music_backend=args.music_backend,
         sfx_backend=args.sfx_backend,
@@ -1295,7 +1297,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     music_producer = build_music_producer(args.music_backend)
     sfx_producer = build_sfx_producer(args.sfx_backend)
-    vlm_judge = build_vlm_judge(args.vlm_backend, args.vlm_model)
+    # Metered on the run's stats: every vision call (motion specs, sheet
+    # verdicts, level judgments, their retries) lands beside the LLM calls.
+    vlm_judge = build_vlm_judge(args.vlm_backend, args.vlm_model, stats=stats)
     # Row P1-A4.5 (master §3.0-D): ⏹ Stop reaches a running slice as a per-job
     # cancel FILE (CANON_CANCEL_FILE, set by cradle's JobQueue at spawn). The
     # ``node_item`` emitter raises ``RunCancelled`` at the next item boundary;

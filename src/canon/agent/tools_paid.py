@@ -1,4 +1,4 @@
-"""The $-tier paid tools (row P1-A6; master §3.1 stage 5; Phase 1 §4.B/§4.C).
+"""The $-tier paid tools.
 
 ``register_paid_tools(registry, pack_dir, *, actor_for)`` registers Phase 1
 §4's ``$ confirm`` rows into row A2's ``ToolRegistry``, exactly the way
@@ -33,11 +33,16 @@ What each tool extends:
 on the engine (``PermissionEngine.estimate_with``), so the chip renders
 ``Accept · spend up to $X`` with the backend and model named — before the tool
 body runs, which is the only moment at which that is still a choice. The
-estimator is canon's own (the pack type's ``estimate_cradle``, row P0-7); a
-paid call it has no scope for still gets a shape-complete zero-range payload
-naming the backend, so the card renders its honest "— not estimated" state
-instead of degrading to a chip with no price block at all.
-**No estimate is not $0** (doctrine 3).
+estimator is canon's own (the pack type's ``estimate_cradle``). Every
+paid tool has a scope, the two per-unit ones included: a sprite/backdrop/audio
+regeneration prices its target's real unit count at the pack's own generation
+size, and a row completion prices one call at that kind's own task label —
+both calibrated from the pack's recorded runs when it has any, and both saying
+on the card WHICH of the two they used. Only a call whose scope cannot be
+determined at all (a target the pack doesn't have) falls back to the
+shape-complete zero-range payload naming the backend, so the card renders its
+honest "— not estimated" state instead of degrading to a chip with no price
+block at all. **No estimate is not $0** (doctrine 3).
 
 *Free never spend-confirms.* Tiers are data, and one tool is $-tier or
 ask-tier depending on the backends the CALL selects: an all-fake/none
@@ -272,13 +277,13 @@ def paid_tier_for(name: str) -> Callable[[dict], str]:
 #: vocabulary). A tool with no scope here has no PRICE — the card says the
 #: price is unknown rather than a confident $0 (see :func:`estimate_payload`).
 #:
-#: ``generate_asset`` and ``complete_row`` are the two absentees, and the gap is
-#: canon-side, not this row's: ``estimate_cradle`` prices
-#: ``world|music|animate|layout|enemies|items|generate`` and has no per-sprite
-#: or per-row scope. The single-sprite estimator belongs to the row that owns
-#: ``packs/platformer/estimate.py``; until it lands, both tools open the paid
-#: card in its honest "— not estimated" state rather than with no price block
-#: at all.
+#: The two most expensive tools price like every other one: ``generate_asset``
+#: through the ``asset`` scope (one target's sprites/bands/clips, at the pack's
+#: own generation size) and ``complete_row`` through the ``row`` scope (one
+#: completion at the kind's own task label). Both carry the units they counted
+#: AND whether the pack's measured runs calibrated them, on the estimate's
+#: ``unitLabel`` — a per-unit forecast that cannot say what it counted is the
+#: same silence as no forecast.
 _ESTIMATE_SCOPE: dict[str, str] = {
     "generate_layout": "layout",
     "improve_layout": "layout",
@@ -288,16 +293,22 @@ _ESTIMATE_SCOPE: dict[str, str] = {
     "animate_asset": "animate",
     "generate_music": "music",
     "create_project": "world",
+    "generate_asset": "asset",
+    "complete_row": "row",
 }
 
 #: tool → the unit an UNPRICED paid call names on its card, copy only (the
-#: priced ones use :data:`_UNIT_LABEL` under their scope).
+#: priced ones use the estimate's own ``unitLabel``, else :data:`_UNIT_LABEL`
+#: under their scope). A scoped tool lands here only when THIS call is
+#: unpriceable — a target that isn't in the pack, a db type it doesn't have.
 _UNPRICED_UNIT_LABEL: dict[str, str] = {
     "generate_asset": "one asset",
     "complete_row": "one row",
 }
 
-#: scope → the unit the card names ("work: 3 states"), copy only.
+#: scope → the unit the card names ("work: 3 states"), copy only. A scope whose
+#: estimate names its OWN units (``unitLabel`` — the per-unit scopes count them
+#: per call, so no fixed phrase could be right) is deliberately absent.
 _UNIT_LABEL: dict[str, str] = {
     "layout": "level layout",
     "enemies": "enemy placements",
@@ -307,6 +318,14 @@ _UNIT_LABEL: dict[str, str] = {
     "music": "one track",
     "world": "a whole project",
 }
+
+#: The tools whose paid card must never degrade to "no price block at all":
+#: without an ``estimate``, ``PermissionRequest.payload`` emits no ``paid``
+#: view and the client falls back to a chip that says NOTHING about money. When
+#: their scope cannot be determined (target absent, unknown db type) they get
+#: the shape-complete UNKNOWN payload instead — unknown reads as unknown, never
+#: as zero.
+_ALWAYS_CARD: frozenset[str] = frozenset(_UNPRICED_UNIT_LABEL)
 
 
 def _estimator_of(pack_type: str) -> Callable[..., dict] | None:
@@ -325,7 +344,7 @@ def _pack_estimator(pack: Path, name: str = "", tool_input: dict | None = None) 
 
     Registry dispatch, exactly as the CLI's estimate verbs do it: a dungeon
     prices with ``canon.packs.dungeon.estimate``, a platformer with the
-    platformer's (both wrap the ONE engine of row P0-7 — there is no second
+    platformer's (both wrap the ONE estimator engine — there is no second
     price table anywhere). Never raises: a pack type with no cradle-facing
     estimator yields no estimate, which the card renders as "not estimated"
     rather than a confident $0.
@@ -352,17 +371,18 @@ def _pack_estimator(pack: Path, name: str = "", tool_input: dict | None = None) 
 
 
 def estimate_payload(pack: Path, name: str, tool_input: dict) -> dict | None:
-    """``{low, high, backend, model, unitCount, unitLabel}`` for one paid call.
+    """``{low, high, backend, model, unitCount, unitLabel[, accuracy,
+    calibration]}`` for one paid call.
 
-    The §3.0-E estimate contract, straight off canon's estimator (row P0-7 put
+    The estimate contract, straight off canon's estimator (the estimator put
     ``low``/``high``/``backend``/``model``/``unitCount``/``accuracy`` on every
     estimate document) — nothing is computed here.
 
-    A paid call canon has NO scope for (``generate_asset``, ``complete_row``)
-    gets :func:`_unpriced_payload` instead: the same keys, a zero range, the
-    backend named — the card's "— not estimated" state. ``None`` only when the
-    call is free (the ordinary ask chip carries it) or the estimator refused
-    this input.
+    A paid call whose scope cannot be determined gets :func:`_unpriced_payload`:
+    the same keys, a zero range, the backend named — the card's
+    "— not estimated" state, never a confident "$0.00". ``None`` only when the
+    call is free (the ordinary ask chip carries it) or the estimator refused an
+    input for a tool that can safely fall back to the plain pending chip.
     """
     scope = _ESTIMATE_SCOPE.get(name)
     if scope is None:
@@ -372,7 +392,25 @@ def estimate_payload(pack: Path, name: str, tool_input: dict) -> dict | None:
         return _unpriced_payload(name, tool_input)
     backends = selected_backends(name, tool_input)
     kwargs: dict[str, Any] = {"backends": backends}
-    if scope == "world":
+    # A model the call names is forwarded only where the RUN will really use
+    # it, because the card must quote the model that runs, not the one that was
+    # asked for. It runs on the image lane (`build_image_producer` takes
+    # `image_model` straight to the backend) and on a create (`world new
+    # --model` disables the per-agent table for the whole run). It does NOT run
+    # on a per-op LLM call: `build_llm` always attaches the pack's model table,
+    # and `LLMClient.generate` fills `request.model` from that resolver — which
+    # answers every label — so the table's tier beats the backend the op
+    # constructed. There the routing table's model IS the honest answer.
+    if scope in ("asset", "animate"):
+        kwargs["model"] = str(tool_input.get("image_model") or "").strip() or None
+    elif scope == "world":
+        kwargs["model"] = str(tool_input.get("model") or "").strip() or None
+    if scope == "asset":
+        kwargs.update({"pack_dir": pack, "target": tool_input.get("target")})
+    elif scope == "row":
+        kwargs.update({"pack_dir": pack, "entity_type": tool_input.get("type"),
+                       "entity_id": tool_input.get("id")})
+    elif scope == "world":
         # Row A9: counts are a template-keyed OBJECT (`pack templates`'
         # `defaults` keys — `stages`/`levels`/… on a platformer,
         # `rooms`/`npc`/… on a dungeon), never a fixed field list here; the
@@ -390,23 +428,31 @@ def estimate_payload(pack: Path, name: str, tool_input: dict) -> dict | None:
         estimate = estimate_cradle(scope, **kwargs)
     except Exception as exc:  # noqa: BLE001 — an unpriceable input is "unknown", not an error
         log.debug("no estimate for %s(%s): %s", name, scope, exc)
-        return None
+        # The priciest tools keep their card in the honest unknown state; every
+        # other tool falls back to the ordinary pending chip (its own contract).
+        return _unpriced_payload(name, tool_input) if name in _ALWAYS_CARD else None
     payload = {
         "low": float(estimate.get("low") or 0.0),
         "high": float(estimate.get("high") or 0.0),
         "backend": estimate.get("backend") or "",
         "model": estimate.get("model") or "",
         "unitCount": int(estimate.get("unitCount") or 0),
-        "unitLabel": _UNIT_LABEL.get(scope, scope),
+        # The estimate's own units when it counted them per call; the scope's
+        # fixed phrase otherwise.
+        "unitLabel": str(estimate.get("unitLabel") or _UNIT_LABEL.get(scope, scope)),
     }
     if estimate.get("accuracy"):
         payload["accuracy"] = str(estimate["accuracy"])
+    if estimate.get("calibration"):
+        payload["calibration"] = str(estimate["calibration"])
     return payload
 
 
 def _unpriced_payload(name: str, tool_input: dict) -> dict | None:
-    """The SHAPE-COMPLETE "price unknown" estimate for a paid call canon has no
-    scope for (row P1-A6; Phase 1 §2.4's four paid-card states).
+    """The SHAPE-COMPLETE "price unknown" estimate for a paid call whose SCOPE
+    canon cannot determine — an ``asset generate`` target that is not in this
+    pack, a db type this pack does not have (the four
+    paid-card states).
 
     ``None`` from :func:`estimate_payload` means the request carries no
     ``estimate``, so ``PermissionRequest.payload`` emits no ``paid`` block and
@@ -654,25 +700,50 @@ def create_argv(out: Path, tool_input: dict, *, actor: str) -> list[str]:
     return argv
 
 
-def _create_spend(new_pack: Path, tool_input: dict, call: CallContext) -> dict:
+def _create_spend(
+    new_pack: Path, tool_input: dict, call: CallContext, result: dict | None = None,
+    *, status: str = "ok",
+) -> dict:
     """The derived compat spend row for a create, written into the pack the run
     CREATED — never the pack the conversation had open (the exact rule cradle's
     ``NewProjectModal`` follows: "both ledgers land in the pack the run
-    created"). The ACTUAL figure is the created tree's own
-    ``manifest.generation_stats.total_cost_usd``; the runner already journalled
-    its per-step money inside that pack. Best-effort, like every other ledger
-    write here: a ledger failure must never read as a failed create."""
+    created").
+
+    A create journals NOTHING: the runners write no per-step cost events, so
+    this spend row is the only money record a create leaves. Its ACTUAL figure
+    is the one ``world new`` measured (``result["actual_usd"]``, read from the
+    tree's own ``generation_stats.json`` through the estimator's one reader);
+    when the verb's document did not carry one, the same file is read here.
+    When neither has it — a run that never reached its manifest phase — the
+    key is OMITTED and the result carries a warning, so an unmeasured row is
+    distinguishable from a measured $0 (``spend.summarize`` tolerates the
+    absent key). Best-effort, like every other ledger write here: a ledger
+    failure must never read as a failed create.
+
+    ``status`` says how the run ended — ``ok``, or ``failed`` for a create
+    whose verb died: that run may already have spent, so its row lands in
+    the kept folder like any other, and the datum tells the two apart."""
+    from canon.estimator import generation_stats
     from canon.provenance import identity_for
     from canon.spend import record_spend
 
-    actual = 0.0
-    try:
-        manifest = json.loads((new_pack / "manifest.json").read_text(encoding="utf-8"))
-        actual = float((manifest.get("generation_stats") or {}).get("total_cost_usd") or 0.0)
-    except Exception:  # noqa: BLE001 — stats are optional; $0 is the honest fallback
-        log.debug("no generation_stats in %s; recording the create at $0", new_pack, exc_info=True)
+    def _money(value: object) -> float | None:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    actual = _money((result or {}).get("actual_usd"))
+    if actual is None:
+        actual = _money(generation_stats(new_pack).get("total_cost_usd"))
+    if actual is None:
+        log.debug("no generation_stats.json in %s; the create's cost is unmeasured", new_pack)
+        if result is not None:
+            notes = result.setdefault("warnings", [])
+            if not any("generation_stats" in str(w) for w in notes):
+                notes.append(
+                    f"no generation_stats.json under {new_pack}: the create's cost is unmeasured "
+                    "(not $0), so its spend row carries no actual_usd"
+                )
     row = {
-        "op": "world", "scope": "create_project", "actor": call.actor,
+        "op": "world", "scope": "create_project", "status": status, "actor": call.actor,
         "identity": identity_for(call.actor), "session": call.conversation,
         "category": "generation", "actual_usd": actual,
         "backends": selected_backends("create_project", tool_input) or None,
@@ -707,7 +778,9 @@ def _create_project(pack: Path, tool_input: dict, call: CallContext) -> dict:
        one pipeline, two launchers. ``--orchestrate`` defaults on (Q6), the
        world name lands through the journaled write core and the pack's
        ``.canon/registry.json`` is stamped, all inside that verb.
-    5. **The ledgers land in the CREATED pack** (:func:`_create_spend`).
+    5. **The ledgers land in the CREATED pack** (:func:`_create_spend`) —
+       on a run that died too: the folder it kept gets a ``failed`` row
+       carrying whatever the run measured before it stopped.
 
     Doctrine 3 is upheld by the SELECTION, not by this body: an all-fake/none
     call bills nothing and is ask-tier (:func:`paid_tier_for`); a paid one
@@ -739,9 +812,16 @@ def _create_project(pack: Path, tool_input: dict, call: CallContext) -> dict:
         completed = subprocess.run(argv, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
         tail = (exc.stderr or b"").decode(errors="replace")[-800:]
+        # (5) even now: the run may have spent before it died, so its ledger
+        # row lands in the kept folder — status ``failed``, the actual read
+        # from whatever stats file the run managed to write, and a warning
+        # (carried on the error) when there is none to read.
+        notes: dict = {}
+        _create_spend(out, tool_input, call, notes, status="failed")
+        said = "".join(f"\n{w}" for w in notes.get("warnings") or [])
         raise RuntimeError(
             f"create_project failed for {name!r}; the folder is kept at {out} so nothing is lost "
-            f"(delete it yourself if you don't want it):\n{tail}"
+            f"(delete it yourself if you don't want it):\n{tail}{said}"
         ) from exc
     try:
         result = dict(json.loads((completed.stdout or b"").decode(errors="replace") or "{}"))
@@ -750,7 +830,7 @@ def _create_project(pack: Path, tool_input: dict, call: CallContext) -> dict:
     result.setdefault("pack_dir", str(out))
     result["template"] = getattr(spec, "pack_type", result.get("template"))
     result["counts"] = effective_counts(tool_input)
-    result["spend"] = _create_spend(out, tool_input, call)
+    result["spend"] = _create_spend(out, tool_input, call, result)
     return result
 
 

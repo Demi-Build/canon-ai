@@ -425,3 +425,49 @@ class TestCli:
         assert "a" in payload["report"]["skipped"]  # committed before the kill
         assert (out / "a.count").read_text() == "1"
         assert (out / "d.count").read_text() == "1"
+
+
+class _SleepingLegacyPhase:
+    """A legacy Phase (no ``expand``) that takes measurable time."""
+
+    def __init__(self, name: str = "sleeper", fail: bool = False) -> None:
+        self.name = name
+        self.fail = fail
+
+    def run(self, ctx) -> None:
+        time.sleep(0.01)
+        if self.fail:
+            raise RuntimeError("boom")
+
+
+class TestRunClock:
+    """The orchestrated scheduler brackets its run in the SAME clock the
+    sequential one uses (``canon.pipeline.stats.run_timer``): the elapsed
+    lands on ``ctx.stats`` at run_end, on every exit."""
+
+    def test_orchestrate_assigns_the_elapsed_at_run_end(self, tmp_path: Path) -> None:
+        ctx = _ctx(tmp_path)
+        report = orchestrate([_SleepingLegacyPhase()], ctx)
+        assert report.ok
+        elapsed = ctx.stats.generation_time_seconds
+        assert elapsed > 0
+        time.sleep(0.005)
+        assert ctx.stats.elapsed_seconds() == elapsed  # stopped, not still running
+
+    def test_two_passes_on_one_context_accumulate_one_total(self, tmp_path: Path) -> None:
+        """The platformer bootstrap orchestrates twice on one context; the
+        stats object is cumulative for every counter, the clock included."""
+        ctx = _ctx(tmp_path)
+        orchestrate([_SleepingLegacyPhase("first")], ctx)
+        first = ctx.stats.generation_time_seconds
+        orchestrate([_SleepingLegacyPhase("second")], ctx)
+        assert ctx.stats.generation_time_seconds > first
+
+    def test_an_escalated_run_still_stops_the_clock(self, tmp_path: Path) -> None:
+        ctx = _ctx(tmp_path)
+        report = orchestrate([_SleepingLegacyPhase(fail=True)], ctx)
+        assert report.escalated
+        elapsed = ctx.stats.generation_time_seconds
+        assert elapsed > 0
+        time.sleep(0.005)
+        assert ctx.stats.elapsed_seconds() == elapsed

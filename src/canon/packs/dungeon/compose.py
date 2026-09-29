@@ -45,6 +45,7 @@ from canon.packs.dungeon.parsers import (
 )
 from canon.packs.dungeon.phases import MazeworldManifestPhase
 from canon.packs.dungeon.placement import MazeworldPlacementPhase
+from canon.packs.dungeon.portraits import PortraitWritebackPhase
 from canon.packs.dungeon.prompts import MazeworldPromptSet
 from canon.packs.dungeon.specs import (
     EVENT_SPEC,
@@ -338,6 +339,12 @@ def compose_pipeline(
         # Placement runs after maze + entities exist; rewrites each maze.json
         # with npc_positions / event_positions / item_placements / quest_ids.
         MazeworldPlacementPhase(),
+        # The other half of the AssetPhase contract: the row files were written
+        # by DatabasePhase BEFORE the portraits existed, so their asset fields
+        # are still empty. This flushes the paths AssetPhase recorded into
+        # them. It runs HERE, after placement, because placement rewrites
+        # events/events.json from memory and would drop an earlier stamp.
+        PortraitWritebackPhase(),
         ValidationPhase(),
         MazeworldManifestPhase(),
     ]

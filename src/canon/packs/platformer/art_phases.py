@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from canon.backends.base import ImageEditBackend
+from canon.backends.failures import AssetError, cancel_hook, retry_call
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import Backdrop, PlayerDefinition, StageProps
 from canon.packs.platformer.graphics import DEFAULT_GRAPHICS, GraphicsSpec
@@ -55,6 +56,7 @@ from canon.packs.platformer.tileset_art import (
     tint_to_color,
 )
 from canon.pipeline.orchestrator import pinned_ids
+from canon.pipeline.phases.asset import provider_id, record_asset_failure
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +136,19 @@ def _add_image_cost(ctx: Any, producer: Any) -> None:
     spent = float(drain() or 0.0) if callable(drain) else 0.0
     if spent:
         stats.image_cost_usd = float(getattr(stats, "image_cost_usd", 0.0)) + spent
+    # …and the UNITS that money bought. Without them the recorded run is a
+    # numerator with no denominator: the forecast's per-unit calibration
+    # divides `image_cost_usd` by `image_successes`, so a platformer pack that
+    # had really paid still priced off the published range while the dungeon
+    # (whose AssetPhase has always kept this counter) did not.
+    drain_units = getattr(producer, "drain_units", None)
+    made = int(drain_units() or 0) if callable(drain_units) else 0
+    if made:
+        stats.image_successes = int(getattr(stats, "image_successes", 0)) + made
+        # Every success was also an attempt. The producer only observes the
+        # calls that came back, so this is a FLOOR on attempts — never the
+        # overstatement that would deflate a measured $/image.
+        stats.image_attempts = int(getattr(stats, "image_attempts", 0)) + made
 
 
 def _stamped_png(
@@ -245,16 +260,33 @@ class TilesetArtPhase:
                     square = None
                     if tile is not None:
                         try:
-                            square = self.producer.tile_image(
-                                tile, role_hex, stage.theme, world_title,
-                                self.graphics,
+                            # Retried on a RETRYABLE failure (rate limit,
+                            # 5xx, timeout); a permanent one (403, a
+                            # rejected request) is called once and listed.
+                            square = retry_call(
+                                lambda: self.producer.tile_image(
+                                    tile, role_hex, stage.theme, world_title,
+                                    self.graphics,
+                                ),
+                                provider=provider_id(self.producer),
+                                label=f"tile:{stage_id}/{slot.name}",
+                                should_stop=cancel_hook(ctx),
                             )
-                        except Exception as e:  # noqa: BLE001
+                        except AssetError as e:
                             warn(
                                 ctx,
                                 f"tileset art: generation failed for tile "
-                                f"{slot.name!r} ({type(e).__name__}: {e}); "
+                                f"{slot.name!r} ({e.kind}: {e}); "
                                 f"placeholder square used.",
+                            )
+                            record_asset_failure(
+                                ctx, family="image",
+                                target=f"tile:{stage_id}/{slot.name}", rel="",
+                                error=e, node=f"phase:{self.name}",
+                                repair=(
+                                    "replace it with `asset replace --target "
+                                    f"tile:{stage_id}/{slot.name} --from <png>`"
+                                ),
                             )
                     generated[slot.name] = square
                 if square is None:
@@ -376,6 +408,36 @@ def _enemy_art_descriptor(
     return f"{base} — {flavor}".strip(" —")
 
 
+def sprite_candidates(bible: Any, pinned: set[str] | frozenset[str]) -> int:
+    """How many sprite images :class:`SpriteArtPhase` will generate for
+    ``bible``: one per unpinned enemy definition, one per unpinned item, the
+    player unless pinned, and the :data:`PROP_SPECS` catalog per unpinned
+    stage prop set.
+
+    The ONE place that arithmetic lives. ``SpriteArtPhase.run`` counts its
+    sub-phase total from it and the cost forecast counts a ``canon asset
+    generate`` target's units from it (``packs.platformer.estimate``), so an
+    estimate cannot quietly drift from the phase it prices — the failure mode
+    the duplicated sum had was silent under-pricing on the product's most
+    expensive tool.
+    """
+    return (
+        sum(
+            1 for eid, e in getattr(bible, "enemy_definitions", {}).items()
+            if (e.artifact_id or f"enemy:{eid}") not in pinned
+        )
+        + sum(
+            1 for iid, i in getattr(bible, "items", {}).items()
+            if (i.artifact_id or f"item:{iid}") not in pinned
+        )
+        + (0 if "player" in pinned else 1)
+        + len(PROP_SPECS) * sum(
+            1 for sid in getattr(bible, "stages", {})
+            if make_artifact_id("props", sid) not in pinned
+        )
+    )
+
+
 class SpriteArtPhase:
     """Generated sprites for every enemy definition + the player.
     Definitions keep their placeholder color and variant markers — the
@@ -439,24 +501,10 @@ class SpriteArtPhase:
         pinned = pinned_ids(ctx.bible)
 
         # Exact sub-phase total: the same candidate sets the loops below walk,
-        # minus the pins they skip. Counted here rather than in `_generate`
-        # because this is the only place the pin guards are all visible.
+        # minus the pins they skip. Through `sprite_candidates` so the cost
+        # forecast counts the very same units this phase is about to generate.
         self._done = 0
-        self._total = (
-            sum(
-                1 for eid, e in ctx.bible.enemy_definitions.items()
-                if (e.artifact_id or f"enemy:{eid}") not in pinned
-            )
-            + sum(
-                1 for iid, i in getattr(ctx.bible, "items", {}).items()
-                if (i.artifact_id or f"item:{iid}") not in pinned
-            )
-            + (0 if "player" in pinned else 1)
-            + len(PROP_SPECS) * sum(
-                1 for sid in ctx.bible.stages
-                if make_artifact_id("props", sid) not in pinned
-            )
-        )
+        self._total = sprite_candidates(ctx.bible, pinned)
 
         for enemy_id, enemy in ctx.bible.enemy_definitions.items():
             # The phase re-rolls the WHOLE roster whenever it runs (no
@@ -477,6 +525,7 @@ class SpriteArtPhase:
             sprite = self._generate(
                 ctx, enemy.name or enemy_id, descriptor, color_hex,
                 theme, world_title, (size, size),
+                repair=f"regenerate it with `asset generate --target enemy:{enemy_id}`",
             )
             if sprite is None:
                 continue
@@ -542,6 +591,7 @@ class SpriteArtPhase:
             sprite = self._generate(
                 ctx, item.name or item_id, descriptor, color_hex,
                 theme, world_title, (size, size),
+                repair=f"regenerate it with `asset generate --target item:{item_id}`",
             )
             if sprite is None:
                 continue
@@ -574,6 +624,7 @@ class SpriteArtPhase:
             player = self._generate(
                 ctx, "the player", PLAYER_DESCRIPTOR, "#f0f0f0",
                 theme, world_title, (size, size),
+                repair="regenerate it with `asset generate --target player`",
             )
             if player is not None:
                 rel = "sprite/player/base.png"
@@ -617,6 +668,10 @@ class SpriteArtPhase:
                 sprite = self._generate(
                     ctx, f"{prop_name} prop", descriptor, color_hex,
                     st.theme, world_title, (size, size),
+                    repair=(
+                        "no verb regenerates one stage prop on its own yet; "
+                        "the drawn placeholder shape stays"
+                    ),
                 )
                 if sprite is None:
                     continue
@@ -648,8 +703,12 @@ class SpriteArtPhase:
     def _generate(
         self, ctx: Any, name: str, descriptor: str, color_hex: str,
         theme: str, world_title: str, size: tuple[int, int],
+        repair: str | None = None,
     ) -> Any:
-        """One sprite, or None after a loud fallback."""
+        """One sprite, or None after a loud fallback. ``repair`` is the
+        clause a failure record's hint names — the verb that regenerates
+        THIS sprite (``asset generate --target enemy:<id>``), or the honest
+        absence of one."""
         # The one choke point every sprite in this phase passes through
         # (enemies, items, the player, props) — so announcing progress here
         # covers all four loops with one call. Emitted BEFORE the generate:
@@ -665,15 +724,24 @@ class SpriteArtPhase:
             else {}
         )
         try:
-            sprite = self.producer.sprite_image(
-                name, descriptor, color_hex, theme, world_title,
-                self.graphics, size, **extra,
+            sprite = retry_call(
+                lambda: self.producer.sprite_image(
+                    name, descriptor, color_hex, theme, world_title,
+                    self.graphics, size, **extra,
+                ),
+                provider=provider_id(self.producer),
+                label=f"sprite:{name}",
+                should_stop=cancel_hook(ctx),
             )
-        except Exception as e:  # noqa: BLE001
+        except AssetError as e:
             warn(
                 ctx,
                 f"sprite art: generation failed for {name!r} "
-                f"({type(e).__name__}: {e}); placeholder rect kept.",
+                f"({e.kind}: {e}); placeholder rect kept.",
+            )
+            record_asset_failure(
+                ctx, family="image", target=f"sprite:{name}", rel="",
+                error=e, node=f"phase:{self.name}", repair=repair,
             )
             return None
         if _opaque_ratio(sprite) < MIN_OPAQUE_RATIO:
@@ -1043,12 +1111,21 @@ class SpriteAnimationPhase:
             return Image.open(io.BytesIO(out)).convert("RGBA")
 
         try:
-            sheet = _edit()
-        except Exception as e:  # noqa: BLE001
+            sheet = retry_call(
+                _edit, provider=provider_id(edit_backend),
+                label=f"{actor_id} · {state} {label}",
+                should_stop=cancel_hook(ctx),
+            )
+        except AssetError as e:
             warn(
                 ctx,
                 f"animation: {actor_id!r} {state!r} {label} failed "
-                f"({type(e).__name__}: {e}); {kept}.",
+                f"({e.kind}: {e}); {kept}.",
+            )
+            record_asset_failure(
+                ctx, family="image", target=f"{actor_id}#{state}", rel="",
+                error=e, node=f"phase:{self.name}",
+                repair=f"regenerate it with `asset animate --target {actor_id}`",
             )
             return None
         raw = segment_frames(sheet)
@@ -1492,16 +1569,27 @@ class BackdropArtPhase:
             )
             for band in range(self.graphics.backdrop_bands):
                 try:
-                    img = self.producer.backdrop_image(
-                        band, stage.theme, world_title, palette, bg_hex,
-                        self.graphics,
+                    img = retry_call(
+                        lambda: self.producer.backdrop_image(
+                            band, stage.theme, world_title, palette, bg_hex,
+                            self.graphics,
+                        ),
+                        provider=provider_id(self.producer),
+                        label=f"backdrop:{stage_id}/band_{band}",
+                        should_stop=cancel_hook(ctx),
                     )
-                except Exception as e:  # noqa: BLE001
+                except AssetError as e:
                     warn(
                         ctx,
                         f"backdrop art: band {band} failed for stage "
-                        f"{stage_id!r} ({type(e).__name__}: {e}); gradient "
+                        f"{stage_id!r} ({e.kind}: {e}); gradient "
                         f"sky covers it.",
+                    )
+                    record_asset_failure(
+                        ctx, family="image", target=f"backdrop:{stage_id}",
+                        rel=f"backdrop/{stage_id}/band_{band}.png",
+                        error=e, node=f"phase:{self.name}",
+                        repair=f"regenerate it with `asset generate --target backdrop:{stage_id}`",
                     )
                     continue
                 rel = f"backdrop/{stage_id}/band_{band}.png"
@@ -1518,17 +1606,28 @@ class BackdropArtPhase:
             # stays far → near → foreground.
             if self.graphics.foreground_band:
                 try:
-                    img = self.producer.backdrop_image(
-                        self.graphics.backdrop_bands, stage.theme,
-                        world_title, palette, bg_hex, self.graphics,
-                        foreground=True,
+                    img = retry_call(
+                        lambda: self.producer.backdrop_image(
+                            self.graphics.backdrop_bands, stage.theme,
+                            world_title, palette, bg_hex, self.graphics,
+                            foreground=True,
+                        ),
+                        provider=provider_id(self.producer),
+                        label=f"backdrop:{stage_id}/band_fg",
+                        should_stop=cancel_hook(ctx),
                     )
-                except Exception as e:  # noqa: BLE001
+                except AssetError as e:
                     warn(
                         ctx,
                         f"backdrop art: foreground band failed for stage "
-                        f"{stage_id!r} ({type(e).__name__}: {e}); no "
+                        f"{stage_id!r} ({e.kind}: {e}); no "
                         f"occluder band.",
+                    )
+                    record_asset_failure(
+                        ctx, family="image", target=f"backdrop:{stage_id}",
+                        rel=f"backdrop/{stage_id}/band_fg.png",
+                        error=e, node=f"phase:{self.name}",
+                        repair=f"regenerate it with `asset generate --target backdrop:{stage_id}`",
                     )
                 else:
                     rel = f"backdrop/{stage_id}/band_fg.png"
@@ -1612,14 +1711,23 @@ class WorldArtPhase:
                 break
         step(ctx, self.name, world.title or "splash", index=1, total=1)
         try:
-            img = self.producer.splash_image(
-                world.title, themes, palette, self.graphics
+            img = retry_call(
+                lambda: self.producer.splash_image(
+                    world.title, themes, palette, self.graphics
+                ),
+                provider=provider_id(self.producer), label="splash:world",
+                should_stop=cancel_hook(ctx),
             )
-        except Exception as e:  # noqa: BLE001
+        except AssetError as e:
             warn(
                 ctx,
                 f"world art: splash generation failed "
-                f"({type(e).__name__}: {e}); title card kept.",
+                f"({e.kind}: {e}); title card kept.",
+            )
+            record_asset_failure(
+                ctx, family="image", target="splash:world", rel="splash/world.png",
+                error=e, node=f"phase:{self.name}",
+                repair="no verb regenerates the splash on its own yet; the title card stays",
             )
             _add_image_cost(ctx, self.producer)
             _stamp_metadata(ctx, self.name)

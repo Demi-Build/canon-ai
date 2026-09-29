@@ -2029,7 +2029,7 @@ def generate_level_music(
     slug = "theme" if section is None else f"sec{int(section)}"
     rel = f"music/{stage_id}/{level_id}/{slug}{ext}"
     music_hash = ctx.adapter.write_binary(rel, data)
-    _add_audio_cost(ctx, music)
+    _add_audio_cost(ctx, music, "music")
 
     if section is None:
         edit: dict = {"music_path": rel, "music_hash": music_hash}

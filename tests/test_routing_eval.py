@@ -175,6 +175,19 @@ class TestRoutingCorpus:
             offered = {spec.name for spec in conv.tools}
             assert offered <= allowed, f"{conv.name} offers {sorted(offered - allowed)}, not on the foreman's roster"
 
+    def test_the_agent_name_has_one_source(self) -> None:
+        """The agent's name lives in ``roster/core.md`` and nowhere else in
+        canon. ``evals`` reads it back out of that prompt, so renaming the
+        agent is editing one line; a corpus that spelled its own copy would go
+        on introducing the model under the old name and never fail here."""
+        from canon.agent import evals
+
+        assert evals.AGENT_NAME == "Wright"
+        assert f"You are {evals.AGENT_NAME}" in core_law()
+        for conv in CONVERSATIONS:
+            assert "Wick" not in conv.system, conv.name
+        assert f"You are {evals.AGENT_NAME}" in evals._FOREMAN_FALLBACK
+
     @pytest.mark.parametrize("name", ROUTING_CONVERSATIONS)
     def test_each_routing_conversation_passes_on_the_fake(self, name: str) -> None:
         conv = conversation(name)
@@ -184,11 +197,40 @@ class TestRoutingCorpus:
 
     def test_a_mixed_request_reaches_both_crafts_in_one_turn(self) -> None:
         conv = conversation("routing-design-and-art")
-        assert conv.expected_delegations == ["level_designer", "artist"]
+        # ONE group of two: both crafts must be reached, in either order.
+        assert conv.expected_delegations == [["level_designer", "artist"]]
         # Both delegations ride ONE assistant turn — §5.5's parallel fan-out.
         fan_out = [turn for turn in conv.fake_turns if isinstance(turn, list)
                    and sum(1 for b in turn if b.get("type") == "tool_use") > 1]
         assert fan_out, "the mixed request must hand both tasks out in one turn"
+
+    def test_the_two_crafts_may_be_handed_out_in_either_order(self) -> None:
+        """Real models order a one-turn fan-out either way; the routing
+        contract is WHICH crafts, so the flipped pair passes both the tool
+        check and the delegation check — with the wording freed, as on the
+        provider-swap leg."""
+        conv = conversation("routing-design-and-art")
+        probe, (text, designer, artist), final = conv.fake_turns
+        flipped = ScriptedConversation(
+            **{**conv.__dict__, "name": f"{conv.name}-flipped", "fake_turns": [probe, [text, artist, designer], final]}
+        )
+        result = run_scripted(flipped, FakeChatBackend(flipped.fake_turns), strict_text=False)
+        assert result.failures == []
+        assert result.tool_calls == ["describe_level", "delegate", "delegate"]
+
+    def test_delegating_before_the_probe_is_still_a_named_failure(self) -> None:
+        """Describe-first is the part of the order that matters: the probe
+        grounds both briefs, so a fan-out ahead of it fails the tool check
+        even though the delegations themselves are the right two."""
+        conv = conversation("routing-design-and-art")
+        probe, fan_out, final = conv.fake_turns
+        early = ScriptedConversation(
+            **{**conv.__dict__, "name": f"{conv.name}-early", "fake_turns": [fan_out, probe, final]}
+        )
+        result = run_scripted(early, FakeChatBackend(early.fake_turns), strict_text=False)
+        assert result.passed is False
+        assert any(f.startswith("tool calls:") for f in result.failures)
+        assert not any(f.startswith("delegations:") for f in result.failures), "both crafts were still reached"
 
     def test_a_pure_question_delegates_to_nobody(self) -> None:
         conv = conversation("routing-question-delegates-to-nobody")

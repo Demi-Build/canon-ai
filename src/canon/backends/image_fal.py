@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from canon import pricing as _pricing
+from canon.backends.failures import AssetError, classify_exception
 
 if TYPE_CHECKING:
     pass  # no top-level fal_client import
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "fal-ai/nano-banana"
+
+#: The registry id this backend answers to — stamped on every failure record
+#: so the list a person reads names the provider, not the class.
+PROVIDER_ID = "fal"
 
 #: nano-banana's img2img (edit) endpoint — takes ``image_urls`` + ``prompt``
 #: and returns the same ``{"images": [{"url": ...}]}`` shape as generation.
@@ -117,6 +122,11 @@ class FalImageBackend:
         # canon:image-seed always shipped empty on paid runs).
         self.last_seed: int | None = None
         self.last_request_id: str | None = None
+        #: WHY the most recent ``generate_and_save[_async]`` returned False —
+        #: an ``AssetError`` (retryable flag, status, request id), or ``None``
+        #: after a success. Read it on the line after the call, exactly like
+        #: ``last_cost``: the bool keeps the protocol, this keeps the reason.
+        self.last_error: AssetError | None = None
 
     def _note_cost(self, model: str) -> None:
         """Price the call that just returned from the table (fal reports no
@@ -211,27 +221,43 @@ class FalImageBackend:
         """Generate an image and write it to ``filepath``.
 
         Creates parent directories as needed. Returns ``True`` on success,
-        ``False`` on any exception (network error, fal API error, etc.).
+        ``False`` on any exception (network error, fal API error, etc.) —
+        and then ``last_error`` says which, classified for retry.
         """
+        self.last_error = None
         try:
             data = self.generate(prompt, width, height)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
 
     async def generate_and_save_async(
         self, prompt: str, filepath: str, width: int, height: int
     ) -> bool:
         """Async variant of ``generate_and_save``."""
+        self.last_error = None
         try:
             data = await self.generate_async(prompt, width, height)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
+
+    def _note_failure(self, exc: BaseException, filepath: str) -> None:
+        """Record the reason a save failed: ``last_error`` for the caller
+        that reads it, and one log line so the console is never silent."""
+        self.last_error = classify_exception(exc, provider=PROVIDER_ID)
+        logger.warning(
+            "fal image generation failed for %s: %s%s (%s)",
+            Path(filepath).name, self.last_error.kind,
+            f" {self.last_error.status}" if self.last_error.status else "",
+            "retryable" if self.last_error.retryable else "not retryable",
+        )
 
     # -- img2img (implements ``ImageEditBackend``) --------------------------
 

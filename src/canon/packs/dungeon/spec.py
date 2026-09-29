@@ -121,6 +121,7 @@ _ENTITY_DATA: dict[str, dict] = {
         "containers": ["abilities"],
         "protected": ["id", "profile_image"],
         "phase_label": "db:monster", "per_map": True, "count_key": "monster",
+        "asset": {"field": "profile_image", "kinds": ["image"], "targets": ["monster:<id>"]},
     },
     # P.1.3
     "item": {
@@ -146,6 +147,7 @@ _ENTITY_DATA: dict[str, dict] = {
         "containers": ["item_stats"],
         "protected": ["id", "profile_image"],
         "phase_label": "db:item", "per_map": True, "count_key": "item",
+        "asset": {"field": "profile_image", "kinds": ["image"], "targets": ["item:<id>"]},
     },
     # P.1.4
     "quest": {
@@ -180,6 +182,7 @@ _ENTITY_DATA: dict[str, dict] = {
             "target_items[].item_id": "item.id", "target_event_id": "event.id",
         },
         "phase_label": "db:quest", "per_map": True, "count_key": "quest",
+        "asset": {"field": "profile_image", "kinds": ["image"], "targets": ["quest:<id>"]},
     },
     # P.1.5 (incl. the new `scene` type — a value of `type`, shared id space, P.9 S7)
     "event": {
@@ -210,6 +213,7 @@ _ENTITY_DATA: dict[str, dict] = {
             "reward_item_id": "item.id", "actors[].character_id": "npc.id",
         },
         "phase_label": "db:event", "per_map": True, "count_key": "event",
+        "asset": {"field": "profile_image", "kinds": ["image"], "targets": ["event:<id>"]},
     },
     # P.1.6 — id_field `archetype` (P.9 S2); spell_pools.json is a container, not a tenth kind (S3)
     "class": {
@@ -531,6 +535,7 @@ PHASE_LABELS: dict[str, str] = {
     "assets": "Portraits & audio",
     "narrative": "Narrative",
     "mazeworld_placement": "Placing entities",
+    "portraits": "Linking portraits",
     "validation": "Validation",
     "manifest": "Manifest",
 }

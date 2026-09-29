@@ -27,6 +27,22 @@ container — knob-wise. ``db schema`` output gains ``user_fields, hidden,
 decorative, protected, routed`` beside ``type/source/path/schema`` (and
 ``db types`` beside its four) — ``RowEditor`` reads them at P0-8.
 
+Restore comes in TWO explicitly separated scopes, because the CAS unit of a
+collection kind is the FILE while the thing a user points at is a ROW.
+``restore_db_row`` lifts ONE row out of the stored version and drops it into
+the CURRENT file, so every sibling row keeps the edits made since — the same
+scoping the room-step restore does one level up, applied to a row slot
+(``_row_in`` / ``_set_row_in``). It is what every restore surface reaches:
+``platformer_write._restore_document`` — the one entry point behind ``canon
+asset restore``, the agent's restore tool and the editor's Restore button —
+sends ``<kind>:<id>`` of a collection kind here. ``restore_db_collection``
+is the whole-file action, kept and labelled as such so a caller choosing it
+knows every row in the file goes back, and answerable as a PLAN first
+(``dry_run``) so the rows it would remove can be named before it writes.
+Both run through the write core, so a restore is validated, journaled and
+versioned like any other write: it writes a NEW version, it never rewinds
+history and it never deletes a row.
+
 Generation: a kind whose seed binds a ``builder`` (the platformer's
 anchored enemy/item bodies) generates exactly as before — same prompts, rng
 streams, provenance stamping. A kind without one (every dungeon kind, every
@@ -81,8 +97,11 @@ __all__ = [
     "db_define",
     "db_evolve",
     "db_types",
+    "generate_asset",
     "new_db_row",
     "read_db_schema",
+    "restore_db_collection",
+    "restore_db_row",
     "update_db_row",
     "update_db_schema",
 ]
@@ -191,10 +210,13 @@ class _RowFile:
     index's own id is ``<kind>:<id>`` because that file holds only rows of
     that kind, and a mirror keeps the mirror label its layout declares
     (``world_bible``, ``manifest``). That holds even when a ``row_source``
-    mirror stands in as the primary — the bytes snapshotted and the bytes a
-    restore would write back are the WHOLE mirror file, which is what
-    ``platformer_write._restore_document`` resolves ``<kind>:<id>`` to (the
-    kind's layout path, ``rooms/rooms.json``). Consequence, by design: on a
+    mirror stands in as the primary — the bytes snapshotted are the WHOLE
+    file (the kind's layout path, ``rooms/rooms.json``), so a stored version
+    of ``<kind>:<id>`` carries every sibling row with it. What a RESTORE
+    writes back is only the row's own slot out of those bytes
+    (``restore_db_row``, where ``platformer_write._restore_document`` sends
+    ``<kind>:<id>``); taking the whole file back is the separate, labelled
+    ``restore_db_collection``. Consequence, by design: on a
     legacy tree with no index, a room-row edit is journalled under
     ``world_bible`` alongside ``world update``'s story edits, so the row's own
     lineage is reachable through ``world_bible`` and through the
@@ -273,6 +295,27 @@ def _row_in(document: Any, target: _RowFile, entity_id: str) -> dict | None:
             if isinstance(row, dict) and str(row.get(target.id_field)) == str(entity_id):
                 return row
     return None
+
+
+def _collection_ids(entity: EntityKind, data: Any) -> list[str]:
+    """Row ids in a collection's DATA, in file order — the in-memory twin of
+    ``load_rows``' keying (a keyed object by its keys, an array by each row's
+    ``id_field``), for comparing a stored version against the file on disk.
+
+    Deliberately tolerant where ``load_rows`` is not: an entry with no id, or
+    one that is not a row at all, has no id to report and is skipped. That is
+    what lets a MALFORMED current file still be compared against the version
+    that repairs it.
+    """
+    if isinstance(data, dict):
+        return [str(key) for key in data]
+    if not isinstance(data, list):
+        return []
+    return [
+        str(row[entity.id_field])
+        for row in data
+        if isinstance(row, dict) and row.get(entity.id_field) is not None
+    ]
 
 
 def _set_row_in(document: Any, target: _RowFile, entity_id: str, data: dict) -> Any:
@@ -361,12 +404,18 @@ def _write_mirrors(
     *,
     actor: str,
     session: str | None,
+    op: str = "edit",
+    detail_kind: str = "db_update",
 ) -> list[dict]:
     """Write each mirror that carries a changed field, one journal event per
     file with ``mirror_of`` (P.7.3). A mirror gets a field when its own
     ``fields`` list names it, or — with no list — when the mirror row ALREADY
     carries that key: a mirror is kept consistent, never grown a key the file
     does not have (the manifest's room entry is a summary, not a row copy).
+
+    *op* / *detail_kind* name the ACT the mirror write belongs to, so a row
+    RESTORE's mirrors journal as a restore instead of borrowing the edit
+    verb's label. Both default to what ``db update`` has always passed.
     """
     out: list[dict] = []
     for target, document in mirrors:
@@ -402,8 +451,9 @@ def _write_mirrors(
             user_edited=False,
             actor=actor,
             session=session,
+            op=op,
             detail={
-                "kind": "db_update",
+                "kind": detail_kind,
                 "type": entity.kind,
                 "mirror_of": f"{entity.kind}:{entity_id}",
             },
@@ -1021,6 +1071,80 @@ def _apply_row_changes(
     return diff
 
 
+def _row_pipeline(
+    pack: Path,
+    spec: PackSpec,
+    entity: EntityKind,
+    entity_id: str,
+    *,
+    per_file: bool,
+    primary: _RowFile | None,
+    skeleton: Any,
+    model: type[BaseModel],
+    warnings: list[str],
+    ref_scope: Callable[[dict[str, dict]], list[str]],
+) -> tuple[Callable[[Any], dict], Callable[[Any, dict], list[str]], Callable[[Any, dict], Any]]:
+    """The ``(row_of, warn, validate)`` trio a ROW-level write mounts on
+    ``write_document`` — lifted out of ``update_db_row`` verbatim so the row
+    RESTORE runs the identical fail-closed validation instead of growing a
+    second write path beside it.
+
+    ``row_of`` finds the row in the document (the file itself for a
+    ``per_file`` kind, the row slot inside the collection otherwise);
+    ``warn`` surfaces off-table values; ``validate`` is fail-closed — it
+    returns the model's normalized dump put back in the row's slot, or
+    ``None`` to write the mutated document as-is.
+
+    *ref_scope* is the ONE difference between the two callers. An EDIT that
+    introduces a dangling reference is refused (``check_refs`` raises for a
+    path it was handed as changed); a RESTORE only ever warns — the author
+    picked those bytes, and nothing here repairs or refuses what they asked
+    for, the same rule the room-step restore follows for a placement standing
+    in a restored wall.
+    """
+
+    def row_of(doc: Any) -> dict:
+        if per_file:
+            return doc
+        assert primary is not None
+        row = _row_in(doc, primary, entity_id)
+        if row is None:
+            raise FileNotFoundError(f"{entity.kind} {entity_id!r} not found")
+        return row
+
+    def warn(doc: Any, diff: dict[str, dict]) -> list[str]:
+        return db_models.off_table_warnings(
+            skeleton,
+            db_models.flatten_row(row_of(doc), entity.containers),
+            list(diff),
+            renames=entity.renames,
+        )
+
+    def validate(doc: Any, diff: dict[str, dict]) -> Any:
+        row = row_of(doc)
+        if entity.model is not None:
+            entity_obj = model.model_validate(row)  # fail-closed shape check
+            data = entity_obj.model_dump(mode="json")
+            for key, value in row.items():  # keep hand-added top-level keys
+                if key not in data:
+                    data[key] = value
+            if per_file:
+                return data
+            assert primary is not None
+            return _set_row_in(doc, primary, entity_id, data)
+        try:
+            model.model_validate(row)
+        except ValidationError as exc:
+            raise ValueError(f"{entity.kind} {entity_id!r} fails validation: {exc}") from None
+        if not per_file:
+            assert primary is not None
+            _check_collection(entity, primary, doc)
+        warnings.extend(db_models.check_refs(pack, spec, entity, row, ref_scope(diff)))
+        return None
+
+    return row_of, warn, validate
+
+
 def update_db_row(
     pack_dir: str | Path,
     entity_type: str,
@@ -1069,15 +1193,11 @@ def update_db_row(
     skeleton, _p, _s = db_models.schema_for(pack, spec, entity)
     model = entity.model or db_models.dynamic_model(entity, skeleton)
     warnings: list[str] = []
-
-    def row_of(doc: Any) -> dict:
-        if per_file:
-            return doc
-        assert primary is not None
-        row = _row_in(doc, primary, entity_id)
-        if row is None:
-            raise FileNotFoundError(f"{entity.kind} {entity_id!r} not found")
-        return row
+    row_of, warn, validate = _row_pipeline(
+        pack, spec, entity, entity_id,
+        per_file=per_file, primary=primary, skeleton=skeleton, model=model,
+        warnings=warnings, ref_scope=lambda diff: list(diff),
+    )
 
     def apply(doc: Any, addressed: dict) -> dict[str, dict]:
         row = row_of(doc)
@@ -1104,36 +1224,6 @@ def update_db_row(
             f"{name!r} is a container — edit knobs individually: '{name}.<key>' for an object, "
             f"'{name}[<i>].<key>' / '{name}[+]' for a list"
         )
-
-    def warn(doc: Any, diff: dict[str, dict]) -> list[str]:
-        return db_models.off_table_warnings(
-            skeleton,
-            db_models.flatten_row(row_of(doc), entity.containers),
-            list(diff),
-            renames=entity.renames,
-        )
-
-    def validate(doc: Any, diff: dict[str, dict]) -> Any:
-        row = row_of(doc)
-        if entity.model is not None:
-            entity_obj = model.model_validate(row)  # fail-closed shape check
-            data = entity_obj.model_dump(mode="json")
-            for key, value in row.items():  # keep hand-added top-level keys
-                if key not in data:
-                    data[key] = value
-            if per_file:
-                return data
-            assert primary is not None
-            return _set_row_in(doc, primary, entity_id, data)
-        try:
-            model.model_validate(row)
-        except ValidationError as exc:
-            raise ValueError(f"{entity.kind} {entity_id!r} fails validation: {exc}") from None
-        if not per_file:
-            assert primary is not None
-            _check_collection(entity, primary, doc)
-        warnings.extend(db_models.check_refs(pack, spec, entity, row, list(diff)))
-        return None
 
     # The row and its mirrors ride ONE batchId so a reader walks the pair as
     # one act (P.7.3); a row with no mirror binds nothing — a batch of one is
@@ -1190,6 +1280,453 @@ def update_db_row(
         "type": entity_type, "id": entity_id, "row": row,
         "changed": result["changed"], "warnings": result["warnings"],
         "file": rel, "mirrors": files,
+    }
+
+
+# ---------------------------------------------------------------------------
+# restore — ONE row slot, or the whole collection file
+# ---------------------------------------------------------------------------
+
+
+def _restore_lineage(
+    pack: Path,
+    entity: EntityKind,
+    artifact_id: str,
+    to_hash: str,
+    *,
+    per_file: bool,
+) -> None:
+    """Refuse a version that is not part of this artifact's own history.
+
+    A collection kind's CAS unit is the FILE, so every event that ever wrote
+    that file is part of the lineage: the rows' own ids (``npc:1000``, and the
+    ``world_bible`` name a ``row_source`` mirror publishes under), plus the
+    whole-file ``collection:<kind>`` events ``db define`` / ``db evolve``
+    write. A ``per_file`` kind gets the strict test instead — one file, one
+    row, one artifact id — or one row's bytes would land on another row.
+    """
+    kind = entity.kind
+
+    def owns(aid: str) -> bool:
+        if per_file:
+            return aid == artifact_id
+        return aid == artifact_id or aid.startswith(f"{kind}:") or aid == f"collection:{kind}"
+
+    if not any(
+        owns(str(event.get("artifact_id", "")))
+        and to_hash in (event.get("before_hash"), event.get("after_hash"))
+        for event in provenance.all_events(pack)
+    ):
+        raise ValueError(
+            f"{to_hash} is not part of {artifact_id}'s history — restore only rewinds an "
+            "artifact's own lineage"
+        )
+
+
+def _version_document(pack: Path, to_hash: str) -> Any:
+    """The stored version's bytes, parsed. A hash whose bytes are not JSON is
+    the wrong hash (a sprite, an atlas) — refused before anything is read out
+    of it."""
+    data = provenance.read_object(pack, to_hash)
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError(f"version {to_hash} is not JSON — wrong hash?") from None
+
+
+def _is_whole_document(target: _RowFile | None, *, per_file: bool) -> bool:
+    """True when the row IS the file — a ``per_file`` kind, or a ``document``
+    mirror standing in as the row (the file holds one row, not a collection)."""
+    return per_file or (target is not None and target.format == "document")
+
+
+def _stored_row(
+    entity: EntityKind,
+    target: _RowFile | None,
+    entity_id: str,
+    version: Any,
+    to_hash: str,
+    rel: str,
+    *,
+    per_file: bool,
+) -> dict:
+    """The ONE row this restore is about, lifted out of the stored version.
+
+    The two refusals the owner ruled on live here. A version that does not
+    carry the row (it predates the row's creation, or postdates its removal)
+    is refused rather than writing an absent row back as a deletion; a version
+    of some other file is refused as the wrong hash.
+    """
+    if _is_whole_document(target, per_file=per_file):
+        if not isinstance(version, dict):
+            raise ValueError(f"version {to_hash} is not a {entity.kind} row — wrong hash?")
+        stored_id = version.get(entity.id_field)
+        if stored_id is not None and str(stored_id) != str(entity_id):
+            raise ValueError(
+                f"version {to_hash} belongs to {entity.kind} {stored_id!r}, not {entity_id!r}"
+            )
+        return version
+    assert target is not None
+    # The lineage test is per-ARTIFACT-FAMILY, and a family can span more than
+    # one file (a room's rows and its grid files are both `room:…`), so the
+    # bytes are checked against the layout's own shape before a row is looked
+    # for in them: without this a grid version would reach the "no such row"
+    # refusal below and blame the row for what is really the wrong hash.
+    collection = _collection_in(version, target)
+    shaped = isinstance(collection, (list, dict))
+    if shaped and target.format == (entity.layout or {}).get("format"):
+        try:
+            db_models.check_collection_shape(entity, collection)
+        except ValueError:
+            shaped = False
+    if not shaped:
+        raise ValueError(f"version {to_hash} is not {rel} — wrong hash?")
+    row = _row_in(version, target, entity_id)
+    if row is None:
+        raise ValueError(
+            f"{entity.kind} {entity_id!r} is not in version {to_hash} of {rel} — that version "
+            "was written before the row was created (or after it was removed). A restore never "
+            "deletes a row: pick a version that carries it, or restore the whole collection to "
+            "take every row in the file back that far."
+        )
+    return row
+
+
+def restore_db_row(
+    pack_dir: str | Path,
+    entity_type: str,
+    entity_id: str,
+    to_hash: str,
+    *,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Make a stored version of ONE row current again (``op:"restore"``).
+
+    Scoped to the row's own slot. The stored version of a collection kind is
+    the WHOLE file — every sibling row as it stood then — so writing those
+    bytes back would silently revert every edit made to every other row in
+    ``npcs.json`` since (doctrine 10: an edit may not disappear unannounced).
+    Instead the target row is lifted OUT of the stored version and dropped
+    into the CURRENT file (``_row_in`` / ``_set_row_in``): siblings are not
+    read, not rewritten, not touched. This is the room-step restore's fix one
+    level down — there a step's own keys, here a row's own slot.
+
+    The stored state of the row is what becomes current: a key the version
+    does not carry is removed, the row's own ``status`` comes back with it
+    (nothing is stamped over the bytes the author picked), and the journal
+    diff is per top-level row key — a container comes back whole, because the
+    slot being restored is the row, not one knob inside it. The write goes
+    through the same pipeline as a hand edit — the entity model validates
+    fail-closed, mirrors that carry a restored field follow in the same batch,
+    and the result is a NEW version, journaled, with nothing deleted
+    (doctrine 6). A restore whose row is already current is a ``no_change``:
+    nothing written, nothing journaled.
+
+    Refused when the chosen version does not carry the row at all — it
+    predates the row's creation or postdates its removal. Nothing is written
+    and the row is never deleted; ``restore_db_collection`` is the labelled
+    way to take the whole file back that far. Where the rewind brings back a
+    field another surface owns — ``routed`` to another verb, or behind the
+    wall (the asset pointer, its hash, the identity/provenance plumbing) — it
+    warns naming that surface: a restore is the author's choice of bytes, so
+    it is never refused and never repaired behind their back, but no
+    protection class goes by unannounced.
+    """
+    pack, resolved = _resolve(pack_dir)
+    spec = resolved.spec
+    entity = _entity(spec, entity_type)
+    per_file = _is_per_file(entity)
+    primary: _RowFile | None = None
+    mirrors: list[tuple[_RowFile, Any]] = []
+    if per_file:
+        rel = _per_file_rel(entity, entity_id)
+        if not (pack / rel).is_file():
+            raise FileNotFoundError(f"{entity_type} {entity_id!r} not found")
+        document: Any = read_json(pack / rel)
+        artifact_id = f"{entity_type}:{entity_id}"
+    else:
+        primary, document, mirrors = _resolve_row_files(pack, entity, entity_id)
+        rel, artifact_id = primary.rel, primary.artifact_id
+
+    _restore_lineage(pack, entity, artifact_id, to_hash, per_file=per_file)
+    version = _version_document(pack, to_hash)
+    stored = copy.deepcopy(
+        _stored_row(entity, primary, entity_id, version, to_hash, rel, per_file=per_file)
+    )
+    whole_document = _is_whole_document(primary, per_file=per_file)
+
+    skeleton, _p, _s = db_models.schema_for(pack, spec, entity)
+    model = entity.model or db_models.dynamic_model(entity, skeleton)
+    warnings: list[str] = []
+    row_of, warn, validate = _row_pipeline(
+        pack, spec, entity, entity_id,
+        per_file=per_file, primary=primary, skeleton=skeleton, model=model,
+        # A rewind may land on a reference whose target was created later —
+        # warn, never refuse: the author chose these bytes and nothing here
+        # repairs or blocks what they asked for.
+        warnings=warnings, ref_scope=lambda _diff: [],
+    )
+
+    def apply(doc: Any, _changes: dict) -> dict[str, dict]:
+        current = row_of(doc)
+        diff: dict[str, dict] = {}
+        for name in sorted(set(current) | set(stored)):
+            old = current.get(name)
+            if name not in stored:
+                diff[name] = {"from": old, "to": None}  # the version had no such key
+            elif old != stored[name]:
+                diff[name] = {"from": old, "to": stored[name]}
+        if not diff:
+            return {}
+        # A version is the whole row, so a rewind can bring back a field some
+        # OTHER surface owns — a field ROUTED to another verb (an npc's grid
+        # position, a dialogue tree) or one behind the WALL (the asset pointer
+        # and its hash, the identity/provenance plumbing). `db update` refuses
+        # both; a restore cannot, because the author picked these bytes — so it
+        # says which surface may now disagree instead of refusing or quietly
+        # repairing (doctrine 10). The stronger protection class must not be
+        # the quieter one: every disturbed field is named, whichever list it
+        # is on.
+        walled = _wall(entity)
+        asset = entity.asset or {}
+        plumbing = {asset.get("field"), asset.get("hash_field")} - {None}
+        for name, change in diff.items():
+            verb = entity.routed.get(name)
+            if verb:
+                warnings.append(
+                    f"{name!r} is owned by {verb}: the restore brought its stored value back, so "
+                    f"the {verb} surface may now disagree with this row — nothing was repaired for you"
+                )
+            elif name in plumbing:
+                warnings.append(
+                    f"{name!r} is asset plumbing (`canon asset replace` owns it): the restore "
+                    f"moved it back to {change['to']!r} — nothing checked that the file it names "
+                    "is on disk, and nothing was repaired for you"
+                )
+            elif name in walled:
+                warnings.append(
+                    f"{name!r} is protected (identity / provenance / asset plumbing): the restore "
+                    "brought its stored value back — nothing was repaired for you"
+                )
+        row = copy.deepcopy(stored)
+        if whole_document:
+            doc.clear()
+            doc.update(row)
+        else:
+            assert primary is not None
+            _set_row_in(doc, primary, entity_id, row)
+        return diff
+
+    label = f"restores {entity_type} {entity_id} in {rel} (1 row; siblings untouched)"
+    batch = f"db-restore:{entity_type}:{entity_id}" if mirrors else None
+    with provenance.bind_batch(batch) if mirrors else contextlib.nullcontext():
+        result = write_document(
+            pack,
+            artifact_id=artifact_id,
+            rel_path=rel,
+            document=document,
+            # The row is ONE slot, so the pipeline is handed one change and the
+            # apply step above answers the per-FIELD diff the journal carries.
+            changes={"row": stored},
+            apply=apply,
+            warn=warn,
+            validate=validate,
+            user_edited=False,
+            actor=actor,
+            session=session,
+            detail={
+                "kind": "row_restore",
+                "type": entity_type,
+                "id": entity_id,
+                "scope": "row",
+                "to": to_hash,
+                "file": rel,
+                "rows": 1,
+                "label": label,
+            },
+            op="restore",
+            source="user",
+            warnings=warnings,
+        )
+        files = (
+            []
+            if result.get("no_change")
+            else _write_mirrors(
+                pack, entity, entity_id, mirrors,
+                # A key the version did not carry is removed from the ROW; a
+                # mirror is kept consistent in the keys it has and is never
+                # handed a null to write.
+                {name: d for name, d in result["changed"].items() if name in stored},
+                actor=actor, session=session, op="restore", detail_kind="row_restore",
+            )
+        )
+    return {
+        # `kind` / `label` are the shape every restore surface already answers
+        # with (the journal detail, the History card, the editor's response
+        # type) — the scoped restore keeps them so callers need no new branch.
+        "kind": "row_restore",
+        "type": entity_type,
+        "id": entity_id,
+        "scope": "row",
+        "label": label,
+        "row": row_of(result["document"]),
+        "restored_to": to_hash,
+        "artifact_id": artifact_id,
+        "file": rel,
+        "mirrors": files,
+        "changed": result["changed"],
+        "no_change": bool(result.get("no_change")),
+        "warnings": result["warnings"],
+        "before_hash": result["before_hash"],
+        "after_hash": result["after_hash"],
+    }
+
+
+def restore_db_collection(
+    pack_dir: str | Path,
+    entity_type: str,
+    to_hash: str,
+    *,
+    entity_id: str | None = None,
+    dry_run: bool = False,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict:
+    """Make a stored version of the WHOLE collection file current again.
+
+    The separate, explicitly labelled whole-file action: every row in
+    ``<layout.path>`` goes back to the way it stood in that version, including
+    rows the caller never looked at. ``restore_db_row`` is the per-row scope;
+    this one is for "take the file back", and its journal label says so
+    ("restores every ``<kind>`` row in ``<file>`` (N rows)") so a caller
+    choosing it knows what it reverts.
+
+    Fail-closed on what it WRITES: the version must be part of the
+    collection's own lineage and must re-parse in the kind's layout format
+    with unique ids. Open on what it REPLACES: the current file is read as
+    bytes, never shape-checked, because repairing a collection a bad merge or
+    a hand edit left malformed is exactly what this action is for.
+
+    A row created since that version is not in it, so this takes the file back
+    past that row's creation and REMOVES it. Nothing goes silently, and
+    nothing is deleted without asking first (doctrine 6): *dry_run* answers
+    the whole plan — ``label``, ``rows``, ``removed``, ``warnings`` — and
+    writes NOTHING, so a caller can name the rows about to go before it
+    offers the button, not in the journal afterwards. The refusals are the
+    same in a dry run as in the write, so what a caller is shown is what it
+    would get. ``restore_db_row`` is the way to take one row back without
+    touching the rest of the file. History itself is never rewound: this
+    writes a NEW version and journals ``op:"restore"``; a version that is
+    already current is a ``no_change``. *entity_id* only attributes the event
+    to the row the caller came from, so the restore stays visible in that
+    row's history; without it the event is published under the collection
+    itself.
+    """
+    pack, resolved = _resolve(pack_dir)
+    entity = _entity(resolved.spec, entity_type)
+    if _is_per_file(entity):
+        raise ValueError(
+            f"{entity_type} rows each live in their own file — there is no collection file to "
+            f"restore; restore the row instead"
+        )
+    rel = str(entity.layout.get("path"))
+    artifact_id = f"{entity_type}:{entity_id}" if entity_id is not None else f"collection:{entity_type}"
+    _restore_lineage(pack, entity, artifact_id, to_hash, per_file=False)
+    version = _version_document(pack, to_hash)
+    try:
+        db_models.check_collection_shape(entity, version)
+    except ValueError:
+        raise ValueError(f"version {to_hash} is not the {entity_type} collection — wrong hash?") from None
+    db_models.check_ids_unique(entity, version)
+
+    rows = len(version)
+    warnings: list[str] = []
+    mirrored = [str(m.get("file")) for m in (entity.layout.get("mirrors") or []) if isinstance(m, dict)]
+    if mirrored:
+        warnings.append(
+            f"{entity_type} rows are also copied into {', '.join(mirrored)} — a whole-collection "
+            f"restore writes {rel} only, so those copies keep their current values until each row "
+            "is edited or restored"
+        )
+    # The CURRENT file is read as BYTES, not through `_read_collection`'s shape
+    # check: a whole-file restore is precisely the way back from a collection a
+    # bad merge or a hand edit left malformed, so the state being REPLACED may
+    # not gate it. What is about to be WRITTEN stays fail-closed — the version
+    # is shape- and id-checked above.
+    try:
+        current: Any = read_json(pack / rel)
+        if current is None:  # absent file: the kind's empty collection
+            current = {} if entity.layout.get("format") == "keyed_object" else []
+    except json.JSONDecodeError:
+        # Not even JSON — a merge left its markers in the file. There is
+        # nothing to compare it against and no ids to name; this action is the
+        # way out of that state, so it proceeds and overwrites.
+        current = object()
+    no_change = current == version
+    # Doctrine 6: nothing is deleted without asking. A row created since the
+    # chosen version is not IN it, so taking the file back that far removes it
+    # — name that at the point of CHOICE, which means the plan is finished
+    # before anything is written and `dry_run` can hand it back whole. A
+    # caller that asks first shows the ids; a caller that does not still gets
+    # them in the warnings, the label and `detail.removes`.
+    kept = set(_collection_ids(entity, version))
+    removed = [] if no_change else [rid for rid in _collection_ids(entity, current) if rid not in kept]
+    label = f"restores every {entity_type} row in {rel} ({rows} rows)"
+    if removed:
+        listed = ", ".join(removed[:10]) + (f", +{len(removed) - 10} more" if len(removed) > 10 else "")
+        warnings.append(
+            f"{len(removed)} {entity_type} row(s) are not in that version and this restore REMOVES "
+            f"them: {listed} — they were created after it. Restore the row instead to take one row "
+            "back and leave the rest of the file alone"
+        )
+        label += f", removing {len(removed)} added since ({listed})"
+    plan = {
+        "kind": "row_restore",
+        "type": entity_type,
+        "scope": "collection",
+        "label": label,
+        "file": rel,
+        "rows": rows,
+        "restored_to": to_hash,
+        "artifact_id": artifact_id,
+        "removed": removed,
+        "warnings": warnings,
+    }
+    if dry_run or no_change:
+        return {
+            **plan,
+            # A dry run wrote nothing; a no-change had nothing to write.
+            **({"dry_run": True} if dry_run else {}),
+            "no_change": no_change,
+            "before_hash": None,
+            "after_hash": None,
+        }
+    committed = commit_document(
+        pack,
+        artifact_id=artifact_id,
+        rel_path=rel,
+        data=version,
+        actor=actor,
+        session=session,
+        detail={
+            "kind": "row_restore",
+            "type": entity_type,
+            "scope": "collection",
+            "to": to_hash,
+            "file": rel,
+            "rows": rows,
+            "label": label,
+            **({"removes": removed} if removed else {}),
+        },
+        op="restore",
+        source="user",
+    )
+    return {
+        **plan,
+        "no_change": False,
+        "before_hash": committed["before_hash"],
+        "after_hash": committed["after_hash"],
     }
 
 
@@ -1503,3 +2040,323 @@ def db_evolve(
         "changed": result["changed"],
         "warnings": result["warnings"],
     }
+
+
+# ---------------------------------------------------------------------------
+# `canon asset generate` for every non-platformer pack — `--target missing`
+# ---------------------------------------------------------------------------
+
+#: The target that means "every asset this pack should have and does not".
+MISSING_TARGET = "missing"
+
+#: ``family → the flag that wires its backend`` — for the refusal that names
+#: the missing capability rather than a document.
+_BACKEND_FLAGS: dict[str, str] = {
+    "image": "--image-backend", "music": "--music-backend", "sfx": "--sfx-backend",
+}
+
+
+def _asset_stats_path(pack: Path) -> str:
+    from canon.config import _default_output_paths
+
+    return _default_output_paths().get("generation_stats", "generation_stats.json")
+
+
+def _asset_cost_error(kind: str, backend: str | None) -> str | None:
+    """The LOUD "no price row" reason for a PAID backend canon cannot price
+    (never a silent $0) — ``None`` for fake/none (an honest $0) or a priced
+    backend. The platformer's ``_cost_error``, for the dungeon's lanes."""
+    from canon import pricing
+
+    if not pricing.is_paid(kind, backend):
+        return None
+    resolved = pricing.default_model(kind, backend)
+    warnings: list[str] = []
+    if resolved and pricing.price_for(kind, resolved, warnings) is not None:
+        return None
+    return f"{backend}: no price row for {resolved or backend!r} in canon.pricing"
+
+
+def generate_asset(
+    pack_dir: str | Path,
+    target: str,
+    *,
+    image_backend: str | None = None,
+    image_model: str | None = None,
+    image_edit_model: str | None = None,
+    image_edit_backend: str | None = None,
+    music_backend: str | None = None,
+    sfx_backend: str | None = None,
+    prompt_override: str | None = None,
+    actor: str = "user",
+    session: str | None = None,
+) -> dict[str, Any]:
+    """(Re)generate the assets of a non-platformer pack — ONE ``<kind>:<id>``
+    (``npc:1000`` / ``class:warrior`` / ``room:room_0`` / ``portrait:player``
+    / ``music:combat`` / ``sfx:door_open``) or ``--target missing``: every
+    asset whose file is absent from disk. ``missing`` only ever writes into
+    an empty slot — a target ``generation_stats.failures`` still lists whose
+    file has since appeared is not regenerated; its stale record is dropped
+    from the list instead. The same signature as the platformer's
+    ``ops.generate_asset``, so ``_pack_ops`` routes ``canon asset generate``
+    here for a dungeon pack unchanged.
+
+    A single-target reroll overwrites a file that exists, so its prior bytes
+    are snapshotted into the object store first (``provenance.snapshot_file``
+    — the platformer's reroll does the same) and the op's journal event
+    carries ``before_hash`` / ``after_hash``: every write is a version.
+
+    How it repairs without re-spending: the pack's asset PLAN is rebuilt from
+    disk by the template's planner (``canon.adapters.ASSET_PLANNERS``),
+    filtered to what is missing, and run through the pipeline's own
+    ``AssetPhase.run_jobs`` — the executor that retries a retryable failure,
+    counts every call and records every final failure. What lands is written
+    back through ``backfill_portraits`` (rows + manifest, one journal event
+    per file under *actor*), the manifest's audio index is refreshed, and
+    ``generation_stats.json`` is updated in place: counters accumulate, the
+    ``failures`` list drops what now exists and gains what still does not.
+    The op itself journals one costed event on *target*. A family without a
+    backend flag is skipped and reported, never guessed.
+
+    ``prompt_override`` applies to a single-target reroll only (a repair of
+    many assets has no one prompt to replace); ``image_model`` is set on an
+    image backend that exposes ``model``. The edit-backend knobs are accepted
+    for signature parity and unused — nothing here is img2img.
+    """
+    import random
+
+    from canon.adapters import ASSET_BACKEND_BUILDERS, ASSET_PLANNERS, grid_verb
+    from canon.bible.models import Bible
+    from canon.config import CanonConfig
+    from canon.packs import PACKS
+    from canon.packs.dungeon.portraits import backfill_portraits
+    from canon.pipeline.phases.asset import AssetPhase
+    from canon.pipeline.phases.manifest import ManifestPhase
+    from canon.pipeline.runner import PipelineContext
+    from canon.pipeline.stats import GenerationStats
+    from canon.pipeline.steplog import StepLog
+
+    pack = Path(pack_dir)
+    resolved = resolve_pack(pack)
+    planner = grid_verb(ASSET_PLANNERS, resolved.pack_type)
+    if planner is None:
+        raise ValueError(
+            f"asset generate has no planner for a {resolved.pack_type!r} pack — "
+            "its own asset verbs serve it"
+        )
+    builder = grid_verb(ASSET_BACKEND_BUILDERS, resolved.pack_type)
+
+    # 1. The plan, filtered to the target.
+    jobs = planner(pack, resolved.spec, fallback=PACKS.get(resolved.pack_type))
+    stats_rel = _asset_stats_path(pack)
+    existing_stats = read_json(pack / stats_rel)
+    if not isinstance(existing_stats, dict):
+        existing_stats = {}
+    if target == MISSING_TARGET:
+        selected = [j for j in jobs if not (pack / j.rel).is_file()]
+    else:
+        selected = [j for j in jobs if j.target == target]
+        if not selected:
+            known = sorted({j.target.split(":", 1)[0] for j in jobs})
+            raise FileNotFoundError(
+                f"asset target {target!r} not found in {pack} — "
+                f"targets are <kind>:<id> for {', '.join(known)}, or {MISSING_TARGET!r}"
+            )
+        if prompt_override:
+            for job in selected:
+                job.prompt = prompt_override
+
+    # 2. Backends — only the families the caller wired.
+    names = {"image": image_backend or "", "music": music_backend or "", "sfx": sfx_backend or ""}
+    if builder is None:  # pragma: no cover — every planner entry has a builder
+        raise ValueError(f"asset generate has no backend builder for {resolved.pack_type!r}")
+    try:
+        image, music, sfx = builder(names["image"], names["music"], names["sfx"])
+    except SystemExit as e:  # the runner's own refusal wording, as a ValueError
+        raise ValueError(str(e)) from None
+    if image is not None and image_model and hasattr(image, "model"):
+        image.model = image_model
+    backends = {"image": image, "music": music, "sfx": sfx}
+    families = {j.family for j in selected}
+    skipped: dict[str, str] = {}
+    for family in sorted(families):
+        if backends.get(family) is None:
+            count = sum(1 for j in selected if j.family == family)
+            skipped[family] = (
+                f"no {_BACKEND_FLAGS[family]} given — its {count} asset(s) were left as they are"
+            )
+    runnable = [j for j in selected if backends.get(j.family) is not None]
+    if selected and not runnable:
+        wanted = ", ".join(_BACKEND_FLAGS[f] for f in sorted(families))
+        raise ValueError(f"{target!r} needs a backend for {sorted(families)}: pass {wanted}")
+
+    # 3. Run them through the pipeline's executor, on a context of this pack.
+    manifest = read_json(pack / "manifest.json")
+    seed = str((manifest or {}).get("seed") if isinstance(manifest, dict) else "") or "repair"
+    stats = GenerationStats(
+        image_backend=names["image"], music_backend=names["music"], sfx_backend=names["sfx"],
+    )
+    ctx = PipelineContext(
+        bible=Bible.empty(seed=seed),
+        config=CanonConfig(seed=seed, output_dir=pack),
+        rng=random.Random(seed),
+        stats=stats,
+        adapter=pack_adapter(pack),
+        steplog=StepLog(pack),
+    )
+    for family, backend in backends.items():
+        if backend is not None:
+            setattr(ctx, f"{family}_backend", backend)
+    phase = AssetPhase(
+        skip_image=image is None, skip_music=music is None, skip_sfx=sfx is None,
+    )
+    # A file about to be overwritten is versioned first (rule: nothing is
+    # lost without a snapshot). Under ``missing`` every slot is empty by
+    # construction, so this only ever fires for a single-target reroll.
+    before_hashes = {
+        j.target: h for j in runnable if (h := provenance.snapshot_file(pack, pack / j.rel))
+    }
+    new_failures = phase.run_jobs(ctx, runnable) if runnable else []
+    failed_targets = {f["target"] for f in new_failures}
+    # Landed means the EXECUTOR landed it: a reroll whose backend failed
+    # leaves the old file in place, and that file is not a success.
+    landed = [
+        j for j in runnable if j.target not in failed_targets and (pack / j.rel).is_file()
+    ]
+    after_hashes = {
+        j.target: h for j in landed if (h := provenance.snapshot_file(pack, pack / j.rel))
+    }
+
+    # 4. Write back what landed — rows + manifest portraits (journaled per
+    # file under the actor), then the manifest's audio index.
+    changed_files: list[str] = []
+    if any(j.family == "image" for j in landed):
+        repaired = backfill_portraits(pack, actor=actor, session=session)
+        changed_files.extend(repaired.get("files") or [])
+    if any(j.family in ("music", "sfx") for j in landed):
+        changed_files.extend(_refresh_audio_index(pack, ManifestPhase(), actor=actor, session=session))
+
+    # 5. generation_stats.json: counters accumulate; the failure list is
+    # what is STILL missing — repaired targets drop out, new failures land.
+    merged = dict(existing_stats)
+    for field_name in (
+        "image_attempts", "image_successes", "music_attempted", "music_succeeded",
+        "sfx_attempted", "sfx_succeeded",
+    ):
+        merged[field_name] = int(merged.get(field_name) or 0) + int(getattr(stats, field_name, 0))
+    merged["images_attempted"] = merged["image_attempts"]
+    merged["images_succeeded"] = merged["image_successes"]
+    for cost_field in ("image_cost_usd", "audio_cost_usd"):
+        merged[cost_field] = round(
+            float(merged.get(cost_field) or 0.0) + float(getattr(stats, cost_field, 0.0)), 6
+        )
+    merged["total_cost_usd"] = round(
+        float(merged.get("llm_cost_usd") or 0.0) + float(merged.get("vlm_cost_usd") or 0.0)
+        + merged["image_cost_usd"] + merged["audio_cost_usd"], 6,
+    )
+    landed_targets = {j.target for j in landed}
+    on_disk = {j.target for j in jobs if (pack / j.rel).is_file()}
+    kept = [
+        f for f in (existing_stats.get("failures") or [])
+        if isinstance(f, dict) and f.get("target") not in landed_targets
+        and f.get("target") not in failed_targets
+        # A listed target whose file is on disk was repaired some other way
+        # (a reroll, user art); the record is stale and drops out.
+        and f.get("target") not in on_disk
+    ]
+    merged["failures"] = kept + list(new_failures)
+    if selected:
+        commit_document(
+            pack, artifact_id="generation_stats", rel_path=stats_rel, data=merged,
+            actor=actor, session=session, op="edit", source="repair",
+            detail={"kind": "asset_generate", "target": target},
+        )
+        changed_files.append(stats_rel)
+
+    # 6. One costed journal event for the op itself.
+    image_usd = float(stats.image_cost_usd)
+    audio_usd = float(stats.audio_cost_usd)
+    used = [b for b in backends.values() if b is not None]
+    accuracy = provenance.combine_accuracy(*[provenance.backend_accuracy(b) for b in used])
+    ran_families = sorted({j.family for j in runnable})
+    gen_kind = (
+        "image" if ran_families == ["image"]
+        else "audio" if ran_families and "image" not in ran_families
+        else "asset"
+    )
+    primary_family = "image" if "image" in ran_families else (ran_families[0] if ran_families else "image")
+    primary_backend = names.get(primary_family) or None
+    cost_block = {
+        "usd": round(image_usd + audio_usd, 6), "llm_usd": 0.0,
+        "image_usd": round(image_usd, 6), "audio_usd": round(audio_usd, 6),
+        "input_tokens": 0, "output_tokens": 0, "calls": 0, "backend": "",
+    }
+    gen = provenance.gen_cost(
+        cost_block, accuracy=accuracy, backend=primary_backend,
+        model=str(getattr(backends.get(primary_family), "model", "") or "") or None,
+        component_accuracy={
+            f: provenance.backend_accuracy(b) for f, b in backends.items() if b is not None
+        },
+    )
+    cost_error = next(
+        (err for f in ran_families if (err := _asset_cost_error("music" if f == "music" else f, names[f]))),
+        None,
+    )
+    # The hashes are per file; the op event names one target, so they ride
+    # along only for a single-target reroll (one file in play). ``missing``
+    # fills empty slots: no before, and its per-file commits (rows,
+    # manifest) carry their own hashes.
+    only = runnable[0].target if target != MISSING_TARGET and len(runnable) == 1 else None
+    event = provenance.record(
+        pack, artifact_id=target,
+        op="regenerate" if before_hashes else "generate",
+        source="llm", actor=actor, session=session,
+        detail={
+            "kind": "asset_generate", "planned": len(selected), "landed": len(landed),
+            "failed": len(new_failures), "skipped": skipped,
+        },
+        before_hash=before_hashes.get(only) if only else None,
+        after_hash=after_hashes.get(only) if only else None,
+        gen=gen, gen_kind=gen_kind, accuracy=accuracy, cost_error=cost_error,
+    )
+    warnings = [f"{f['target']}: {f['message']} — {f['hint']}" for f in new_failures]
+    warnings.extend(f"{family}: {reason}" for family, reason in skipped.items())
+    return {
+        "target": target,
+        "generated": bool(landed),
+        "planned": [j.target for j in selected],
+        "landed": [j.target for j in landed],
+        "failures": list(new_failures),
+        "skipped": skipped,
+        "gen": gen,
+        "journal_ref": event.get("ts") if event.get("costCents") is not None else None,
+        "cost": {
+            **cost_block,
+            "image_usd": round(image_usd, 6), "audio_usd": round(audio_usd, 6),
+        },
+        "warnings": warnings,
+        "changed": bool(landed),
+        "changed_artifacts": [j.target for j in landed],
+        "files": sorted(set(changed_files)),
+    }
+
+
+def _refresh_audio_index(pack: Path, manifest_phase: Any, *, actor: str, session: str | None) -> list[str]:
+    """Re-scan ``music/`` and ``sfx/`` into ``manifest.json``'s ``music`` /
+    ``sfx`` maps the way ``ManifestPhase`` builds them, committed under the
+    actor when anything changed. Returns the files written."""
+    rel = "manifest.json"
+    manifest = read_json(pack / rel)
+    if not isinstance(manifest, dict):
+        return []
+    music = manifest_phase._scan_audio_dir(pack, "music")
+    sfx = manifest_phase._scan_audio_dir(pack, "sfx")
+    if manifest.get("music") == music and manifest.get("sfx") == sfx:
+        return []
+    manifest["music"], manifest["sfx"] = music, sfx
+    commit_document(
+        pack, artifact_id="manifest", rel_path=rel, data=manifest, actor=actor,
+        session=session, op="edit", source="repair",
+        detail={"kind": "asset_generate", "recorded": {"music": len(music), "sfx": len(sfx)}},
+    )
+    return [rel]

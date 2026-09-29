@@ -35,10 +35,11 @@
   "default_task": {"input_tokens": 900, "output_tokens": 400},
   "worst_retries": 3,
   "assets": {
-    "_note": "counts-per-unit knobs mirroring canon.pipeline.phases.asset.AssetPhase (portraits per entity stub / class / room environment; the fixed music + SFX catalogs; one env track + one env ambience per unique environment — environments cycle through compose._ENVIRONMENTS) and the dialogue phase (4 tree variants per quest giver; parse_quest makes a room's first NPC the giver of every quest).",
+    "_note": "counts-per-unit knobs mirroring canon.pipeline.phases.asset.AssetPhase (portraits per entity stub / class / room environment, plus AssetPhase.FIXED_PORTRAITS — the player/start/game-over/victory art the manifest indexes by name; the fixed music + SFX catalogs; one env track + one env ambience per unique environment — environments cycle through compose._ENVIRONMENTS) and the dialogue phase (4 tree variants per quest giver; parse_quest makes a room's first NPC the giver of every quest).",
     "portraits_per_entity": 1,
     "portraits_per_class": 1,
     "portraits_per_room": 1,
+    "portraits_fixed": 4,
     "music_fixed_tracks": 5,
     "music_per_environment": 1,
     "sfx_fixed_effects": 12,

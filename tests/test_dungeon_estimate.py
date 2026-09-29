@@ -95,7 +95,9 @@ class TestCountFunction:
             "dialogue": 15,  # per room: the giver's 4 variants + 1 for the other NPC
             "narrative": 6,  # synopsis + 3 intros + victory + defeat
         }
-        assert c["images"] == 3 * 13 + 4 + 3 == 46
+        # stubs + classes + one per room environment + the fixed catalog
+        # (player / start / game over / victory)
+        assert c["images"] == 3 * 13 + 4 + 3 + 4 == 50
         assert c["music"] == 5 + 3 and c["sfx"] == 12 + 3
         assert sum(c["llm"].values()) == 74
 
@@ -106,7 +108,7 @@ class TestCountFunction:
         assert "db:quest" not in big["llm"]
         none = _counts(rooms=2, npc=0, monster=0, item=0, event=0, quest=0)
         assert "dialogue" not in none["llm"] and "db:npc" not in none["llm"]
-        assert none["images"] == 4 + 2  # classes + environments only
+        assert none["images"] == 4 + 2 + 4  # classes + environments + the fixed catalog
         assert _counts(**{"class": 0})["llm"].get("classes") is None
         assert _counts(**{"class": 99})["llm"]["classes"] == 4  # compose slices the loadout list
 
@@ -114,15 +116,18 @@ class TestCountFunction:
 class TestAnchor:
     def test_three_map_full_api_estimate(self) -> None:
         """The 3-map full-API forecast (anthropic DEFAULT_MODEL, fal, Lyria,
-        ElevenLabs) — printed and recorded. Recorded 2026-09-01: best $3.84 /
-        worst $6.25 (74 LLM calls $0.81 best, 46 portraits $1.79, 8 tracks
-        $0.64, 15 SFX $0.60).
+        ElevenLabs) — printed and recorded. Recorded 2026-09-06: best $4.00 /
+        worst $6.41 (74 LLM calls $0.81 best, 50 portraits $1.95, 8 tracks
+        $0.64, 15 SFX $0.60). 50, not the 46 recorded 2026-09-01: AssetPhase
+        also produces the four fixed portraits the manifest indexes by name
+        (player / start / game over / victory), which it previously left
+        unwritten while the manifest still advertised the fields.
 
         The $30/3-map anchor (examples/run_mazeworld_full.py; master §5 open
         item) is MazeWorld's ORIGINAL pipeline's measured run
         (MazeWorld/data/generation_stats.json: $33.76 = 688 images $27.38 +
         211 LLM calls $4.49 + 38 audio units $1.88). Canon's dungeon composes
-        46 portraits for 3 maps, not 688, so its honest forecast is an order
+        50 portraits for 3 maps, not 688, so its honest forecast is an order
         of magnitude under the anchor; the per-UNIT rates are what the
         anchor checks (``test_unit_rates_reproduce_the_anchor``). The band
         here is the plausible one for THIS pipeline — the spec's $10 floor
@@ -136,7 +141,7 @@ class TestAnchor:
               f"sfx {est['assets']['sfx']['count']} ${est['assets']['sfx']['usd']})")
         assert 1.0 <= best <= 90.0, best
         assert best < worst <= 90.0
-        assert est["assets"]["images"]["count"] == 46
+        assert est["assets"]["images"]["count"] == 50
         assert est["llm"]["calls"] == 74
         assert est["warnings"] == []
 
@@ -157,7 +162,7 @@ class TestAnchor:
     def test_model_override_and_backend_mask(self) -> None:
         fake = estimate_cradle("world", backends={"llm": "fake", "image": "fake", "music": "none", "sfx": "none"})
         assert fake["total_usd"] == {"best": 0.0, "worst": 0.0}
-        assert fake["assets"]["images"]["count"] == 46  # counts survive the mask
+        assert fake["assets"]["images"]["count"] == 50  # counts survive the mask
         sonnet5 = estimate_cradle("world", backends=FULL_API, model="claude-sonnet-5")
         default = estimate_cradle("world", backends=FULL_API)
         assert sonnet5["llm"]["usd"]["best"] < default["llm"]["usd"]["best"]
@@ -202,7 +207,7 @@ class TestWorldEstimateVerb:
         assert set(strip_additive(dung)) == {"scope", "backends", "llm", "assets", "total_usd", "warnings"}
         assert dung["scope"] == "world" and dung["backends"]["llm"] == "anthropic"
         assert dung["low"] == dung["total_usd"]["best"] and dung["high"] == dung["total_usd"]["worst"]
-        assert dung["backend"] == "anthropic" and dung["unitCount"] == 74 + 46 + 8 + 15
+        assert dung["backend"] == "anthropic" and dung["unitCount"] == 74 + 50 + 8 + 15
 
     def test_dungeon_count_flags_and_defaults(self) -> None:
         default = _cli("world", "estimate", "--template", "dungeon", "--llm-backend", "anthropic")["estimate"]
@@ -215,7 +220,7 @@ class TestWorldEstimateVerb:
         assert bigger["llm"]["by_task"]["db:npc"]["calls"] == 15
         assert bigger["llm"]["by_task"]["db:item"]["calls"] == 10
         assert bigger["llm"]["by_task"]["classes"]["calls"] == 2
-        assert bigger["assets"]["images"]["count"] == 5 * 8 + 2 + 5
+        assert bigger["assets"]["images"]["count"] == 5 * 8 + 2 + 5 + 4
         assert bigger["assets"]["images"]["usd"] == 0.0  # image backend defaults to fake
         modelled = _cli(
             "world", "estimate", "--template", "dungeon", "--llm-backend", "anthropic",
@@ -225,12 +230,16 @@ class TestWorldEstimateVerb:
         assert modelled["total_usd"]["best"] < default["total_usd"]["best"]
 
     def test_platformer_default_is_unchanged_and_model_flag_is_noted(self) -> None:
+        from canon.cli.main import _estimate_default_counts
+        from canon.packs import PACKS
         from canon.packs.platformer.estimate import estimate_cradle as plat_estimate
 
         via_cli = _cli("world", "estimate", "--llm-backend", "anthropic", "--image-backend", "fal")["estimate"]
+        # The verb's unset counts are the template's wizard defaults (the
+        # world `world new` builds), not the cost model's `fresh_plan`.
         direct = plat_estimate(
-            "world", counts={}, backends={"llm": "anthropic", "image": "fal", "music": "none",
-                                          "sfx": "none", "vlm": "none"},
+            "world", counts=_estimate_default_counts(PACKS["platformer"], "platformer"),
+            backends={"llm": "anthropic", "image": "fal", "music": "none", "sfx": "none", "vlm": "none"},
         )
         assert via_cli == direct
         noted = _cli("world", "estimate", "--llm-backend", "anthropic", "--model", "claude-opus-5")["estimate"]

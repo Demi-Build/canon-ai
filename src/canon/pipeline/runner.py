@@ -10,7 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from canon.adapters import JsonOutputAdapter, OutputAdapter
 from canon.persistence import IDAllocator
-from canon.pipeline.stats import GenerationStats
+from canon.pipeline.stats import GenerationStats, run_timer
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,19 @@ def run_pipeline(
     every phase for crash-safety.
 
     Returns the Bible instance attached to *ctx*.
+
+    The run is bracketed by the shared run clock (``run_timer``): ``ctx.stats``
+    carries the elapsed from ``run_start`` to ``run_end`` on every exit.
     """
+    with run_timer(getattr(ctx, "stats", None)):
+        return _run_pipeline(phases, ctx, persist_after_each)
+
+
+def _run_pipeline(
+    phases: list[Phase],
+    ctx: PipelineContext,
+    persist_after_each: str | Path | None,
+) -> Any:
     steplog = getattr(ctx, "steplog", None)
     if steplog is not None:
         steplog.emit(

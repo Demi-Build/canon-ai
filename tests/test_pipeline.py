@@ -336,3 +336,114 @@ class TestGenerationStats:
         assert stats.image_cost_usd == 0.0
         assert stats.audio_cost_usd == 0.0
         assert stats.generation_time_seconds == 0.0
+
+
+# --- The vlm lane + the run clock ---
+
+
+class TestGenerationStatsLanes:
+    """``record_call(lane=...)``: a vision call is metered by the same call
+    as a text call — same token totals, same per-label ``by_phase`` entry —
+    and rolls up into its own ``vlm_*`` bucket beside llm/image/audio."""
+
+    def test_vlm_lane_fills_its_own_bucket_and_the_shared_totals(self):
+        stats = GenerationStats()
+        stats.record_call("plat:layout:l1", input_tokens=100, output_tokens=50, cost=0.01)
+        stats.record_call(
+            "plat:vlm_qa:l1", input_tokens=2500, output_tokens=400, cost=0.013, lane="vlm"
+        )
+        assert stats.llm_calls == 1 and stats.vlm_calls == 1
+        assert stats.llm_cost_usd == pytest.approx(0.01)
+        assert stats.vlm_cost_usd == pytest.approx(0.013)
+        assert stats.total_input_tokens == 2600 and stats.total_output_tokens == 450
+        assert stats.total_cost == pytest.approx(0.023)
+        assert stats.total_cost_usd == pytest.approx(0.023)
+        assert stats.by_phase["plat:vlm_qa:l1"] == {
+            "calls": 1, "input_tokens": 2500, "output_tokens": 400, "cost": 0.013,
+        }
+        d = stats.to_dict()
+        assert d["vlm_calls"] == 1 and d["vlm_cost_usd"] == pytest.approx(0.013)
+        assert d["total_cost_usd"] == pytest.approx(0.023)
+        assert d["vlm_backend"] == ""
+
+    def test_total_cost_usd_sums_every_lane(self):
+        stats = GenerationStats(
+            llm_cost_usd=1.0, vlm_cost_usd=0.5, image_cost_usd=2.0, audio_cost_usd=0.25
+        )
+        assert stats.total_cost_usd == pytest.approx(3.75)
+
+    def test_default_lane_is_the_llm_one(self):
+        stats = GenerationStats()
+        stats.record_call("story", input_tokens=1, output_tokens=2, cost=0.5)
+        assert stats.llm_calls == 1 and stats.llm_cost_usd == pytest.approx(0.5)
+        assert stats.vlm_calls == 0 and stats.vlm_cost_usd == 0.0
+
+    def test_unknown_lane_is_loud(self):
+        with pytest.raises(ValueError, match="lane"):
+            GenerationStats().record_call("x", lane="mesh")
+
+
+class TestRunClock:
+    """One monotonic clock, started at run_start and folded into
+    ``generation_time_seconds`` at run_end — the field used to be a
+    write-only placeholder that serialized 0.0 forever."""
+
+    def test_start_stop_accumulates_the_elapsed(self):
+        import time
+
+        stats = GenerationStats()
+        stats.start_timer()
+        time.sleep(0.01)
+        first = stats.stop_timer()
+        assert first > 0 and stats.generation_time_seconds == first
+        stats.start_timer()
+        time.sleep(0.01)
+        stats.stop_timer()
+        assert stats.generation_time_seconds > first
+
+    def test_a_snapshot_mid_run_reads_the_elapsed_so_far(self):
+        import time
+
+        stats = GenerationStats()
+        stats.start_timer()
+        time.sleep(0.01)
+        snapshot = stats.to_dict()
+        assert snapshot["generation_time_seconds"] > 0
+        assert stats.elapsed_seconds() >= snapshot["generation_time_seconds"]
+        # The field itself is assigned at stop — a running clock only reads.
+        assert stats.generation_time_seconds == 0.0
+        stats.stop_timer()
+        assert stats.generation_time_seconds >= snapshot["generation_time_seconds"]
+
+    def test_stop_without_start_is_a_no_op(self):
+        stats = GenerationStats()
+        assert stats.stop_timer() == 0.0
+        assert stats.to_dict()["generation_time_human"] == "0m 00s"
+
+    def test_run_timer_tolerates_a_context_without_stats(self):
+        from canon.pipeline.stats import run_timer
+
+        with run_timer(None):
+            pass
+
+    def test_run_pipeline_assigns_the_elapsed_at_run_end(self):
+        import time
+
+        ctx = PipelineContext(bible=FakeBible(), config=FakeConfig(), rng=random.Random(0))
+        run_pipeline([CounterPhase()], ctx)
+        elapsed = ctx.stats.generation_time_seconds
+        assert elapsed > 0
+        time.sleep(0.005)
+        # Stopped: the clock no longer advances after run_end.
+        assert ctx.stats.elapsed_seconds() == elapsed
+
+    def test_a_failed_run_still_stops_the_clock(self):
+        import time
+
+        ctx = PipelineContext(bible=FakeBible(), config=FakeConfig(), rng=random.Random(0))
+        with pytest.raises(RuntimeError):
+            run_pipeline([FailingPhase()], ctx)
+        elapsed = ctx.stats.generation_time_seconds
+        assert elapsed > 0
+        time.sleep(0.005)
+        assert ctx.stats.elapsed_seconds() == elapsed

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from canon.backends.failures import AssetError, cancel_hook, retry_call
 from canon.bible.artifacts import make_artifact_id
 from canon.bible.platformer import StageAudio
 from canon.packs.platformer.phases import (
@@ -29,6 +30,7 @@ from canon.packs.platformer.phases import (
     warn,
 )
 from canon.pipeline.orchestrator import pinned_ids
+from canon.pipeline.phases.asset import provider_id, record_asset_failure
 
 logger = logging.getLogger(__name__)
 
@@ -54,17 +56,25 @@ SFX_MAX_SECONDS = 30.0
 MUSIC_SECONDS = 30
 
 
-def _add_audio_cost(ctx: Any, producer: Any) -> None:
+def _add_audio_cost(ctx: Any, producer: Any, lane: str) -> None:
     """Accumulate a producer's most-recent per-call cost into
-    ``ctx.stats.audio_cost_usd``. The producers are SYNCHRONOUS (no gather),
+    ``ctx.stats.audio_cost_usd``, and count the clip it bought under ``lane``
+    (``"music"`` / ``"sfx"``). The producers are SYNCHRONOUS (no gather),
     so ``last_cost`` is unambiguously this call's — read it right after
     ``generate``. Music/SFX are flat-billed (Lyria/ElevenLabs per-call
-    prices), so this IS the actual audio spend. No-op without stats."""
+    prices), so this IS the actual audio spend. No-op without stats.
+
+    The counts are the denominator the forecast's per-unit calibration divides
+    that shared ``audio_cost_usd`` by (``canon.estimator.actuals_by_unit``,
+    which refuses a run that made BOTH rather than inventing a split). Called
+    only after ``write_binary`` returned, so it counts clips that exist."""
     stats = getattr(ctx, "stats", None)
     if stats is None:
         return
     cost = float(getattr(producer, "last_cost", 0.0) or 0.0)
     stats.audio_cost_usd = float(getattr(stats, "audio_cost_usd", 0.0)) + cost
+    for field in (f"{lane}_succeeded", f"{lane}_attempted"):
+        setattr(stats, field, int(getattr(stats, field, 0)) + 1)
 
 
 def _audio_ext(data: bytes) -> str:
@@ -181,51 +191,70 @@ class AudioPhase:
             )
             if self.music is not None:
                 step(ctx, self.name, f"{stage_id} · music")
+                music_prompt = (self.music_prompt_override or "").strip() or (
+                    f"Looping instrumental level theme for a retro "
+                    f"platformer stage: {stage.theme}. World: "
+                    f"{world_title}. Melodic, atmospheric, seamless "
+                    f"loop, no vocals."
+                )
                 try:
-                    data = self.music.generate(
-                        (self.music_prompt_override or "").strip()
-                        or (
-                            f"Looping instrumental level theme for a retro "
-                            f"platformer stage: {stage.theme}. World: "
-                            f"{world_title}. Melodic, atmospheric, seamless "
-                            f"loop, no vocals."
-                        ),
-                        self.music_seconds,
+                    # Retried on a RETRYABLE failure; a permanent one (a
+                    # 403 at the billing gate) is called once and listed.
+                    data = retry_call(
+                        lambda: self.music.generate(music_prompt, self.music_seconds),
+                        provider=provider_id(self.music),
+                        label=f"audio:{stage_id} · music",
+                        should_stop=cancel_hook(ctx),
                     )
                     rel = f"music/{stage_id}/theme{_audio_ext(data)}"
                     audio.music_path = rel
                     audio.music_hash = ctx.adapter.write_binary(rel, data)
-                    _add_audio_cost(ctx, self.music)
-                except Exception as e:  # noqa: BLE001
+                    _add_audio_cost(ctx, self.music, "music")
+                except AssetError as e:
                     warn(
                         ctx,
                         f"music: theme generation failed for stage "
-                        f"{stage_id!r} ({type(e).__name__}: {e}); the game "
+                        f"{stage_id!r} ({e.kind}: {e}); the game "
                         "stays silent.",
+                    )
+                    record_asset_failure(
+                        ctx, family="music", target=f"audio:{stage_id}",
+                        rel=f"music/{stage_id}/theme", error=e,
+                        node=f"phase:{self.name}",
+                        repair=f"regenerate it with `asset generate --target audio:{stage_id}`",
                     )
             if self.sfx is not None:
                 for event, prompt, seconds, loop in SFX_EVENTS:
                     step(ctx, self.name, f"{stage_id} · sfx {event}")
                     clamped = min(SFX_MAX_SECONDS, max(SFX_MIN_SECONDS, seconds))
+                    sfx_prompt = (
+                        f"{prompt} — retro platformer sound effect, {stage.theme}"
+                    )
                     try:
-                        data = self.sfx.generate(
-                            f"{prompt} — retro platformer sound effect, "
-                            f"{stage.theme}",
-                            clamped,
-                            loop,
+                        data = retry_call(
+                            lambda: self.sfx.generate(sfx_prompt, clamped, loop),
+                            provider=provider_id(self.sfx),
+                            label=f"audio:{stage_id} · sfx {event}",
+                            should_stop=cancel_hook(ctx),
                         )
-                    except Exception as e:  # noqa: BLE001
+                    except AssetError as e:
                         warn(
                             ctx,
                             f"sfx: {event!r} generation failed for stage "
-                            f"{stage_id!r} ({type(e).__name__}: {e}); that "
+                            f"{stage_id!r} ({e.kind}: {e}); that "
                             "event stays silent.",
+                        )
+                        record_asset_failure(
+                            ctx, family="sfx", target=f"audio:{stage_id}",
+                            rel=f"sfx/{stage_id}/{event}", error=e,
+                            node=f"phase:{self.name}",
+                            repair=f"regenerate it with `asset generate --target audio:{stage_id}`",
                         )
                         continue
                     rel = f"sfx/{stage_id}/{event}{_audio_ext(data)}"
                     audio.sfx_paths[event] = rel
                     audio.sfx_hashes[rel] = ctx.adapter.write_binary(rel, data)
-                    _add_audio_cost(ctx, self.sfx)
+                    _add_audio_cost(ctx, self.sfx, "sfx")
 
             manifest_hash = ctx.adapter.write_json_singleton(
                 f"audio/{stage_id}/manifest.json",

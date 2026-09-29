@@ -1444,3 +1444,220 @@ class TestAnimationScaleCheck:
         rec = next(c for c in checks if c["check"] == "animation_scale")
         assert rec["passed"] is False
         assert "all 4 fill the cell" in rec["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Metering — every vision call lands in the shared GenerationStats, exactly
+# the way LLMClient records text calls (per-label by_phase, provider-reported
+# usage), on the vlm lane. Before this, ≥14 paid Claude vision calls per
+# platformer run reached no stats file, no ledger, no calibration.
+# ---------------------------------------------------------------------------
+
+
+def _vlm_per_call_usd() -> float:
+    """The judge's default paid model priced through ``canon.pricing`` at the
+    usage the metering fake reports (2500 in / 400 out) — no rate lives in
+    this test."""
+    from canon import pricing
+
+    model = pricing.default_model("vlm", "anthropic")
+    per = pricing.per_token(pricing.price_for("vlm", model, []))
+    return 2500 * per["input"] + 400 * per["output"]
+
+
+def _metering_fake(monkeypatch) -> None:
+    """Make every ``FakeVLMBackend`` report provider-style usage after each
+    call (class attributes — the same way tests force a paid figure onto the
+    fake image backend), so the whole chain is under test: backend ``last_*``
+    → the metered judge → ``ctx.stats`` → the stats file."""
+    monkeypatch.setattr(FakeVLMBackend, "last_input_tokens", 2500, raising=False)
+    monkeypatch.setattr(FakeVLMBackend, "last_output_tokens", 400, raising=False)
+    monkeypatch.setattr(FakeVLMBackend, "last_cost", _vlm_per_call_usd(), raising=False)
+
+
+def _run_metered_slice(output_dir: Path, stats, judge, image_producer=None) -> PipelineContext:
+    """The runner's wiring, test-shaped: ONE stats object shared by the LLM
+    client, the (metered) judge and the manifest snapshot."""
+    seed = "emberfall_001"
+    ctx = PipelineContext(
+        bible=Bible.empty(seed=seed),
+        config=CanonConfig(seed=seed, output_dir=output_dir),
+        rng=random.Random(seed),
+        stats=stats,
+        llm=LLMClient(FakeLLMBackend(make_fake_responder()), stats=stats),
+        prompts=PlatformerPrompts(),
+    )
+    run_pipeline(
+        compose_pipeline(vlm_judge=judge, image_producer=image_producer), ctx
+    )
+    return ctx
+
+
+def _sprite_producer(tmp_path: Path):
+    """A $0 image producer that writes real base sprites, so the animation
+    phase authors motion specs (the ``plat:animate`` vision calls) and the QA
+    phase reviews the sheets (``plat:animate_qa``)."""
+    from PIL import Image
+
+    from canon.backends.testing import FakeImageBackend
+    from canon.packs.platformer.tileset_art import DiffusionSheetProducer
+
+    path = tmp_path / "blob.png"
+    if not path.exists():
+        size = 64
+        img = Image.new("RGB", (size, size), (255, 255, 255))
+        for y in range(size // 4, 3 * size // 4):
+            for x in range(size // 4, 3 * size // 4):
+                img.putpixel((x, y), (180, 40, 40))
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        path.write_bytes(buffer.getvalue())
+    return DiffusionSheetProducer(FakeImageBackend(placeholder=path))
+
+
+class TestMeteredJudge:
+    def test_records_each_call_under_its_label_on_the_vlm_lane(self, monkeypatch) -> None:
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+        from canon.pipeline.stats import GenerationStats
+
+        _metering_fake(monkeypatch)
+        stats = GenerationStats()
+        judge = MeteredJudge(FakeVLMBackend(lambda p, i: "{}"), stats, phase="plat:vlm_qa")
+        judge.judge("p", [b"1"], phase="plat:vlm_qa:l1")
+        judge.judge("p", [b"1"])  # no label → the judge's default
+        assert stats.vlm_calls == 2 and stats.llm_calls == 0
+        assert stats.by_phase["plat:vlm_qa:l1"]["input_tokens"] == 2500
+        assert stats.by_phase["plat:vlm_qa:l1"]["output_tokens"] == 400
+        assert stats.by_phase["plat:vlm_qa"]["calls"] == 1
+        assert stats.vlm_cost_usd == pytest.approx(2 * _vlm_per_call_usd())
+        assert stats.total_cost_usd == pytest.approx(stats.vlm_cost_usd)
+        assert stats.total_input_tokens == 5000
+
+    def test_a_backend_without_usage_still_counts_the_call(self) -> None:
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+        from canon.pipeline.stats import GenerationStats
+
+        stats = GenerationStats()
+        judge = MeteredJudge(_fake_judge(), stats, phase="plat:vlm_qa")
+        judge.judge("### TASK: vlm_qa\n### LEVEL: l1", [b"x"])
+        assert stats.vlm_calls == 1
+        assert stats.by_phase["plat:vlm_qa"] == {
+            "calls": 1, "input_tokens": 0, "output_tokens": 0, "cost": 0.0,
+        }
+
+    def test_reads_like_the_bare_backend(self) -> None:
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+        from canon.pipeline.stats import GenerationStats
+
+        backend = _fake_judge()
+        judge = MeteredJudge(backend, GenerationStats(), phase="plat:vlm_qa")
+        assert judge.model == "fake-vlm"  # report provenance unchanged
+        judge.judge("### LEVEL: l1", [b"abc"])
+        assert judge.calls is backend.calls
+        assert judge.calls[-1]["image_sizes"] == [3]
+        with pytest.raises(AttributeError):
+            judge.no_such_attribute  # noqa: B018 — the reach-through is honest
+
+    def test_without_stats_it_records_nothing(self) -> None:
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+
+        backend = _fake_judge()
+        assert MeteredJudge(backend, None, phase="x").judge("### LEVEL: l1", [b"a"])
+        assert len(backend.calls) == 1
+
+    def test_build_vlm_judge_meters_only_when_given_stats(self) -> None:
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+        from canon.pipeline.stats import GenerationStats
+
+        stats = GenerationStats()
+        metered = build_vlm_judge("fake", stats=stats)
+        assert isinstance(metered, MeteredJudge)
+        assert isinstance(metered.backend, FakeVLMBackend)
+        assert metered.stats is stats and metered.model == "fake-vlm"
+        assert metered.phase == VlmQaPhase.name
+        # Bare without stats (the pre-existing contract), none stays none.
+        assert type(build_vlm_judge("fake")) is FakeVLMBackend
+        assert build_vlm_judge("none", stats=stats) is None
+
+    def test_cli_factory_meters_on_the_context_stats(self, monkeypatch, tmp_path: Path) -> None:
+        from canon.packs.platformer.dag import (
+            VlmQaDagPhase,
+            cli_ctx_factory,
+            cli_phases_factory,
+        )
+        from canon.packs.platformer.vlm_qa import MeteredJudge
+
+        monkeypatch.setenv("CANON_PLAT_VLM_BACKEND", "fake")
+        monkeypatch.setenv("CANON_PLAT_OUT", str(tmp_path))
+        ctx = cli_ctx_factory(Bible.empty(seed="x"))
+        assert ctx.stats.vlm_backend == "fake"
+        qa = next(p for p in cli_phases_factory(ctx) if isinstance(p, VlmQaDagPhase))
+        assert isinstance(qa._phase.judge, MeteredJudge)
+        assert qa._phase.judge.stats is ctx.stats
+
+
+class TestVisionCallsAreMetered:
+    def test_every_level_judgment_reaches_generation_stats(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from canon.pipeline.stats import GenerationStats
+
+        _metering_fake(monkeypatch)
+        stats = GenerationStats(llm_backend="fake", vlm_backend="fake")
+        judge = build_vlm_judge("fake", stats=stats)
+        ctx = _run_metered_slice(tmp_path / "run", stats, judge)
+
+        made = len(judge.calls)  # the backend's own ledger, reached through
+        assert made == len(ctx.bible.levels) > 0
+        assert stats.vlm_calls == made
+        labels = {k for k in stats.by_phase if k.startswith("plat:vlm_qa:")}
+        assert labels == {f"plat:vlm_qa:{lid}" for lid in ctx.bible.levels}
+        assert sum(stats.by_phase[k]["calls"] for k in labels) == made
+
+        per_call = _vlm_per_call_usd()
+        assert per_call > 0
+        assert stats.vlm_cost_usd == pytest.approx(made * per_call)
+        assert stats.total_input_tokens == made * 2500
+        assert stats.llm_cost_usd == 0.0  # the fake text backend reports no usage
+        assert stats.total_cost_usd == pytest.approx(
+            stats.llm_cost_usd + stats.vlm_cost_usd + stats.image_cost_usd + stats.audio_cost_usd
+        )
+        assert stats.total_cost_usd == pytest.approx(stats.vlm_cost_usd)
+
+        on_disk = json.loads((tmp_path / "run" / "generation_stats.json").read_text())
+        assert on_disk["vlm_calls"] == made
+        assert on_disk["vlm_backend"] == "fake"
+        assert on_disk["vlm_cost_usd"] == pytest.approx(stats.vlm_cost_usd)
+        assert on_disk["total_cost_usd"] == pytest.approx(stats.total_cost_usd)
+        assert on_disk["by_phase"]["plat:vlm_qa:l1"]["calls"] == 1
+
+    def test_motion_specs_and_sheet_verdicts_are_metered_too(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from canon.estimator import actuals_by_task
+        from canon.packs.platformer.vlm_qa import ANIMATE_LABEL, ANIMATE_QA_LABEL
+        from canon.pipeline.stats import GenerationStats
+
+        _metering_fake(monkeypatch)
+        stats = GenerationStats()
+        judge = build_vlm_judge("fake", stats=stats)
+        _run_metered_slice(tmp_path / "run", stats, judge, image_producer=_sprite_producer(tmp_path))
+
+        assert stats.vlm_calls == len(judge.calls)
+        authored = {k for k in stats.by_phase if k.startswith(f"{ANIMATE_LABEL}:")}
+        reviewed = {k for k in stats.by_phase if k.startswith(f"{ANIMATE_QA_LABEL}:")}
+        judged = {k for k in stats.by_phase if k.startswith("plat:vlm_qa:")}
+        assert authored and reviewed and judged
+        assert f"{ANIMATE_LABEL}:player" in authored
+        assert sum(stats.by_phase[k]["calls"] for k in authored | reviewed | judged) == stats.vlm_calls
+        assert stats.vlm_cost_usd == pytest.approx(stats.vlm_calls * _vlm_per_call_usd())
+
+        # The recorded labels are the calibration rows the estimator's
+        # families name (``task``) — measured per task, like the LLM tasks.
+        actual = actuals_by_task(tmp_path / "run")
+        assert {"plat:vlm_qa", ANIMATE_LABEL, ANIMATE_QA_LABEL} <= set(actual)
+        assert actual["plat:vlm_qa"] == {"input_tokens": 2500.0, "output_tokens": 400.0}
+
+    def test_a_bare_judge_records_nothing(self, tmp_path: Path) -> None:
+        ctx = _run_slice(tmp_path / "run", vlm_judge=_fake_judge())
+        assert ctx.stats.vlm_calls == 0 and ctx.stats.vlm_cost_usd == 0.0

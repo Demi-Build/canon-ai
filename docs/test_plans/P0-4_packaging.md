@@ -13,12 +13,21 @@ The pygame play harness moved too (`canon.packs.platformer.play`, shim at `examp
 cradle spawns it by module). Stayed in `examples/`: `lava_world/` (an acceptance fixture) and the
 MazeWorld run scripts.
 
+> **Hash re-baselined again 2026-09-06 — the sanctioned line-9 fix.** The expectation is now
+> `88ac41c9175c4ca9446ba3c7cc361f80d399b2fe`. It differs from `3a8c7886…` by **exactly one line**:
+> line 9's comment, which read `examples/platformer_pack/combat.py` — a path this row deleted — and
+> now reads `src/canon/packs/platformer/combat.py`, where that file actually lives. Comment only;
+> `diff` shows that one line and nothing else. The same engine-stamp consequence applies (see below):
+> packs created before this re-baseline report their engine copy drifted once, then clear.
+>
 > **Hash re-baselined 2026-09-05 — not a drift.** This plan originally expected
 > `cb35293b0a6f6864e08c9dc9bd1933b76894a402`, which is this file's content at commit `a380ec3`, the
 > last commit *before* the P0-4 move. The current `3a8c7886…` differs from it by **exactly one line**:
 > line 82's comment, which read `Mirrors examples/platformer_play.py's` and now reads
-> `Mirrors canon.packs.platformer.play's`. That path stopped existing when this row moved the play
-> harness into the wheel, so the old comment pointed at a deleted file. It was a recorded, deliberate
+> `Mirrors canon.packs.platformer.play's`. The old path still exists as the 549-byte shim this row
+> left behind (see the intro above), but `run_anim_preview` moved into the wheel with it — the
+> function now lives at `src/canon/packs/platformer/play.py:664` and appears nowhere in the shim, so
+> the old comment named a file that no longer held the function it cited. It was a deliberate
 > re-baseline, not a regression — `diff` against the pre-move content shows that one comment line and
 > nothing else, at identical line and byte counts. The byte-identity invariant held.
 >
@@ -29,10 +38,12 @@ MazeWorld run scripts.
 ## A. Integrity
 
 - [x] **A1 — The tree.** `git status --short` shows the `examples/{platformer_pack,mazeworld_pack,graphics_specs}` files as deletes and `src/canon/packs/` as untracked. `git add -A` will record them as renames (your call, I do not run git). Note the index still holds the other session's staged versions of `art_phases.py`, `ops.py`, `vlm_qa.py` at the OLD paths until you stage the move.
-- [x] **A2 — Nothing in src/ reaches outside the package:**
+- [x] **A2 — Nothing in src/ reaches outside the package.** Expect no output. (The `grep -v` skips *comment*
+      lines: `play.py:292` mentions `sys.path` only to say no fix-up is needed. The old exclusion on
+      `godot_template/` was dead code — it matched nothing before or after the rename — and is gone.)
 
 ```bash
-grep -rn "parents\[2\]\|sys\.path\|examples\." src/canon | grep -v "^src/canon/packs/platformer/godot_template" ; echo "expect no output above"
+grep -rn "parents\[2\]\|sys\.path\|examples\." src/canon | grep -v "^[^:]*:[0-9]*:#"
 ```
 
 - [x] **A3 — Ruff clean, packaging tests green:**
@@ -41,13 +52,13 @@ grep -rn "parents\[2\]\|sys\.path\|examples\." src/canon | grep -v "^src/canon/p
 uv run ruff check src/ examples/ tests/ && uv run python -m pytest tests/test_packaging.py -q -p no:cacheprovider
 ```
 
-- [x] **A4 — The Godot template is byte-identical** (the sed pass touched a comment in it and was reverted; engine stamps depend on this):
+- [x] **A4 — The Godot template matches its recorded baseline.** Two comment lines have been re-baselined, each on its own decision — this row's module rename (line 82) and the line-9 path fix (2026-09-06); see the notes above. There was no revert, and no revert was ever intended. Engine stamps depend on this hash:
 
 ```bash
 shasum src/canon/packs/platformer/godot_template/godot/main.gd
 ```
 
-      Expected `3a8c7886ace31616589c0cc633af13f5e2f115b6`.
+      Expected `88ac41c9175c4ca9446ba3c7cc361f80d399b2fe` (was `3a8c7886…` before 2026-09-06).
 
 
 

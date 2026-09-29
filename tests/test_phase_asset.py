@@ -34,7 +34,7 @@ from canon import (
     PipelineContext,
 )
 from canon.backends.testing import FakeImageBackend, FakeMusicBackend, FakeSFXBackend
-from canon.pipeline.phases.asset import AssetPhase
+from canon.pipeline.phases.asset import ASSET_CONCURRENCY, FIXED_PORTRAITS, AssetPhase
 from canon.pipeline.runner import Phase
 
 # ---------------------------------------------------------------------------
@@ -160,7 +160,11 @@ class TestAssetPhaseConstructor:
         assert AssetPhase().music_concurrency == 8
 
     def test_default_sfx_concurrency(self):
-        assert AssetPhase().sfx_concurrency == 10
+        """2, as DATA: the first paid run fired 10 ElevenLabs requests at
+        once on the lowest tier and lost ~5 within 160 ms. The number lives
+        in ``ASSET_CONCURRENCY``, never at the call site."""
+        assert AssetPhase().sfx_concurrency == 2
+        assert AssetPhase().sfx_concurrency == ASSET_CONCURRENCY["sfx"]
 
     def test_custom_image_concurrency(self):
         assert AssetPhase(image_concurrency=2).image_concurrency == 2
@@ -209,7 +213,10 @@ class TestImageOutputCharacters:
         AssetPhase(skip_music=True, skip_sfx=True).run(ctx)
 
         for char in ctx.bible.characters:
-            assert Path(char.portrait_path).exists()
+            # The stamp is PACK-RELATIVE (it lands in emitted content, which
+            # may not carry the absolute path of the generating machine).
+            assert not Path(char.portrait_path).is_absolute()
+            assert (tmp_path / char.portrait_path).exists()
 
     def test_character_portrait_uses_portrait_prompt(self, tmp_path):
         img = FakeImageBackend()
@@ -305,7 +312,8 @@ class TestImageOutputArchetypes:
         AssetPhase(skip_music=True, skip_sfx=True).run(ctx)
 
         for arch in ctx.bible.class_archetypes.values():
-            assert Path(arch.portrait_path).exists()
+            assert not Path(arch.portrait_path).is_absolute()
+            assert (tmp_path / arch.portrait_path).exists()
 
     def test_archetype_portrait_uses_portrait_prompt(self, tmp_path):
         img = FakeImageBackend()
@@ -521,8 +529,9 @@ class TestFakeImageBackendCallRecording:
         ctx = _make_ctx(tmp_path, num_characters=3, num_maps=0,
                         num_archetypes=0, image_backend=img)
         AssetPhase(skip_music=True, skip_sfx=True).run(ctx)
-        # 3 character portraits only
-        assert len(img.calls) == 3
+        # 3 character portraits + the fixed catalog (the manifest indexes
+        # those four by name, so the phase always produces them)
+        assert len(img.calls) == 3 + len(FIXED_PORTRAITS)
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +738,8 @@ class TestAllBackendsTogether:
         assert "assets" in ctx.bible.metadata.phases_run
 
     def test_image_calls_count_matches_expected(self, tmp_path):
-        """Total image calls = characters + entities + archetypes + maps."""
+        """Total image calls = characters + entities + archetypes + maps
+        + the fixed catalog."""
         img = FakeImageBackend()
         ctx = _make_ctx(
             tmp_path,
@@ -746,7 +756,10 @@ class TestAllBackendsTogether:
         num_archetypes = 2
         num_env_portraits = 2  # one per map
 
-        expected = num_chars + num_entities + num_archetypes + num_env_portraits
+        expected = (
+            num_chars + num_entities + num_archetypes + num_env_portraits
+            + len(FIXED_PORTRAITS)
+        )
         assert len(img.calls) == expected
 
 

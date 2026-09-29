@@ -1107,6 +1107,34 @@ def world_new(
         if not cancelled:
             _emit_error(f"world new: stamping the registry failed: {e}", pack_dir=str(output_dir))
         warnings.append(f"stopped before the registry could be stamped: {e}")
+    # What the run really cost, from the tree's own ``generation_stats.json``
+    # through the estimator's ONE reader (the same file its calibration goes
+    # through). Every template writes that file standalone at the pack root;
+    # only the dungeon also embeds a copy in its manifest — so this is the
+    # place a create's money is read, and every ledger downstream prefers this
+    # figure to a re-read of the tree. A run that never reached its manifest
+    # phase (stopped, or crashed) has no file: the key is OMITTED and a warning
+    # says so, because an unmeasured run must never record as a measured $0.
+    from canon.estimator import generation_stats
+
+    stats = generation_stats(output_dir)
+    measured = stats.get("total_cost_usd")
+    money: dict[str, Any] = {}
+    if isinstance(measured, (int, float)) and not isinstance(measured, bool):
+        money["actual_usd"] = float(measured)
+        # Every metered lane, so the split sums to ``actual_usd``: the VLM
+        # judge's calls land in their own bucket beside llm / image / audio.
+        money["actual_split_usd"] = {
+            "llm": float(stats.get("llm_cost_usd") or 0.0),
+            "vlm": float(stats.get("vlm_cost_usd") or 0.0),
+            "image": float(stats.get("image_cost_usd") or 0.0),
+            "audio": float(stats.get("audio_cost_usd") or 0.0),
+        }
+    else:
+        warnings.append(
+            f"no generation_stats.json under {output_dir}: the run's cost is unmeasured "
+            "(not $0), so no actual_usd is reported"
+        )
     result = {
         "pack_dir": str(output_dir),
         "template": template,
@@ -1116,6 +1144,7 @@ def world_new(
         "orchestrated": bool(spec.runner.get("orchestrate")) and orchestrate is not False,  # type: ignore[union-attr]
         "engines": [e.get("id") for e in registry.get("engines", [])],
         "registry": str(Path(output_dir) / ".canon" / "registry.json"),
+        **money,
     }
     if warnings:
         result["warnings"] = warnings
@@ -1183,7 +1212,8 @@ def world_map_edit(
 #: ``world estimate`` count flags → the count key each template's count
 #: function reads (row P0-7). A third template adds an entry — a data row,
 #: never a branch on the template id. Flags left unset fall to the
-#: template's ``cost_model.json`` ``fresh_plan`` (the P.4.4 wizard defaults).
+#: template's own wizard defaults (:func:`_estimate_default_counts`), never
+#: to a second literal set.
 _ESTIMATE_COUNT_FLAGS: dict[str, dict[str, str]] = {
     "platformer": {"stages": "num_stages", "levels": "num_levels", "enemies": "num_enemies", "items": "num_items"},
     "dungeon": {
@@ -1191,6 +1221,29 @@ _ESTIMATE_COUNT_FLAGS: dict[str, dict[str, str]] = {
         "events": "event", "quests": "quest", "classes": "class",
     },
 }
+
+
+def _estimate_default_counts(spec: Any, template: str) -> dict[str, int]:
+    """The counts ``world estimate`` prices when a flag is left unset — the
+    template's OWN wizard defaults, read from the same ``pack templates``
+    entry the create wizard renders and ``world new`` builds at, so the
+    terminal forecasts the world the create verb will actually make.
+
+    Mapped through the two tables that already exist for it: each estimate
+    flag names a wizard count key via :func:`_count_key` (the flag's
+    candidate the template's runner declares) and a count-function key via
+    ``_ESTIMATE_COUNT_FLAGS``. A count the template's defaults do not carry
+    is left to the cost model's ``fresh_plan`` (the count function's own
+    merge), so a template with a partial wizard block still prices."""
+    from canon.packs import template_meta
+
+    defaults = template_meta(spec).get("defaults") or {}
+    out: dict[str, int] = {}
+    for flag, count_key in _ESTIMATE_COUNT_FLAGS.get(template, {}).items():
+        wizard_key = _count_key(spec, flag)
+        if wizard_key in defaults:
+            out[count_key] = int(defaults[wizard_key])
+    return out
 
 
 @world_app.command("update")
@@ -1232,21 +1285,21 @@ def world_estimate(
         "platformer", "--template",
         help="Template to price: any registered pack id (platformer | dungeon).",
     ),
-    stages: int | None = typer.Option(None, "--stages", help="platformer: biome stages (default 3)."),
-    levels: int | None = typer.Option(None, "--levels", help="platformer: levels (default 9)."),
-    enemies: int | None = typer.Option(None, "--enemies", help="platformer: enemy roster (default 7)."),
+    stages: int | None = typer.Option(None, "--stages", help="platformer: biome stages."),
+    levels: int | None = typer.Option(None, "--levels", help="platformer: levels per stage."),
+    enemies: int | None = typer.Option(None, "--enemies", help="platformer: enemy roster."),
     items: int | None = typer.Option(
         None, "--items", "--item",
-        help="platformer: item pool (default 5) | dungeon: items per room (default 3).",
+        help="platformer: item pool | dungeon: items per room.",
     ),
-    rooms: int | None = typer.Option(None, "--rooms", help="dungeon: rooms (default 3)."),
-    npcs: int | None = typer.Option(None, "--npcs", "--npc", help="dungeon: NPCs per room (default 2)."),
+    rooms: int | None = typer.Option(None, "--rooms", help="dungeon: rooms."),
+    npcs: int | None = typer.Option(None, "--npcs", "--npc", help="dungeon: NPCs per room."),
     monsters: int | None = typer.Option(
-        None, "--monsters", "--monster", help="dungeon: monsters per room (default 2)."
+        None, "--monsters", "--monster", help="dungeon: monsters per room."
     ),
-    events: int | None = typer.Option(None, "--events", "--event", help="dungeon: events per room (default 4)."),
-    quests: int | None = typer.Option(None, "--quests", "--quest", help="dungeon: quests per room (default 2)."),
-    classes: int | None = typer.Option(None, "--classes", "--class", help="dungeon: player classes (default 4)."),
+    events: int | None = typer.Option(None, "--events", "--event", help="dungeon: events per room."),
+    quests: int | None = typer.Option(None, "--quests", "--quest", help="dungeon: quests per room."),
+    classes: int | None = typer.Option(None, "--classes", "--class", help="dungeon: player classes."),
     llm_backend: str = typer.Option("fake", "--llm-backend"),
     image_backend: str = typer.Option("fake", "--image-backend"),
     music_backend: str = typer.Option("none", "--music-backend"),
@@ -1261,6 +1314,9 @@ def world_estimate(
     """Forecast the cost of a NEW project (`world new`) at these counts +
     backends, WITHOUT running anything. fake/none categories price at $0 (the
     counts still show, so you can see what turning a backend on would cost).
+    A count flag left unset takes the template's own default — the same
+    number `canon pack templates` lists and `world new` builds at — so the
+    forecast is for the world the create verb will make.
     ``--template`` picks the pack (the estimate carries ``template``); every
     template answers the same JSON shape (cradle's CostEstimate + the §3.0-E
     ``low/high/backend/model/unitCount`` keys)."""
@@ -1283,7 +1339,12 @@ def world_estimate(
         "quests": quests, "classes": classes,
     }
     count_keys = _ESTIMATE_COUNT_FLAGS.get(template, {})
-    counts = {count_keys[flag]: value for flag, value in flags.items() if value is not None and flag in count_keys}
+    # The template's own defaults underneath, the flags the caller set on top
+    # — one set of numbers with the wizard and `world new`.
+    counts = {
+        **_estimate_default_counts(spec, template),
+        **{count_keys[flag]: value for flag, value in flags.items() if value is not None and flag in count_keys},
+    }
     # Doctrine 4 — a flag that belongs to another template is disabled WITH a
     # reason, never silently dropped (the same treatment `--model` gets below).
     foreign = [flag for flag, value in flags.items() if value is not None and flag not in count_keys]
@@ -2548,13 +2609,13 @@ def _load_env_file(path: Path | None) -> None:
 
 
 def _pack_ops(pack_dir: Path | None = None):
-    """The ops module a verb dispatches to — through ``resolve_pack`` (row
-    P0-6) when a pack is given: the platformer's wrapper module for a
-    platformer pack (it also carries the platformer-only verbs — tile
-    slots, level generation, assets), ``canon.db_ops`` — the core with the
-    pack's own registry — for every other pack type. Without a pack (the
-    level/asset verbs, platformer-only until their rows) the platformer
-    module. Imports are deferred so ``--help`` never pays for numpy/Pillow.
+    """The ops module a verb dispatches to — through ``resolve_pack`` when a
+    pack is given: the platformer's wrapper module for a platformer pack (it
+    also carries the platformer-only verbs — tile slots, level generation,
+    animation), ``canon.db_ops`` — the core with the pack's own registry —
+    for every other pack type. Without a pack (the verbs that are
+    platformer-only today) the platformer module. Imports are deferred so
+    ``--help`` never pays for numpy/Pillow.
     """
     if pack_dir is not None:
         from canon.packs import PackTypeError, resolve_pack
@@ -2634,7 +2695,7 @@ def prompt_show(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
-journal_app = typer.Typer(help="The provenance journal — the cost dashboard's ONE source (row P1-A6).")
+journal_app = typer.Typer(help="The provenance journal — the cost dashboard's ONE source.")
 app.add_typer(journal_app, name="journal")
 
 
@@ -2644,7 +2705,7 @@ def journal_list(
     identity: str | None = typer.Option(
         None, "--identity", help="user | agent:<conversation>/<specialist> (exact match)."
     ),
-    session: str | None = typer.Option(None, "--session", help="Conversation id (§3.0-D)."),
+    session: str | None = typer.Option(None, "--session", help="Conversation id."),
     gen_kind: str | None = typer.Option(
         None, "--gen-kind", help="image | animation | video | code | audio | text | tokens | … (open)."
     ),
@@ -2657,21 +2718,34 @@ def journal_list(
         False, "--summary", help="Also emit the by-kind / by-identity / by-conversation roll-up."
     ),
 ) -> None:
-    """Read the pack's journal with P.8.7's read-time defaults applied.
+    """Read the pack's journal, with each event's identity filled in.
 
-    Emits ``{"result": "journal_list", "events": [...]}``; ``--summary`` swaps
-    the event list for ``"summary"`` — the tiles, the you/agent split and the
-    three tables the cost dashboard renders, every figure a sum of the SAME
-    ``costCents`` field, so they reconcile by construction. That swap is the
-    point of the flag (BUILD 2: the roll-up computed server-side *instead of*
-    shipping every event to the client); pass ``--limit`` alongside it to get
-    both, with the summary computed over those same N events. Pure read: writes
-    nothing, ever.
+    Emits ``{"result": "journal_list", "journal": {...}, "events": [...]}``;
+    ``--summary`` swaps the event list for ``"summary"`` — the tiles, the
+    you/agent split and the three tables the cost dashboard renders, every
+    figure a sum of the SAME ``costCents`` field, so they reconcile by
+    construction. That swap is the point of the flag (the roll-up computed
+    here *instead of* shipping every event to the client); pass ``--limit``
+    alongside it to get both, with the summary computed over those same N
+    events.
+
+    ``journal.present`` says whether the journal FILE exists, at
+    ``journal.path``. A pack with no journal at all is not the same fact as a
+    pack whose journal records nothing costed: the first is an absence of
+    records (a wrong path, or a write that never landed), the second is a
+    genuine $0. Both succeed — a pack that has yet to be written to has no
+    journal by construction — but they never read alike, and the absent case
+    also carries a ``warnings`` line and marks the summary itself, since the
+    dashboard reads only the roll-up.
+
+    Pure read: writes nothing, ever.
     """
-    from canon.provenance import list_events, summarize_events
+    from canon.provenance import journal_path, list_events, summarize_events
 
     if not pack_dir.exists():
         _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    path = journal_path(pack_dir)
+    present = path.is_file()
     try:
         events = list_events(
             pack_dir, identity=identity, session=session, gen_kind=gen_kind,
@@ -2679,9 +2753,26 @@ def journal_list(
         )
     except Exception as e:
         _emit_error(f"journal list failed: {e}", traceback=traceback.format_exc())
-    out: dict = {"result": "journal_list"}
+    out: dict = {
+        "result": "journal_list",
+        # Always stated, both ways, so a client dispatches on a VALUE rather
+        # than on a missing key — an absent marker is exactly the failure this
+        # guards against.
+        "journal": {"present": present, "path": str(path)},
+    }
+    if not present:
+        out["warnings"] = [
+            f"No journal file at {path} — nothing has ever been recorded there "
+            f"(check the pack path). These figures are an ABSENCE of records, "
+            f"not a $0 spend."
+        ]
     if summary:
-        out["summary"] = summarize_events(events)  # type: ignore[possibly-unbound]
+        rollup = summarize_events(events)  # type: ignore[possibly-unbound]
+        # The dashboard renders the roll-up alone, so the fact travels INSIDE
+        # it too: an all-zero summary must never be mistaken for a free pack.
+        rollup["journalPresent"] = present
+        rollup["journalPath"] = str(path)
+        out["summary"] = rollup
     # The roll-up REPLACES the event list unless the caller bounded the read
     # itself: shipping both would make `--summary` strictly more expensive than
     # not passing it, which is the opposite of what the flag is for.
@@ -3294,10 +3385,12 @@ app.add_typer(asset_app, name="asset")
 
 @asset_app.command("generate")
 def asset_generate_cmd(
-    pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
+    pack_dir: Path = typer.Argument(..., help="Pack root (any registered pack type)."),
     target: str = typer.Option(
         ..., "--target",
-        help="enemy:<id> | item:<id> | player | backdrop:<stage> | audio:<stage>",
+        help="Platformer: enemy:<id> | item:<id> | player | backdrop:<stage> | audio:<stage>. "
+        "Other packs: <kind>:<id> as the pack's asset plan names them, or `missing` — "
+        "every asset whose file is absent, for the price of what is missing.",
     ),
     image_backend: str | None = typer.Option(None, "--image-backend"),
     image_model: str | None = typer.Option(None, "--image-model"),
@@ -3318,9 +3411,13 @@ def asset_generate_cmd(
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
     """(Re)generate ONE asset via the real art/audio phases (single-image
-    path). Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
+    path) — or, on a pack whose template plans its assets, repair every
+    missing one (``--target missing``) through the pipeline's executor and
+    the journaled write core. Routed by the pack's registry: the platformer's
+    own ops for a platformer pack, ``canon.db_ops`` for every other type.
+    Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
     _load_env_file(env_file)
-    ops = _pack_ops()
+    ops = _pack_ops(pack_dir)
     override = _prompt_text(prompt, prompt_file, "--prompt")
     try:
         result = ops.generate_asset(
@@ -3512,23 +3609,57 @@ def asset_restore_cmd(
     pack_dir: Path = typer.Argument(..., help="Platformer pack root."),
     target: str = typer.Option(
         ..., "--target",
-        help="enemy:<id> | item:<id> (row JSON or sprite PNG by bytes) | "
-        "player | tilesheet:<stage> | backdrop:<stage>/<index>",
+        help="<kind>:<id> of any db row (enemy:<id> / item:<id> take row JSON "
+        "or sprite PNG by bytes) | player | tilesheet:<stage> | "
+        "backdrop:<stage>/<index>. With --scope collection: <kind>, or "
+        "<kind>:<id> to file the event under the row you came from.",
     ),
     to: str = typer.Option(..., "--to", help="Version hash (sha256:…)."),
+    scope: str = typer.Option(
+        "row", "--scope",
+        help="row (default): put back JUST this row — every other row in its "
+        "file keeps the edits made since. collection: put the WHOLE file back, "
+        "every row in it, including rows you did not look at (rows created "
+        "since the chosen version are removed — --dry-run lists them first).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="With --scope collection: report what the restore would do "
+        "(rows, the ids it removes) and write nothing.",
+    ),
     actor: str = typer.Option("user", "--actor"),
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
-    """Make a historic version current again (op:"restore"). Nothing is
-    deleted — the lineage grows a new branch from the chosen node."""
+    """Make a historic version current again (op:"restore"). History is never
+    rewound — the lineage grows a new branch from the chosen node, and the
+    newer versions keep their bytes. The default scope puts back one row and
+    leaves its file's other rows alone; --scope collection puts the whole file
+    back, and that one CAN drop rows created since the chosen version (it says
+    which, and --dry-run reports them without writing)."""
+    if scope not in ("row", "collection"):
+        _emit_error(f"--scope is row or collection, not {scope!r}", target=target)
+    if dry_run and scope != "collection":
+        _emit_error(
+            "--dry-run reports what a whole-file restore would remove, so it goes with "
+            "--scope collection; a row restore removes nothing to preview",
+            target=target,
+        )
     try:
         from canon.adapters.platformer_write import restore_asset
+        from canon.db_ops import restore_db_collection
     except ImportError as e:
         _emit_error(f"Failed to import platformer writer: {e}")
     try:
-        result = restore_asset(  # type: ignore[possibly-unbound]
-            pack_dir, target, to, actor=actor, session=session
-        )
+        if scope == "collection":
+            kind, _, row_id = target.partition(":")
+            result = restore_db_collection(  # type: ignore[possibly-unbound]
+                pack_dir, kind, to, entity_id=row_id or None,
+                dry_run=dry_run, actor=actor, session=session,
+            )
+        else:
+            result = restore_asset(  # type: ignore[possibly-unbound]
+                pack_dir, target, to, actor=actor, session=session
+            )
     except (FileNotFoundError, ValueError) as e:
         _emit_error(str(e), pack_dir=str(pack_dir), target=target)
     except Exception as e:

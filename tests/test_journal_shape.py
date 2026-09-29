@@ -678,3 +678,57 @@ def test_canon_journal_list_is_a_pure_read_with_a_summary(pack: Path) -> None:
     both = run("--summary", "--limit", "5")
     assert len(both["events"]) <= 5 and both["summary"]["totalCents"] >= 0
     assert provenance.journal_path(pack).read_bytes() == before, "read verbs write nothing"
+
+
+def test_a_missing_journal_never_reads_as_a_free_pack(pack: Path, tmp_path: Path) -> None:
+    """The money guard: no journal FILE is a different fact from a journal that
+    records nothing costed.
+
+    Both are all-zero roll-ups, so before this guard a mistyped pack path — or
+    a journal whose write never landed — was indistinguishable from "this cost
+    nothing". `journal.present` (and `summary.journalPresent`, since the
+    dashboard reads only the roll-up) tells them apart, and the absent case
+    also names the path it looked at.
+    """
+
+    def run(target: Path, *flags: str) -> dict:
+        result = subprocess.run(
+            [sys.executable, "-m", "canon.cli.main", "journal", "list", str(target), *flags],
+            capture_output=True, text=True, cwd=REPO,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    # A pack whose journal EXISTS and costs nothing: still an ordinary success.
+    path = provenance.journal_path(pack)
+    path.write_text(json.dumps({
+        "schema": provenance.SCHEMA_VERSION, "ts": "2026-09-06T00:00:00+00:00",
+        "artifact_id": "enemy:e1", "op": "edit", "source": "user", "actor": "cradle:user",
+    }) + "\n")
+    free = run(pack, "--summary")
+    assert free["journal"] == {"present": True, "path": str(path)}
+    assert free["summary"]["totalCents"] == 0, "a real journal, genuinely $0"
+    assert free["summary"]["journalPresent"] is True
+    assert "warnings" not in free
+
+    # The same all-zero figures with NO journal behind them.
+    path.unlink()
+    absent = run(pack, "--summary")
+    assert absent["journal"] == {"present": False, "path": str(path)}
+    assert absent["summary"]["totalCents"] == 0
+    assert absent["summary"]["journalPresent"] is False
+    assert absent["summary"]["journalPath"] == str(path)
+    assert absent["warnings"] and str(path) in absent["warnings"][0]
+    # The whole point: the two documents cannot be confused for each other.
+    assert absent["summary"] != free["summary"]
+
+    # Without --summary too, and for a directory that is not a pack at all —
+    # the case a mistyped path lands on.
+    plain = run(pack)
+    assert plain["journal"]["present"] is False and plain["events"] == []
+    stray = tmp_path / "not_a_pack"
+    stray.mkdir()
+    assert run(stray)["journal"]["present"] is False
+
+    # No planning-doc citation reaches the user (doctrine 5).
+    assert not any(t in absent["warnings"][0] for t in ("P.8", "P1-A6", "§3.0", "row "))

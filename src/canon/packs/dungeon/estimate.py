@@ -19,8 +19,9 @@ giver):
   room has a quest) gets the 4-variant tree set, every other NPC one tree;
 - ``narrative`` synopsis + one intro per room + victory + defeat;
 - portraits for every per-room entity stub + every class + one per room
-  environment; music = the fixed catalog + one track per unique
-  environment; SFX = the fixed catalog + one ambience per environment.
+  environment + the fixed catalog (``AssetPhase.FIXED_PORTRAITS``); music =
+  the fixed catalog + one track per unique environment; SFX = the fixed
+  catalog + one ambience per environment.
 
 Token counts per task are calibrated (see ``cost_model.json._calibration``)
 and every dollar comes from ``canon.pricing`` by the selected backend's
@@ -95,6 +96,9 @@ def count_dungeon(params: dict, bible: Any = None) -> dict:
         stubs * int(a.get("portraits_per_entity", 1))
         + n_class * int(a.get("portraits_per_class", 1))
         + rooms * int(a.get("portraits_per_room", 1))
+        # The fixed catalog fires whenever the image backend is on, exactly
+        # like the fixed music tracks — it does not scale with the counts.
+        + int(a.get("portraits_fixed", 0))
     )
     music = int(a.get("music_fixed_tracks", 5)) + envs * int(a.get("music_per_environment", 1))
     sfx = int(a.get("sfx_fixed_effects", 12)) + envs * int(a.get("sfx_per_environment", 1))

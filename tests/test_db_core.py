@@ -532,6 +532,466 @@ class TestRoomRowMirrors:
 
 
 # ---------------------------------------------------------------------------
+# Per-ROW restore. The CAS unit of a collection kind is the FILE, so writing a
+# stored version back wholesale reverts every SIBLING row in it — the same
+# defect the room-step restore was fixed for one level up (restoring `grid`
+# threw away `placements` edits). `restore_db_row` lifts one row out of the
+# stored bytes and drops it into the CURRENT file; `restore_db_collection` is
+# the separate, labelled whole-file action.
+# ---------------------------------------------------------------------------
+
+
+def _npc(pack: Path, npc_id: int) -> dict:
+    return next(r for r in json.loads((pack / "npcs" / "npcs.json").read_text()) if r["id"] == npc_id)
+
+
+class TestRowRestore:
+    def test_restoring_one_row_leaves_every_sibling_row_alone(self, dungeon: Path) -> None:
+        """THE assertion this verb exists for: an edit to another row in the
+        same file survives a restore of this one."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "sibling edit"}, actor="test")
+        before_rows = json.loads((dungeon / "npcs" / "npcs.json").read_text())
+
+        result = db_ops.restore_db_row(dungeon, "npc", "1000", version, actor="test")
+
+        assert result["changed"] == {"name": {"from": "Mira v2", "to": "Mira v1"}}
+        assert result["scope"] == "row" and result["restored_to"] == version
+        assert _npc(dungeon, 1000)["name"] == "Mira v1"
+        assert _npc(dungeon, 1001)["job"] == "sibling edit", "the sibling's edit SURVIVED"
+        after_rows = json.loads((dungeon / "npcs" / "npcs.json").read_text())
+        assert len(after_rows) == len(before_rows)
+        assert after_rows[1:] == before_rows[1:], "no row but the target moved a byte"
+
+        # a NEW version, journaled like any other write — history is not rewound
+        event = _events(dungeon, "row_restore")[-1]
+        assert (event["artifact_id"], event["op"], event["source"]) == ("npc:1000", "restore", "user")
+        assert event["detail"]["scope"] == "row" and event["detail"]["to"] == version
+        assert event["detail"]["label"] == (
+            "restores npc 1000 in npcs/npcs.json (1 row; siblings untouched)"
+        )
+        assert event["detail"]["changed"] == result["changed"]
+        assert event["before_hash"] and event["after_hash"] != version
+        assert json.loads(read_object(dungeon, version))[1]["job"] != "sibling edit", (
+            "the stored version still holds the OLD sibling — nothing was rewritten in history"
+        )
+
+        # restoring what is already current writes nothing and journals nothing
+        events = len(all_events(dungeon))
+        again = db_ops.restore_db_row(dungeon, "npc", "1000", version, actor="test")
+        assert again["no_change"] is True and again["changed"] == {}
+        assert len(all_events(dungeon)) == events
+
+    def test_a_version_that_predates_the_row_is_refused_never_deleted(self, dungeon: Path) -> None:
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        before_the_row = _events(dungeon, "db_update")[-1]["after_hash"]
+        created = db_ops.new_db_row(dungeon, "npc", {"name": "Newcomer"}, actor="test")
+        tree = _tree(dungeon)
+
+        with pytest.raises(ValueError, match="never deletes a row"):
+            db_ops.restore_db_row(dungeon, "npc", str(created["id"]), before_the_row, actor="test")
+
+        assert _tree(dungeon) == tree, "a refused restore wrote nothing"
+        assert _npc(dungeon, created["id"])["name"] == "Newcomer", "the row was NOT deleted"
+        # the reason names what is wrong in the product's own words, and the
+        # whole-collection action is the way back that far
+        with pytest.raises(ValueError) as refusal:
+            db_ops.restore_db_row(dungeon, "npc", str(created["id"]), before_the_row)
+        message = str(refusal.value)
+        assert "was written before the row was created" in message
+        assert "restore the whole collection" in message
+
+    def test_a_version_of_another_artifact_is_refused(self, dungeon: Path) -> None:
+        db_ops.update_db_row(dungeon, "quest", "4000", {"title": "Signal Hunt"}, actor="test")
+        quest_version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        tree = _tree(dungeon)
+        with pytest.raises(ValueError, match="own lineage"):
+            db_ops.restore_db_row(dungeon, "npc", "1000", quest_version, actor="test")
+        with pytest.raises(ValueError, match="own lineage"):
+            db_ops.restore_db_collection(dungeon, "npc", quest_version, actor="test")
+        with pytest.raises(FileNotFoundError):
+            db_ops.restore_db_row(dungeon, "npc", "424242", quest_version, actor="test")
+        assert _tree(dungeon) == tree
+
+    def test_a_version_of_another_file_in_the_same_family_is_the_wrong_hash(
+        self, dungeon: Path
+    ) -> None:
+        """A room's rows and its grid files share the `room:` family, so the
+        lineage test alone cannot tell them apart — the bytes must."""
+        _index_from_bible(dungeon)
+        db_ops.update_db_row(dungeon, "room", "room_0", {"environment_name": "First"}, actor="test")
+        grid_version = next(
+            e for e in _events(dungeon, "db_update") if e["artifact_id"] == "room:room_0/grid"
+        )["after_hash"]
+        tree = _tree(dungeon)
+        with pytest.raises(ValueError, match="wrong hash"):
+            db_ops.restore_db_row(dungeon, "room", "room_0", grid_version, actor="test")
+        with pytest.raises(ValueError, match="wrong hash"):
+            db_ops.restore_db_collection(dungeon, "room", grid_version, actor="test")
+        assert _tree(dungeon) == tree
+
+    def test_row_restore_scopes_every_collection_format(self, dungeon: Path) -> None:
+        # keyed_object
+        db_ops.update_db_row(dungeon, "item", "2000", {"price": 9}, actor="test")
+        item_version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "item", "2000", {"price": 11}, actor="test")
+        db_ops.update_db_row(dungeon, "item", "2001", {"name": "sibling item"}, actor="test")
+        db_ops.restore_db_row(dungeon, "item", "2000", item_version, actor="test")
+        items = json.loads((dungeon / "items" / "items.json").read_text())
+        assert items["2000"]["item_stats"]["price"] == 9
+        assert items["2001"]["name"] == "sibling item", "the sibling's edit SURVIVED"
+
+        # array_positional — the row keeps its slot, the order is untouched
+        db_ops.update_db_row(dungeon, "class", "warrior", {"flavor_text": "Steel"}, actor="test")
+        class_version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "class", "warrior", {"flavor_text": "Rust"}, actor="test")
+        db_ops.update_db_row(dungeon, "class", "mage", {"flavor_text": "sibling"}, actor="test")
+        db_ops.restore_db_row(dungeon, "class", "warrior", class_version, actor="test")
+        classes = json.loads((dungeon / "classes" / "classes.json").read_text())
+        assert [c["archetype"] for c in classes] == ["warrior", "mage", "healer", "jester"]
+        assert classes[0]["flavor_text"] == "Steel"
+        assert classes[1]["flavor_text"] == "sibling", "the sibling's edit SURVIVED"
+
+    def test_a_restored_row_writes_its_mirrors_in_one_batch(self, dungeon: Path) -> None:
+        db_ops.update_db_row(dungeon, "room", "room_0", {"environment_name": "First"}, actor="test")
+        version = next(
+            e for e in reversed(_events(dungeon, "db_update")) if e["artifact_id"] == "world_bible"
+        )["after_hash"]
+        db_ops.update_db_row(dungeon, "room", "room_0", {"environment_name": "Second"}, actor="test")
+
+        result = db_ops.restore_db_row(dungeon, "room", "room_0", version, actor="test")
+        assert result["file"] == "world_bible.json", "the bible mirror stood in as the row"
+        assert result["changed"] == {"environment_name": {"from": "Second", "to": "First"}}
+        bible = json.loads((dungeon / "world_bible.json").read_text())["rooms"]["room_0"]
+        assert bible["environment_name"] == "First"
+        assert _manifest_room(dungeon, "room_0")["environment_name"] == "First"
+        maze = json.loads((dungeon / "rooms" / "room_0" / "maze.json").read_text())
+        assert maze["environment_name"] == "First", "the mirrors followed the restore"
+        events = _events(dungeon, "row_restore")
+        assert [e["artifact_id"] for e in events] == ["world_bible", "manifest", "room:room_0/grid"]
+        assert {e["op"] for e in events} == {"restore"}
+        assert {e["batchId"] for e in events} == {"db-restore:room:room_0"}
+        assert [(e["detail"] or {}).get("mirror_of") for e in events] == [
+            None, "room:room_0", "room:room_0",
+        ]
+
+    def test_the_whole_collection_restore_is_a_separate_labelled_action(
+        self, dungeon: Path
+    ) -> None:
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "sibling edit"}, actor="test")
+
+        result = db_ops.restore_db_collection(dungeon, "npc", version, entity_id="1000", actor="test")
+
+        assert result["scope"] == "collection" and result["rows"] == 79
+        assert _npc(dungeon, 1000)["name"] == "Mira v1"
+        assert _npc(dungeon, 1001)["job"] != "sibling edit", (
+            "the whole-file action reverts every row — that is what it is FOR"
+        )
+        event = _events(dungeon, "row_restore")[-1]
+        assert (event["artifact_id"], event["op"]) == ("npc:1000", "restore")
+        assert event["detail"]["scope"] == "collection"
+        assert event["detail"]["label"] == "restores every npc row in npcs/npcs.json (79 rows)"
+        # already current → nothing written, nothing journaled
+        events = len(all_events(dungeon))
+        again = db_ops.restore_db_collection(dungeon, "npc", version, actor="test")
+        assert again["no_change"] is True and len(all_events(dungeon)) == events
+        # a kind whose rows are their own files has no collection to restore
+        db_ops.db_define(dungeon, "trap", {
+            "label": "Traps", "id_field": "trap_id", "layout": {"mode": "per_file", "dir": "traps"},
+        }, actor="test")
+        with pytest.raises(ValueError, match="no collection file to restore"):
+            db_ops.restore_db_collection(dungeon, "trap", version, actor="test")
+
+    def test_the_whole_collection_restore_names_the_rows_it_removes(
+        self, dungeon: Path
+    ) -> None:
+        """Doctrine 6: a row created SINCE the chosen version is not in it, so
+        the whole-file action deletes it — the ids belong on the warning and
+        on the label the picker shows, not only in the journal afterwards."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        created = db_ops.new_db_row(dungeon, "npc", {"name": "Newcomer"}, actor="test")
+        new_id = str(created["id"])
+        assert len(json.loads((dungeon / "npcs" / "npcs.json").read_text())) == 80
+
+        result = db_ops.restore_db_collection(dungeon, "npc", version, actor="test")
+
+        assert result["removed"] == [new_id]
+        assert any(f"REMOVES them: {new_id}" in w for w in result["warnings"]), result["warnings"]
+        assert any("Restore the row instead" in w for w in result["warnings"])
+        assert len(json.loads((dungeon / "npcs" / "npcs.json").read_text())) == 79
+        event = _events(dungeon, "row_restore")[-1]
+        assert event["detail"]["removes"] == [new_id]
+        assert event["detail"]["label"] == (
+            f"restores every npc row in npcs/npcs.json (79 rows), removing 1 added since ({new_id})"
+        )
+        # a version that carries every current row removes nothing and says nothing
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "later"}, actor="test")
+        whole = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "later still"}, actor="test")
+        quiet = db_ops.restore_db_collection(dungeon, "npc", whole, actor="test")
+        assert quiet["removed"] == [] and quiet["warnings"] == []
+        assert "removes" not in _events(dungeon, "row_restore")[-1]["detail"]
+
+    def test_the_whole_collection_restore_repairs_a_malformed_file(
+        self, dungeon: Path
+    ) -> None:
+        """The one situation this action exists for: a bad merge or a hand
+        edit left the collection unreadable. What it WRITES stays fail-closed;
+        what it REPLACES may not gate it."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        path = dungeon / "npcs" / "npcs.json"
+        rows = json.loads(path.read_text())
+        rows.append("half a merge conflict")
+        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        # the row scope reads the file fail-closed and cannot rescue it
+        with pytest.raises(ValueError, match="must be an array of row objects"):
+            db_ops.restore_db_row(dungeon, "npc", "1000", version, actor="test")
+
+        result = db_ops.restore_db_collection(dungeon, "npc", version, actor="test")
+
+        assert result["no_change"] is False
+        assert result["removed"] == [], "a malformed entry has no id to report as removed"
+        assert len(json.loads(path.read_text())) == 79
+        assert _npc(dungeon, 1000)["name"] == "Mira v1"
+
+        # and a file a merge left as not-JSON-at-all is the same rescue
+        path.write_text("<<<<<<< HEAD\n[]\n", encoding="utf-8")
+        again = db_ops.restore_db_collection(dungeon, "npc", version, actor="test")
+        assert again["no_change"] is False and again["removed"] == []
+        assert len(json.loads(path.read_text())) == 79
+
+    def test_a_whole_collection_restore_warns_that_mirrors_keep_their_values(
+        self, dungeon: Path
+    ) -> None:
+        _index_from_bible(dungeon)
+        db_ops.update_db_row(dungeon, "room", "room_0", {"level": 4}, actor="test")
+        version = next(
+            e for e in reversed(_events(dungeon, "db_update")) if e["artifact_id"] == "room:room_0"
+        )["after_hash"]
+        db_ops.update_db_row(dungeon, "room", "room_0", {"level": 5}, actor="test")
+        result = db_ops.restore_db_collection(dungeon, "room", version, actor="test")
+        assert result["artifact_id"] == "collection:room"
+        assert json.loads((dungeon / "rooms" / "rooms.json").read_text())["room_0"]["level"] == 4
+        assert any("keep their current values" in w for w in result["warnings"])
+        assert json.loads((dungeon / "world_bible.json").read_text())["rooms"]["room_0"]["level"] == 5
+
+    def test_a_per_file_row_restores_through_the_same_verb(self, dungeon: Path) -> None:
+        db_ops.db_define(dungeon, "trap", {
+            "label": "Traps", "id_field": "trap_id", "layout": {"mode": "per_file", "dir": "traps"},
+            "user_fields": ["damage"],
+        }, actor="test")
+        db_ops.new_db_row(dungeon, "trap", {"trap_id": "spike", "damage": 1}, actor="test")
+        db_ops.new_db_row(dungeon, "trap", {"trap_id": "pit", "damage": 2}, actor="test")
+        db_ops.update_db_row(dungeon, "trap", "spike", {"damage": 3}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "trap", "spike", {"damage": 4}, actor="test")
+        db_ops.update_db_row(dungeon, "trap", "pit", {"damage": 9}, actor="test")
+
+        result = db_ops.restore_db_row(dungeon, "trap", "spike", version, actor="test")
+        assert result["changed"] == {"damage": {"from": 4, "to": 3}}
+        assert json.loads((dungeon / "traps" / "spike.json").read_text())["damage"] == 3
+        assert json.loads((dungeon / "traps" / "pit.json").read_text())["damage"] == 9
+        # one file, one row: another row's bytes are not this row's lineage
+        pit_version = _events(dungeon, "db_update")[-1]["after_hash"]
+        with pytest.raises(ValueError, match="own lineage"):
+            db_ops.restore_db_row(dungeon, "trap", "spike", pit_version, actor="test")
+
+    def test_a_rewound_field_another_verb_owns_warns_instead_of_refusing(
+        self, dungeon: Path
+    ) -> None:
+        """`db update` walls `x` off (the grid owns it). A restore cannot —
+        the version IS the whole row — so it names the surface that may now
+        disagree rather than refusing or repairing silently."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        # as if the grid verb moved the npc afterwards
+        path = dungeon / "npcs" / "npcs.json"
+        rows = json.loads(path.read_text())
+        rows[0]["x"] = rows[0]["x"] + 3
+        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+
+        result = db_ops.restore_db_row(dungeon, "npc", "1000", version, actor="test")
+        assert "x" in result["changed"], "the row came back whole"
+        assert any("'x' is owned by grid" in w for w in result["warnings"])
+        assert any("nothing was repaired for you" in w for w in result["warnings"])
+        assert _npc(dungeon, 1000)["x"] == json.loads(read_object(dungeon, version))[0]["x"]
+
+    def test_a_rewound_walled_field_warns_too_not_only_a_routed_one(
+        self, dungeon: Path
+    ) -> None:
+        """The STRONGER protection class must not be the quieter one. `db
+        update` refuses `profile_image` outright ("asset plumbing"); a restore
+        that moves the pointer back has to say so, the same as it does for a
+        field routed to another verb."""
+        path = dungeon / "npcs" / "npcs.json"
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        rows = json.loads(path.read_text())
+        stored_portrait = rows[0]["profile_image"]
+        rows[0]["profile_image"] = "portraits/npc_1000_NEW.png"  # as `asset replace` leaves it
+        rows[0]["status"] = "approved"  # core wall, no surface of its own
+        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+
+        result = db_ops.restore_db_row(dungeon, "npc", "1000", version, actor="test")
+
+        assert _npc(dungeon, 1000)["profile_image"] == stored_portrait, "the pointer DID move back"
+        assert any(
+            "'profile_image' is asset plumbing (`canon asset replace` owns it)" in w
+            and "nothing was repaired for you" in w
+            for w in result["warnings"]
+        ), result["warnings"]
+        assert any("'status' is protected" in w for w in result["warnings"]), result["warnings"]
+
+    def test_a_modelled_row_restores_through_its_model(self, plat: Path) -> None:
+        """The platformer's per-file kinds bind a Pydantic model, so the
+        restore lands through the same fail-closed dump `db update` uses."""
+        created = db_ops.new_db_row(plat, "enemy", {"name": "Restore Me"}, actor="test")
+        eid = created["id"]
+        db_ops.update_db_row(plat, "enemy", eid, {"hp": 7}, actor="test")
+        version = _events(plat, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(plat, "enemy", eid, {"hp": 11, "name": "Renamed"}, actor="test")
+        result = db_ops.restore_db_row(plat, "enemy", eid, version, actor="test")
+        # `hp` nests into `stats`, and the restore's diff is per top-level row
+        # key: the container comes back whole.
+        assert result["changed"]["stats"]["from"]["hp"] == 11
+        assert result["changed"]["stats"]["to"]["hp"] == 7
+        assert result["changed"]["name"] == {"from": "Renamed", "to": "Restore Me"}
+        row = json.loads((plat / "enemy" / f"{eid}.json").read_text())
+        assert (row["stats"]["hp"], row["name"]) == (7, "Restore Me")
+        event = _events(plat, "row_restore")[-1]
+        assert (event["artifact_id"], event["op"]) == (f"enemy:{eid}", "restore")
+
+    def test_the_restore_users_actually_reach_is_the_row_scope(self, dungeon: Path) -> None:
+        """`restore_asset` is the ONE restore entry point behind `canon asset
+        restore`, the editor's Restore button and the agent's restore tool, so
+        the scoping has to hold THERE — a per-row restore nothing calls
+        protects nobody. Same scenario as the sibling test above, driven the
+        way a user drives it: pick a version of npc 1000 in History and click
+        Restore."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "sibling edit"}, actor="test")
+
+        result = restore_asset(dungeon, "npc:1000", version, actor="test")
+
+        assert _npc(dungeon, 1000)["name"] == "Mira v1"
+        assert _npc(dungeon, 1001)["job"] == "sibling edit", "the sibling's edit SURVIVED"
+        assert result["scope"] == "row" and result["artifact_id"] == "npc:1000"
+        assert result["label"] == "restores npc 1000 in npcs/npcs.json (1 row; siblings untouched)"
+        # the shape every restore surface answers with is unchanged
+        assert result["kind"] == "row_restore"
+        # a version the row is not in is refused here too, and deletes nothing
+        created = db_ops.new_db_row(dungeon, "npc", {"name": "Newcomer"}, actor="test")
+        with pytest.raises(ValueError, match="never deletes a row"):
+            restore_asset(dungeon, f"npc:{created['id']}", version, actor="test")
+        assert _npc(dungeon, created["id"])["name"] == "Newcomer"
+
+    def test_a_bare_document_still_restores_whole_through_the_same_entry_point(
+        self, dungeon: Path
+    ) -> None:
+        """The row scope is for COLLECTION kinds. `world` / `registry` and the
+        other bare documents have no rows to lift out — the file IS the
+        artifact, so those keep writing the whole document back."""
+        world_ops.update_world(dungeon, {"story.title": "Before"}, actor="test")
+        version = next(
+            e for e in reversed(_events(dungeon, "world_update")) if e["artifact_id"] == "world"
+        )["after_hash"]
+        world_ops.update_world(dungeon, {"story.title": "After"}, actor="test")
+        result = restore_asset(dungeon, "world", version, actor="test")
+        assert result["kind"] == "document_restore"
+        assert json.loads((dungeon / "world_bible.json").read_text())["story"]["title"] == "Before"
+
+    def test_the_whole_collection_restore_can_be_planned_before_it_deletes(
+        self, dungeon: Path
+    ) -> None:
+        """Doctrine 6: nothing is deleted without asking. The ids the whole-file
+        action would remove are knowable BEFORE it writes, so a caller can put
+        them on the confirm card instead of in the journal afterwards."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        created = db_ops.new_db_row(dungeon, "npc", {"name": "Newcomer"}, actor="test")
+        new_id = str(created["id"])
+        tree, events = _tree(dungeon), len(all_events(dungeon))
+
+        plan = db_ops.restore_db_collection(dungeon, "npc", version, dry_run=True, actor="test")
+
+        assert plan["dry_run"] is True and plan["removed"] == [new_id]
+        assert plan["scope"] == "collection" and plan["rows"] == 79
+        assert plan["label"] == (
+            f"restores every npc row in npcs/npcs.json (79 rows), removing 1 added since ({new_id})"
+        )
+        assert any(f"REMOVES them: {new_id}" in w for w in plan["warnings"])
+        assert (plan["before_hash"], plan["after_hash"]) == (None, None)
+        assert _tree(dungeon) == tree, "a dry run wrote nothing"
+        assert len(all_events(dungeon)) == events, "and journaled nothing"
+        assert _npc(dungeon, created["id"])["name"] == "Newcomer", "the row is still there"
+
+        # a refusal is a refusal in a dry run too: what the caller is shown is
+        # what it would get
+        with pytest.raises(ValueError, match="own lineage"):
+            db_ops.restore_db_collection(dungeon, "quest", version, dry_run=True, actor="test")
+
+        # and the write the plan describes is the write that happens
+        done = db_ops.restore_db_collection(dungeon, "npc", version, actor="test")
+        assert {k: done[k] for k in ("scope", "rows", "label", "removed", "warnings")} == {
+            k: plan[k] for k in ("scope", "rows", "label", "removed", "warnings")
+        }
+        assert done["after_hash"] and len(json.loads((dungeon / "npcs" / "npcs.json").read_text())) == 79
+
+    def test_the_cli_offers_both_scopes_and_the_default_is_the_row(self, dungeon: Path) -> None:
+        """`canon asset restore` is the surface: the row scope is what a plain
+        restore does, and the whole-file action is there, labelled, behind an
+        explicit --scope the caller has to type."""
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v1"}, actor="test")
+        version = _events(dungeon, "db_update")[-1]["after_hash"]
+        db_ops.update_db_row(dungeon, "npc", "1000", {"name": "Mira v2"}, actor="test")
+        db_ops.update_db_row(dungeon, "npc", "1001", {"job": "sibling edit"}, actor="test")
+
+        code, doc = _canon("asset", "restore", str(dungeon), "--target", "npc:1000", "--to", version)
+        assert code == 0, doc
+        assert isinstance(doc, dict) and doc["scope"] == "row"
+        assert _npc(dungeon, 1000)["name"] == "Mira v1"
+        assert _npc(dungeon, 1001)["job"] == "sibling edit", "the default scope left the sibling alone"
+
+        # the whole-file action: a dry run first names what it would do…
+        code, plan = _canon(
+            "asset", "restore", str(dungeon), "--target", "npc", "--to", version,
+            "--scope", "collection", "--dry-run",
+        )
+        assert code == 0 and isinstance(plan, dict)
+        assert plan["scope"] == "collection" and plan["dry_run"] is True
+        assert plan["label"] == "restores every npc row in npcs/npcs.json (79 rows)"
+        assert _npc(dungeon, 1001)["job"] == "sibling edit", "a dry run wrote nothing"
+
+        # …and running it takes the whole file back, which is what it is for
+        code, doc = _canon(
+            "asset", "restore", str(dungeon), "--target", "npc", "--to", version, "--scope", "collection",
+        )
+        assert code == 0 and isinstance(doc, dict) and doc["scope"] == "collection"
+        assert _npc(dungeon, 1001)["job"] != "sibling edit"
+
+        code, err = _canon(
+            "asset", "restore", str(dungeon), "--target", "npc", "--to", version, "--scope", "sideways",
+        )
+        assert code != 0 and "row or collection" in json.dumps(err)
+        code, err = _canon(
+            "asset", "restore", str(dungeon), "--target", "npc:1000", "--to", version, "--dry-run",
+        )
+        assert code != 0 and "goes with --scope collection" in json.dumps(err)
+
+
+# ---------------------------------------------------------------------------
 # Dynamic models (P.3.1)
 # ---------------------------------------------------------------------------
 
@@ -749,10 +1209,13 @@ class TestDefineEvolve:
         with pytest.raises(ValueError, match="protected"):
             db_ops.db_evolve(dungeon, "player_ability", rename_field="id:ident")
 
-        # restore: the collection is the CAS unit — the row comes back with the file
+        # restore: the CAS unit is the file, but the target is the ROW — the
+        # stored version's slot comes back, the rest of the file does not.
         restored = restore_asset(dungeon, "player_ability:7000", pre_evolve, actor="test")
-        assert restored["kind"] == "row_restore"
-        assert restored["label"] == "restores abilities/abilities.json (1 rows)"
+        assert restored["kind"] == "row_restore" and restored["scope"] == "row"
+        assert restored["label"] == (
+            "restores player_ability 7000 in abilities/abilities.json (1 row; siblings untouched)"
+        )
         assert json.loads((dungeon / "abilities" / "abilities.json").read_text())[0]["description"] == "zoom"
         # and the registry restores through the same path
         registry_before = ev[-1]["before_hash"]

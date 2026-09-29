@@ -1007,6 +1007,17 @@ class DiffusionSheetProducer:
         #: can be several billed calls (the alpha gate's retries, the
         #: content-policy retry) and a per-call read would undercount.
         self.spent_usd: float = 0.0
+        #: The IMAGES those billed calls produced, drained beside the dollars
+        #: into ``ctx.stats.image_successes`` — the denominator the forecast's
+        #: per-unit calibration divides ``image_cost_usd`` by
+        #: (``canon.estimator.actuals_by_unit``). The dungeon's ``AssetPhase``
+        #: has always kept this counter; the platformer accumulated only the
+        #: dollars, so a pack that had really paid still forecast off the
+        #: published range. Counted at the same choke point as the money, for
+        #: the same reason: one sprite can be several billed calls (alpha-gate
+        #: retries, the content-policy retry), and $/call is exactly what the
+        #: published per-call rate it replaces means.
+        self.units: int = 0
         #: The prompt string of the most recent backend call — the art phases
         #: hand it to ``provenance.prompt_hash`` so an ordinary (pack-authored,
         #: un-overridden) generation still carries P.8.3's ``gen.prompt_hash``.
@@ -1014,10 +1025,13 @@ class DiffusionSheetProducer:
 
     def meter(self, backend: Any = None) -> None:
         """Fold BACKEND's most-recent per-call ``last_cost`` onto this
-        producer's meter (row P1-A6). Defaults to the generate backend; the
-        animation phase passes ``edit_backend``, which it calls directly."""
+        producer's meter, and count the image that call returned. Defaults to
+        the generate backend; the animation phase passes ``edit_backend``,
+        which it calls directly. Every caller reaches here only AFTER the
+        backend handed back an image, so the count is of successes."""
         target = self.backend if backend is None else backend
         self.spent_usd += float(getattr(target, "last_cost", 0.0) or 0.0)
+        self.units += 1
 
     def drain(self) -> float:
         """Read AND reset the meter — what this producer has billed since the
@@ -1026,6 +1040,14 @@ class DiffusionSheetProducer:
         each phase for its own calls and never twice for one."""
         spent, self.spent_usd = self.spent_usd, 0.0
         return spent
+
+    def drain_units(self) -> int:
+        """Read AND reset the unit count — the images billed since the last
+        drain, for ``ctx.stats.image_successes``. Same read-and-reset contract
+        as :meth:`drain`, and drained beside it, so a shared producer credits
+        each phase with its own images and never twice with one."""
+        made, self.units = self.units, 0
+        return made
 
     @property
     def model(self) -> str:

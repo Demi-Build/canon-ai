@@ -23,6 +23,12 @@ Everything paid is opt-in and defaults OFF: ``--backend fake`` +
 ``--assets none`` is a $0 run (doctrine 3 — nothing here calls a real
 provider unless the user asked for it and supplied the key).
 
+One repair leg rides beside the create, the way ``asset animate`` carries
+``--renormalize``: ``--backfill-portraits`` records the portraits an existing
+pack already has on disk in the rows and manifest that do not name them yet.
+It composes nothing, calls no backend and spends nothing — a pack generated
+before the write-back existed is repaired without re-rolling a single image.
+
 Deliberately absent, by row ownership: an orchestrated scheduler for the
 dungeon (it has one linear pipeline; ``--orchestrate`` is a platformer
 capability the registry declares per template), the pygame launch (W2.0's
@@ -32,6 +38,7 @@ pull-in), and per-step regen (the dungeon's grid verbs are P0-8's).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -104,6 +111,28 @@ def build_asset_backends(image: str, music: str, sfx: str):
     return one("image", image), one("music", music), one("sfx", sfx)
 
 
+def _backfill(args: argparse.Namespace) -> int:
+    """``--backfill-portraits``: adopt the portraits an existing pack already
+    has. Prints one JSON document (the shape every canon verb prints) and
+    returns the exit code."""
+    from canon.packs import PackTypeError
+    from canon.packs.dungeon.portraits import backfill_portraits
+
+    pack = Path(args.output_dir).resolve()
+    if not pack.is_dir():
+        print(json.dumps({"ok": False, "error": f"no such pack: {pack}"}, indent=2))
+        return 1
+    try:
+        result = backfill_portraits(
+            pack, actor=args.actor, session=args.session, dry_run=args.dry_run
+        )
+    except PackTypeError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 1
+    print(json.dumps({"ok": True, **result}, indent=2))
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a dungeon-crawler pack.")
     parser.add_argument("--backend", choices=["fake", "anthropic"], default="fake")
@@ -114,6 +143,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-backend", default="none", help="none | fake | fal | local")
     parser.add_argument("--music-backend", default="none", help="none | fake | lyria")
     parser.add_argument("--sfx-backend", default="none", help="none | fake | elevenlabs")
+    parser.add_argument(
+        "--backfill-portraits",
+        action="store_true",
+        help="REPAIR ONLY, $0, no backends: record the portraits already on "
+        "disk under --output-dir in the rows and manifest that do not name "
+        "them yet. Generates nothing and overwrites no field that already "
+        "holds a value; a row whose portrait file is absent is left alone.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="With --backfill-portraits: report, write nothing."
+    )
+    parser.add_argument("--actor", default="user", help="Who the journal records this write for.")
+    parser.add_argument("--session", default=None)
     for flag in COUNT_FLAGS:
         parser.add_argument(f"--{flag}", type=int, default=None)
     return parser
@@ -127,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("anthropic").setLevel(logging.WARNING)
 
     args = _parser().parse_args(argv)
+
+    # The repair leg short-circuits BEFORE anything is composed: no LLM, no
+    # asset backend, nothing generated — it only records what is already there.
+    if args.backfill_portraits:
+        return _backfill(args)
+
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
