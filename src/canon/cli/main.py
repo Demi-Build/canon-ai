@@ -55,6 +55,11 @@ def _emit_not_yet_or_error(exc: Exception, **extra) -> None:
 
 
 def _emit_error(msg: str, *, exit_code: int = 1, **extra) -> None:
+    from canon import runlog
+
+    # On the run log when the run is written (a run that already called a
+    # provider); a refused read alone writes nothing.
+    runlog.event("cli_error", message=msg, exit_code=exit_code)
     payload = {"error": msg, **extra}
     _emit(payload, file=sys.stderr)
     raise typer.Exit(exit_code)
@@ -2598,6 +2603,7 @@ def _load_env_file(path: Path | None) -> None:
     )
     if not p or not p.is_file():
         return
+    shadowed: list[str] = []
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -2605,7 +2611,17 @@ def _load_env_file(path: Path | None) -> None:
         if line.startswith("export "):
             line = line[len("export "):]
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        current = os.environ.get(key)
+        if current and value and current != value:
+            # setdefault keeps the shell's value: the file's key is NOT the one
+            # the backends will use (Pass 4's "shell is shadowing your keys").
+            shadowed.append(key)
+        os.environ.setdefault(key, value)
+    if shadowed:
+        from canon import runlog
+
+        runlog.note_env_shadowed(shadowed)
 
 
 def _pack_ops(pack_dir: Path | None = None):
@@ -3068,6 +3084,56 @@ def engine_gate_cmd(
     except Exception as e:
         _emit_error(f"engine gate failed: {e}", traceback=traceback.format_exc())
     _emit({"result": "engine_gate", "summary": ladder_summary(ladder), **ladder})  # type: ignore[possibly-unbound]
+
+
+debug_app = typer.Typer(
+    help="The per-project run log (.canon/runlog.jsonl): every provider call, retry, cost, "
+    "warning and crash of each run, and the debug reports built from it.",
+)
+app.add_typer(debug_app, name="debug")
+
+
+@debug_app.command("runs")
+def debug_runs(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    limit: int = typer.Option(20, "--limit", help="Most recent runs to list (0 = all)."),
+) -> None:
+    """List the recorded runs, newest first: command, status, calls, failures, cost."""
+    from canon.debug_report import list_runs
+
+    if not pack_dir.is_dir():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    _emit({"result": "debug_runs", "runs": list_runs(pack_dir, limit=limit)})
+
+
+@debug_app.command("report")
+def debug_report(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    run: str | None = typer.Option(None, "--run", help="Run id (or a unique prefix/suffix); default the latest."),
+    markdown: bool = typer.Option(
+        False, "--markdown", help="Print the Markdown report alone instead of the JSON payload.",
+    ),
+    out: Path | None = typer.Option(None, "--out", help="Also write the Markdown report to this file."),
+) -> None:
+    """A debug report for one run: what it called, what failed and why, what it
+    cost, where the time went, and what to try next. JSON by default (with the
+    rendered Markdown under ``markdown``); ``--markdown`` prints the Markdown."""
+    from canon.debug_report import build_report, render_markdown
+
+    if not pack_dir.is_dir():
+        _emit_error(f"Pack directory not found: {pack_dir}", pack_dir=str(pack_dir))
+    try:
+        report = build_report(pack_dir, run)
+    except LookupError as e:
+        _emit_error(str(e), pack_dir=str(pack_dir))
+    text = render_markdown(report)  # type: ignore[possibly-unbound]
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    if markdown:
+        print(text, end="")
+        return
+    _emit({"result": "debug_report", "report": report, "markdown": text})  # type: ignore[possibly-unbound]
 
 
 jobs_app = typer.Typer(help="Per-project job ledger (background generation runs).")
@@ -4150,7 +4216,13 @@ def scene_test_cmd(
 
 
 def main() -> None:
-    app()
+    """The ``canon`` console script: the command runs inside a run-log
+    session (``canon.runlog``) so its provider calls, warnings and failures
+    land in the pack's ``.canon/runlog.jsonl``."""
+    from canon import runlog
+
+    with runlog.session(sys.argv):
+        app()
 
 
 if __name__ == "__main__":

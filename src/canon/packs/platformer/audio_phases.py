@@ -73,6 +73,10 @@ def _add_audio_cost(ctx: Any, producer: Any, lane: str) -> None:
         return
     cost = float(getattr(producer, "last_cost", 0.0) or 0.0)
     stats.audio_cost_usd = float(getattr(stats, "audio_cost_usd", 0.0)) + cost
+    from canon import runlog
+    from canon.pipeline.phases.asset import provider_id
+
+    runlog.note_cost(lane=lane, usd=cost, provider=provider_id(producer))
     for field in (f"{lane}_succeeded", f"{lane}_attempted"):
         setattr(stats, field, int(getattr(stats, field, 0)) + 1)
 

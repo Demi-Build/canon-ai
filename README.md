@@ -57,6 +57,24 @@ report = validate_bible(bible)
 print(report.status)
 ```
 
+## Debugging a run
+
+Every canon command that calls a provider, logs a warning or fails records
+itself in the pack's `.canon/runlog.jsonl`: each provider call and retry
+(provider, model, timing, tokens, cost, the classified error), money the asset
+lanes credited, the phase steps, the Python log, and the crash traceback if
+there was one. Keys are never written; values that look like keys are
+scrubbed. Read-only commands that do none of that write nothing.
+
+```bash
+canon debug runs <pack>                 # recorded runs, newest first
+canon debug report <pack> --markdown    # the latest run, ready to paste into an issue
+canon debug report <pack> --run <id>    # one run (JSON, with the Markdown under "markdown")
+```
+
+`CANON_RUNLOG=all` records every command; `CANON_RUNLOG=off` records nothing.
+See `src/canon/runlog.py` for the event shapes.
+
 ## Architecture
 
 ```

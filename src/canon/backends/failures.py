@@ -298,6 +298,21 @@ def _give_up(
     return False
 
 
+def _note_attempt(
+    provider: str, label: str, attempt: int, started: float, err: AssetError | None, *, final: bool,
+) -> None:
+    """One provider attempt, on the run log (``canon.runlog``): its timing,
+    and on failure the classified error and whether the loop retries it."""
+    from canon import runlog
+
+    runlog.record_call(
+        lane="asset", provider=provider, label=label, attempt=attempt,
+        ok=err is None, duration_ms=(time.perf_counter() - started) * 1000,
+        error=err.to_record() if err is not None else None,
+        retrying=(not final) if err is not None else None,
+    )
+
+
 def retry_call(
     fn: Callable[[], T],
     *,
@@ -320,14 +335,17 @@ def retry_call(
     attempts = 0
     while True:
         attempts += 1
+        started = time.perf_counter()
         try:
-            return fn()
+            result = fn()
         except RunCancelled:
             raise  # a Stop is not a provider failure — never classified, never retried
         except Exception as exc:  # noqa: BLE001 — every provider type, classified below
             err = classify_exception(exc, provider=provider)
             err.attempts = attempts
-            if _give_up(err, attempts=attempts, retries=retries, label=label, should_stop=should_stop):
+            final = _give_up(err, attempts=attempts, retries=retries, label=label, should_stop=should_stop)
+            _note_attempt(provider, label, attempts, started, err, final=final)
+            if final:
                 raise err from exc
             delay = _backoff(attempts - 1, backoff)
             logger.warning(
@@ -337,6 +355,9 @@ def retry_call(
             )
             if delay:
                 sleep(delay)
+        else:
+            _note_attempt(provider, label, attempts, started, None, final=True)
+            return result
 
 
 async def retry_call_async(
@@ -355,14 +376,17 @@ async def retry_call_async(
     attempts = 0
     while True:
         attempts += 1
+        started = time.perf_counter()
         try:
-            return await fn()
+            result = await fn()
         except RunCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
             err = classify_exception(exc, provider=provider)
             err.attempts = attempts
-            if _give_up(err, attempts=attempts, retries=retries, label=label, should_stop=should_stop):
+            final = _give_up(err, attempts=attempts, retries=retries, label=label, should_stop=should_stop)
+            _note_attempt(provider, label, attempts, started, err, final=final)
+            if final:
                 raise err from exc
             delay = _backoff(attempts - 1, backoff)
             logger.warning(
@@ -372,3 +396,6 @@ async def retry_call_async(
             )
             if delay:
                 await sleep(delay)
+        else:
+            _note_attempt(provider, label, attempts, started, None, final=True)
+            return result

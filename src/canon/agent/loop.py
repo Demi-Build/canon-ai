@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -111,6 +112,42 @@ class ConversationResult:
 
 class _StreamCancelled(Exception):
     """Internal: the cancel flag was seen mid-stream (the generator is closed)."""
+
+
+def _note_chat_call(
+    backend: Any, model: str | None, started: float, *,
+    response: Any = None, error: BaseException | None = None, cancelled: bool = False,
+) -> None:
+    """One chat request on the run log (``canon.runlog``): timing, the
+    provider-reported usage, and a list-price cost estimate when the model
+    has a price row. Never raises."""
+    from canon import runlog
+
+    try:
+        usage = getattr(response, "usage", None)
+        tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
+        tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
+        cost = None
+        resolved = model or getattr(backend, "model", None)
+        if usage is not None and resolved:
+            from canon import pricing
+
+            row = pricing.llm(str(resolved))
+            if row is not None:
+                rate = pricing.per_token(row)
+                cost = tokens_in * rate["input"] + tokens_out * rate["output"]
+        runlog.record_call(
+            lane="chat", provider=runlog.provider_of(backend), label="agent",
+            model=str(resolved) if resolved else None,
+            ok=error is None and not cancelled,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            input_tokens=tokens_in, output_tokens=tokens_out, cost_usd=cost,
+            cost_accuracy="estimated" if cost else None,
+            stop_reason=getattr(response, "stop_reason", None) or ("cancelled" if cancelled else None),
+            error=error,
+        )
+    except Exception:  # noqa: BLE001 — observability never breaks a turn
+        pass
 
 
 def _tap(
@@ -288,11 +325,17 @@ def run_conversation(
                 thinking=thinking,
                 effort=effort,
             )
+            started = time.perf_counter()
             try:
                 response = collect(_tap(backend.stream(request), on_event, cancel))
             except _StreamCancelled:
+                _note_chat_call(backend, model, started, cancelled=True)
                 result.stop_reasons.append(CANCELLED_STOP)
                 raise ConversationCancelled(result, "stream") from None
+            except Exception as exc:
+                _note_chat_call(backend, model, started, error=exc)
+                raise
+            _note_chat_call(backend, model, started, response=response)
             result.usage = result.usage + response.usage
             append(assistant_message(response))
             final_text = response.text

@@ -1764,7 +1764,18 @@ class MeteredJudge:
         *,
         phase: str | None = None,
     ) -> str:
-        response = self.backend.judge(prompt, images, max_tokens)
+        from canon import runlog
+
+        with runlog.timed_call(
+            lane="vlm", provider=runlog.provider_of(self.backend),
+            label=phase or self.phase, model=self.model, images=len(images),
+        ) as call:
+            response = self.backend.judge(prompt, images, max_tokens)
+            call.update(
+                input_tokens=getattr(self.backend, "last_input_tokens", 0),
+                output_tokens=getattr(self.backend, "last_output_tokens", 0),
+                cost_usd=getattr(self.backend, "last_cost", 0.0),
+            )
         if self.stats is not None:
             self.stats.record_call(
                 phase=phase or self.phase,
