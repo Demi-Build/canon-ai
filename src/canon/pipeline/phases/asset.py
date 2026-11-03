@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from canon import runlog
 from canon.bible.models import BibleMetadata
 from canon.pipeline.steplog import RunCancelled, step
 
@@ -308,6 +309,9 @@ def record_asset_failure(
     steplog = getattr(ctx, "steplog", None)
     if steplog is not None:
         steplog.emit(ASSET_FAILED_EVENT, node=node, item=Path(rel).stem, **record)
+    else:
+        # No step log to mirror it: the run log hears it directly.
+        runlog.event(ASSET_FAILED_EVENT, interesting=True, node=node, item=Path(rel).stem, **record)
     logger.warning(
         "asset failed: %s (%s) after %d attempt(s) — %s%s: %s",
         target, rel, error.attempts, error.kind,
@@ -841,4 +845,6 @@ def _add_cost(stats: Any, attr: str, backend: Any) -> None:
     on the line immediately after ``await backend.generate_and_save_async(...)``
     (no await in between) so the shared ``last_cost`` field is still this call's
     value — the AssetPhase gather makes reads at any other point racy."""
-    _inc(stats, attr, float(getattr(backend, "last_cost", 0.0) or 0.0))
+    cost = float(getattr(backend, "last_cost", 0.0) or 0.0)
+    _inc(stats, attr, cost)
+    runlog.note_cost(lane=attr.removesuffix("_cost_usd"), usd=cost, provider=provider_id(backend))

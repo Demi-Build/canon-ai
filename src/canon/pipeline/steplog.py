@@ -100,6 +100,10 @@ class StepLog:
         self._items: dict[str, list[str]] = {}
         #: The ``RunCancelled`` this log raised, once it has (``None`` before).
         self.cancelled: RunCancelled | None = None
+        # The active run (``canon.runlog``) now knows its pack.
+        from canon import runlog
+
+        runlog.bind(output_dir)
 
     # -- the cancel hook ------------------------------------------------------
 
@@ -165,6 +169,11 @@ class StepLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
+        # Mirrored into the run log so a debug report reads the phases beside
+        # the provider calls they made (a no-op without an active run).
+        from canon import runlog
+
+        runlog.event("step", step=event, **{k: v for k, v in record.items() if k not in ("ts", "event")})
 
     def _note(self, event: str, fields: dict[str, object]) -> None:
         node = fields.get("node")

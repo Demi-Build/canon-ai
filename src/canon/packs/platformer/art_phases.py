@@ -136,6 +136,10 @@ def _add_image_cost(ctx: Any, producer: Any) -> None:
     spent = float(drain() or 0.0) if callable(drain) else 0.0
     if spent:
         stats.image_cost_usd = float(getattr(stats, "image_cost_usd", 0.0)) + spent
+        from canon import runlog
+        from canon.pipeline.phases.asset import provider_id
+
+        runlog.note_cost(lane="image", usd=spent, provider=provider_id(producer))
     # …and the UNITS that money bought. Without them the recorded run is a
     # numerator with no denominator: the forecast's per-unit calibration
     # divides `image_cost_usd` by `image_successes`, so a platformer pack that

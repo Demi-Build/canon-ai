@@ -11,12 +11,16 @@ batching via a thread pool.
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
+from canon import runlog
 from canon.backends.base import LLMBackend
 from canon.llm.request import LLMRequest
 from canon.pipeline.stats import GenerationStats
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -123,7 +127,18 @@ class LLMClient:
         override = self._override_for(eff_phase)
         if override is not None:
             request = replace(request, system=override)
-        response = self.backend.generate(request)
+        with runlog.timed_call(
+            lane="llm",
+            provider=runlog.provider_of(self.backend),
+            label=eff_phase,
+            model=getattr(request, "model", None) or getattr(self.backend, "model", None),
+        ) as call:
+            response = self.backend.generate(request)
+            call.update(
+                input_tokens=getattr(self.backend, "last_input_tokens", 0),
+                output_tokens=getattr(self.backend, "last_output_tokens", 0),
+                cost_usd=getattr(self.backend, "last_cost", 0.0),
+            )
         if self.stats is not None:
             self.stats.record_call(
                 phase=phase or self.phase,
@@ -173,7 +188,11 @@ class LLMClient:
                 i = futures[future]
                 try:
                     results[i] = future.result()
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — the slot reads None, the reason is logged
+                    logger.warning(
+                        "LLM batch request %d/%d (%s) failed: %s: %s",
+                        i + 1, len(requests), phase or self.phase, type(exc).__name__, exc,
+                    )
                     results[i] = None
 
         return results
