@@ -1440,9 +1440,9 @@ def _build_backend(
         ):
             raise ValueError(
                 "fal image backend needs FAL_KEY (or FAL_KEY_ID + "
-                "FAL_KEY_SECRET) in the environment. A .env file is NOT "
-                "read automatically — export it first, e.g.: "
-                "set -a; source .env; set +a"
+                "FAL_KEY_SECRET) in the key file (.env) — "
+                "add it with `canon keys set FAL_KEY` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.image_fal import FalImageBackend
 
@@ -1458,9 +1458,9 @@ def _build_backend(
 
         if not os.environ.get("RD_API_KEY"):
             raise ValueError(
-                "retro image backend needs RD_API_KEY in the environment. "
-                "A .env file is NOT read automatically — export it first: "
-                "set -a; source .env; set +a"
+                "retro image backend needs RD_API_KEY in the key file (.env) — "
+                "add it with `canon keys set RD_API_KEY` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.image_retro_diffusion import RetroDiffusionBackend
 
@@ -1479,9 +1479,9 @@ def _build_backend(
         ):
             raise ValueError(
                 "pixellab image backend needs PIXELLAB_SECRET (or "
-                "PIXELLAB_API_KEY) in the environment. A .env file is NOT "
-                "read automatically — export it first: "
-                "set -a; source .env; set +a"
+                "PIXELLAB_API_KEY) in the key file (.env) — "
+                "add it with `canon keys set PIXELLAB_SECRET` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.image_pixellab import PixelLabBackend
 

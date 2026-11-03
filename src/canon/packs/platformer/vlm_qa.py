@@ -1807,8 +1807,8 @@ def build_vlm_judge(kind: str | None, model: str | None = None, *, stats: Any = 
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise ValueError(
                 "--vlm-backend anthropic needs ANTHROPIC_API_KEY in the "
-                "environment. A .env file is NOT read automatically — "
-                "export it first, e.g.: set -a; source .env; set +a"
+                "key file (.env) — add it with `canon keys set ANTHROPIC_API_KEY` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.vlm_anthropic import AnthropicVLMBackend
 

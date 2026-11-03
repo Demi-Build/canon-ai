@@ -104,8 +104,8 @@ def build_music_producer(kind: str | None):
         if not os.environ.get("GOOGLE_API_KEY"):
             raise ValueError(
                 "--music-backend lyria needs GOOGLE_API_KEY in the "
-                "environment. A .env file is NOT read automatically — "
-                "export it first, e.g.: set -a; source .env; set +a"
+                "key file (.env) — add it with `canon keys set GOOGLE_API_KEY` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.music_lyria import LyriaMusicBackend
 
@@ -127,8 +127,8 @@ def build_sfx_producer(kind: str | None):
         if not os.environ.get("ELEVENLABS_API_KEY"):
             raise ValueError(
                 "--sfx-backend elevenlabs needs ELEVENLABS_API_KEY in the "
-                "environment. A .env file is NOT read automatically — "
-                "export it first, e.g.: set -a; source .env; set +a"
+                "key file (.env) — add it with `canon keys set ELEVENLABS_API_KEY` "
+                "(or `canon keys setup`); shell exports are ignored."
             )
         from canon.backends.sfx_elevenlabs import ElevenLabsSFXBackend
 

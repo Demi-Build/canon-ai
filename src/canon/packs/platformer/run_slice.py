@@ -1160,6 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Provider keys come from the key file only ($CANON_ENV_FILE, else ./.env).
+    from canon import keyfile
+
+    keyfile.apply()
+
     output_dir = Path(args.output_dir)
     config = CanonConfig(seed=args.seed, output_dir=output_dir)
 

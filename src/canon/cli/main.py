@@ -84,6 +84,11 @@ def root(
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
+    # Provider keys come from the key file and nowhere else — shell exports
+    # of a key name are dropped here, before any verb can read one.
+    from canon import keyfile
+
+    keyfile.apply()
 
 
 bible_app = typer.Typer(help="Bible inspection and validation.")
@@ -1002,7 +1007,7 @@ def world_new(
     dial up for a real run — ``--llm-backend anthropic`` (Claude authors the
     world), ``--image-backend fal`` (real sprites/backdrops),
     ``--music-backend lyria``, ``--sfx-backend elevenlabs``, ``--vlm-backend
-    anthropic`` (animation). Paid backends need their keys via --env-file.
+    anthropic`` (animation). Paid backends read their keys from the key file (./.env, or --env-file).
 
     Three things land after the run, in order: the world's NAME through the
     journaled write core (R13, per-template field), the pack's
@@ -1484,13 +1489,133 @@ def providers_test_cmd(
 
     **This contacts the provider.** It is only ever reached from an explicit
     click on the key screen's Test button. The key is read from this process's
-    environment (cradle injects it from the keychain), rides in a request
+    environment — which holds only what the key file sets — rides in a request
     HEADER, and is never logged, echoed, or put in the URL. A provider with no
     free endpoint answers ``ran: false`` with the reason, so the button renders
     disabled-with-a-reason (doctrine 4)."""
     from canon import providers
 
     _emit({"result": "provider_test", **providers.test_provider(provider_id)})
+
+
+# ---------------------------------------------------------------------------
+# Provider keys — the .env file is the only source (canon.keyfile).
+# ---------------------------------------------------------------------------
+
+keys_app = typer.Typer(
+    help="Provider keys in the .env key file: `keys setup` (first run), `keys set`, `keys remove`, `keys status`."
+)
+app.add_typer(keys_app, name="keys")
+
+_ENV_FILE_OPT = typer.Option(None, "--env-file", help="The key file (default: $CANON_ENV_FILE, else ./.env).")
+
+
+def _key_var(name: str) -> str:
+    """A provider id (``anthropic``) or a variable name → the variable."""
+    from canon import providers
+
+    return providers.key_var(name) or name
+
+
+def _ask_secret(prompt: str) -> str:
+    """A hidden prompt on the terminal. The value is never echoed."""
+    import getpass
+
+    return getpass.getpass(prompt, stream=sys.stderr)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+@keys_app.command("status")
+def keys_status_cmd(env_file: Path | None = _ENV_FILE_OPT) -> None:
+    """Which provider keys the key file holds — names and presence only,
+    never a value — plus the provider names your shell exports that canon
+    ignored (only the file counts)."""
+    from canon import keyfile
+
+    _emit({"result": "keys_status", **keyfile.status(env_file)})
+
+
+@keys_app.command("setup")
+def keys_setup_cmd(
+    env_file: Path | None = _ENV_FILE_OPT,
+    all_rows: bool = typer.Option(False, "--all", help="Ask for every key, including ones already set."),
+) -> None:
+    """First run: ask for each provider key and write the key file.
+
+    Each prompt is hidden; press Enter to skip a provider. The file is created
+    owner-only (0600) the first time a key is saved, and a key you enter for
+    a provider that already has one replaces that one line. Needs a terminal."""
+    from canon import keyfile, providers
+
+    if not _interactive():
+        _emit_error("`canon keys setup` asks for keys on a terminal; use `canon keys set <VAR> --stdin` in scripts.")
+    path = keyfile.resolve_path(env_file)
+    have = {r["id"] for r in keyfile.status(path)["providers"] if r["set"]}
+    print(f"Provider keys go in {path}. Press Enter to skip one.", file=sys.stderr)
+    saved: list[str] = []
+    skipped: list[str] = []
+    for r in providers.provider_rows():
+        if r["id"] in have and not all_rows:
+            continue
+        print(f"\n{r['label']} — {r['unlocks']}\n  get a key: {r['docs']}", file=sys.stderr)
+        value = _ask_secret(f"  {r['env_var']}: ").strip()
+        if not value:
+            skipped.append(r["env_var"])
+            continue
+        try:
+            keyfile.set_key(path, r["env_var"], value)
+        except ValueError as e:
+            _emit_error(str(e), env_file=str(path))
+        saved.append(r["env_var"])
+    _emit(
+        {
+            "result": "keys_setup",
+            "env_file": str(path),
+            "exists": path.is_file(),
+            "saved": saved,
+            "skipped": skipped,
+            "already_set": sorted(have),
+        }
+    )
+
+
+@keys_app.command("set")
+def keys_set_cmd(
+    name: str = typer.Argument(..., help="Provider id (anthropic) or variable name (ANTHROPIC_API_KEY)."),
+    env_file: Path | None = _ENV_FILE_OPT,
+    from_stdin: bool = typer.Option(False, "--stdin", help="Read the value from stdin instead of a hidden prompt."),
+) -> None:
+    """Save one key: its line in the key file is rewritten (or added), every
+    other line and comment stays, and a missing file is created owner-only.
+
+    The value is never an argument — arguments land in shell history and
+    process lists — so it comes from a hidden prompt or from ``--stdin``."""
+    from canon import keyfile
+
+    var = _key_var(name)
+    path = keyfile.resolve_path(env_file)
+    value = sys.stdin.readline() if from_stdin else _ask_secret(f"{var}: ")
+    try:
+        keyfile.set_key(path, var, value)
+    except ValueError as e:
+        _emit_error(str(e), env_file=str(path))
+    _emit({"result": "key_set", "var": var, "env_file": str(path)})
+
+
+@keys_app.command("remove")
+def keys_remove_cmd(
+    name: str = typer.Argument(..., help="Provider id or variable name."),
+    env_file: Path | None = _ENV_FILE_OPT,
+) -> None:
+    """Delete one key's line from the key file; everything else stays."""
+    from canon import keyfile
+
+    var = _key_var(name)
+    path = keyfile.resolve_path(env_file)
+    _emit({"result": "key_removed", "var": var, "removed": keyfile.remove_key(path, var), "env_file": str(path)})
 
 
 registry_app = typer.Typer(help="The pack registry as data: `registry set` (P0 paper P.7.4).")
@@ -1919,7 +2044,7 @@ def level_music_generate(
     session: str | None = typer.Option(None, "--session"),
 ) -> None:
     """Generate ONE music track for a level or one of its user-defined music
-    sections (Lyria, paid — GOOGLE_API_KEY via --env-file; fake is $0), repoint
+    sections (Lyria, paid — GOOGLE_API_KEY from the key file; fake is $0), repoint
     the level to it (journaled), and report the actual cost."""
     _load_env_file(env_file)
     ops = _pack_ops()
@@ -2217,7 +2342,7 @@ def level_generate(
 
     Draft: stays out of the manifest/world map until `canon level publish`.
     Full-control pins (difficulty/width/height/axis) constrain the roll. Fake
-    backend is $0 (canned DSL); anthropic is paid (key via --env-file)."""
+    backend is $0 (canned DSL); anthropic is paid (key from the key file)."""
     _load_env_file(env_file)
     ops = _pack_ops()
     if not pack_dir.exists():
@@ -2583,29 +2708,17 @@ def level_restore(
 
 
 def _load_env_file(path: Path | None) -> None:
-    """Load KEY=VALUE lines into the environment (setdefault semantics).
+    """Make the key file the only source of provider keys (``canon.keyfile``).
 
-    Canon never auto-reads ``.env``; generation verbs accept ``--env-file``
-    (or the ``CANON_ENV_FILE`` env var) so hosts like cradle can supply
-    provider keys without exporting them shell-wide.
+    The root callback already applied the default file (``CANON_ENV_FILE``,
+    else ``./.env``); a verb's ``--env-file`` re-applies with that file, which
+    then wins wholly. Provider keys the shell exported are never used.
     """
-    import os
-
-    p = path or (
-        Path(os.environ["CANON_ENV_FILE"])
-        if os.environ.get("CANON_ENV_FILE")
-        else None
-    )
-    if not p or not p.is_file():
+    if path is None:
         return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):]
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    from canon import keyfile
+
+    keyfile.apply(path)
 
 
 def _pack_ops(pack_dir: Path | None = None):
@@ -3415,7 +3528,7 @@ def asset_generate_cmd(
     missing one (``--target missing``) through the pipeline's executor and
     the journaled write core. Routed by the pack's registry: the platformer's
     own ops for a platformer pack, ``canon.db_ops`` for every other type.
-    Explicit backends only; paid keys via --env-file / CANON_ENV_FILE."""
+    Explicit backends only; paid keys from the key file (./.env, CANON_ENV_FILE or --env-file)."""
     _load_env_file(env_file)
     ops = _pack_ops(pack_dir)
     override = _prompt_text(prompt, prompt_file, "--prompt")

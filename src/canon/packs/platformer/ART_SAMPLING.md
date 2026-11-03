@@ -43,8 +43,9 @@ full, expensive regeneration. Sampling is where you decide it.
 ## 2. Backends — where the pixels come from
 
 Backends are constructed only from an explicit flag, never implied, and
-fail fast at launch on missing credentials (a `.env` file is NOT read
-automatically — `set -a; source .env; set +a` first).
+fail fast at launch on missing credentials. Keys come only from the key
+file (`./.env`, or `CANON_ENV_FILE`); `canon keys setup` creates it and shell
+exports are ignored.
 
 | Backend | Credential | Pricing | Character |
 |---|---|---|---|

@@ -237,7 +237,8 @@ def build_llm(
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise ValueError(
                 "--llm-backend anthropic needs ANTHROPIC_API_KEY in the "
-                "environment (pass --env-file or export it first)."
+                "key file (.env) — add it with `canon keys set ANTHROPIC_API_KEY`; "
+                "shell exports are ignored."
             )
         from canon.backends.anthropic import AnthropicBackend
         from canon.packs.platformer.models import load_models

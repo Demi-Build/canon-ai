@@ -90,12 +90,14 @@ fail-fast on missing credentials:
 | `--sfx-backend elevenlabs` | The closed SFX event set | `ELEVENLABS_API_KEY` |
 | `--vlm-backend anthropic` | Claude vision judge for end-of-pipeline QA | `ANTHROPIC_API_KEY` |
 
-A `.env` file is **not** read automatically — export first. The
+Keys come from the key file and nowhere else: `./.env` (or the file
+`CANON_ENV_FILE` names). Run `uv run canon keys setup` once to create it,
+and `uv run canon keys set <VAR>` to change one key. A key exported in your
+shell is ignored, so there is nothing to `source`. The
 everything-on run — world plan + levels + diffusion art + music + SFX +
 the VLM QA judge over every level's renders:
 
 ```bash
-set -a; source .env; set +a
 uv run python -m canon.packs.platformer.run_slice \
   --backend anthropic \
   --image-backend fal \
@@ -126,7 +128,6 @@ If QA flags something, regen surgically (never automatically):
 ```bash
 # e.g. the report suggested enemy:tide_skitter and l5's layout
 uv run canon regen ~/my_real_game/bible.json l5 enemy:tide_skitter --mark-only
-set -a; source .env; set +a
 uv run python -m canon.packs.platformer.run_slice \
   --backend anthropic --image-backend fal --vlm-backend anthropic \
   --engine godot --orchestrate \

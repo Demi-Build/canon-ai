@@ -170,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parser().parse_args(argv)
 
+    # Provider keys come from the key file only ($CANON_ENV_FILE, else ./.env).
+    from canon import keyfile
+
+    keyfile.apply()
+
     # The repair leg short-circuits BEFORE anything is composed: no LLM, no
     # asset backend, nothing generated — it only records what is already there.
     if args.backfill_portraits:

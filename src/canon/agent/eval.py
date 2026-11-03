@@ -397,6 +397,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print a single JSON document instead of lines")
     args = parser.parse_args(argv)
 
+    # Provider keys come from the key file only ($CANON_ENV_FILE, else ./.env).
+    from canon import keyfile
+
+    keyfile.apply()
+
     selected = [c for c in CONVERSATIONS if args.only is None or c.name == args.only]
     if not selected:
         print(
