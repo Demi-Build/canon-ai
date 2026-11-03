@@ -19,7 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from examples.platformer_pack.compose import _world_map  # noqa: E402
+from canon.packs.platformer.compose import _world_map  # noqa: E402
 
 
 def _ctx(world=None, seed="emberfall_001"):

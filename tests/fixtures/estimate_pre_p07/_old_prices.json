@@ -1,0 +1,29 @@
+{
+  "note": "Pre-P0-7 unit prices: cost_model.json assets block + backends.anthropic.PRICING (per-token) + models.json tiers. The identity test injects these into the new engine and asserts byte-identical output minus the additive \u00a73.0-E keys.",
+  "image_usd_per_call": 0.04,
+  "music_usd_per_track": 0.1,
+  "sfx_usd_per_event": 0.05,
+  "llm_per_token": {
+    "claude-sonnet-4-6": {
+      "input": 3e-06,
+      "output": 1.5e-05
+    },
+    "claude-opus-4-8": {
+      "input": 5e-06,
+      "output": 2.5e-05
+    },
+    "claude-opus-4-7": {
+      "input": 5e-06,
+      "output": 2.5e-05
+    },
+    "claude-haiku-4-5-20251001": {
+      "input": 1e-06,
+      "output": 5e-06
+    }
+  },
+  "model_tiers": {
+    "cheap": "claude-haiku-4-5-20251001",
+    "mid": "claude-sonnet-4-6",
+    "top": "claude-opus-4-8"
+  }
+}

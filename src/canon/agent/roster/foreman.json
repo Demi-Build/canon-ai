@@ -1,0 +1,16 @@
+{
+  "id": "foreman",
+  "label": "Foreman",
+  "actor": "foreman",
+  "model_tier": "mid",
+  "tools": [
+    "describe_pack", "describe_level", "export_level", "validate_level",
+    "db_types", "db_schema", "db_row", "get_history", "get_versions",
+    "list_pack_files", "read_pack_file", "search_pack",
+    "world_map", "engine_status", "estimate",
+    "show_user", "attach_image", "request_input",
+    "propose_plan", "delegate",
+    "sandbox_level",
+    "create_project"
+  ]
+}

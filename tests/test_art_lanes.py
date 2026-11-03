@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from examples.platformer_pack.graphics import GraphicsSpec, load_graphics
+from canon.packs.platformer import graphics as _graphics
+from canon.packs.platformer.graphics import GraphicsSpec, load_graphics
 
-SPECS_DIR = Path("examples/graphics_specs")
+#: The lane templates ship as package data beside graphics.py (row P0-4).
+SPECS_DIR = Path(_graphics.__file__).parent / "graphics_specs"
 
 LANES = ("hand_drawn_16bit", "prerendered_16bit", "modern_hd")
 
@@ -82,10 +84,10 @@ class TestLaneSwapEndToEnd:
 
         from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
         from canon.bible.models import Bible
+        from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+        from canon.packs.platformer.run_slice import make_fake_responder
+        from canon.packs.platformer.tileset_art import build_image_producer
         from canon.pipeline.runner import PipelineContext
-        from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-        from examples.platformer_pack.tileset_art import build_image_producer
-        from examples.run_platformer_slice import make_fake_responder
 
         trees = {}
         for lane in ("hand_drawn_16bit", "modern_hd"):

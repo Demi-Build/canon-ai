@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from examples.mazeworld_pack.validators import (
+from canon.packs.dungeon.validators import (
     LootIntegrityValidator,
     PuzzleSolvabilityValidator,
     QuestCompletabilityValidator,

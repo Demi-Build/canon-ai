@@ -19,6 +19,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from canon import pricing as _pricing
+
 if TYPE_CHECKING:
     pass
 
@@ -60,6 +62,9 @@ class LocalImageBackend:
         self.model = model or self._default_model_for_device(self.device)
         self._pipe = None  # lazy — set in _ensure_pipe()
         self.last_cost: float = 0.0
+        #: On-box generation: the $0 is a real zero, not an unpriced one
+        #: (P0 paper P.8.8 — a free backend is ``measured``).
+        self.last_cost_accuracy: str = _pricing.MEASURED
 
     @staticmethod
     def _auto_device(torch) -> str:  # noqa: ANN001

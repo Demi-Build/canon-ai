@@ -15,12 +15,12 @@ import pytest
 
 from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.bible.models import Bible
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.phases import roll_habitats
+from canon.packs.platformer.rules import DEFAULT_RULES
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.packs.platformer.validate import check_placements
 from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.phases import roll_habitats
-from examples.platformer_pack.rules import DEFAULT_RULES
-from examples.platformer_pack.validate import check_placements
-from examples.run_platformer_slice import make_fake_responder
 from tests.treediff import assert_trees_byte_identical
 
 SEED = "emberfall_001"
@@ -178,7 +178,7 @@ class TestEcology:
     def test_habitat_repair_widens_thin_rosters(self, tmp_path: Path) -> None:
         """A biome the pool never rolled residents for gets the nearest
         enemies' habitats widened — loud code repair, never a re-roll."""
-        from examples.platformer_pack.phases import EnemyGeneratorPhase
+        from canon.packs.platformer.phases import EnemyGeneratorPhase
 
         ctx = _run_world(tmp_path / "run", num_stages=3)
         stage = ctx.bible.stages["bloom_terraces"]
@@ -202,7 +202,7 @@ class TestSwimStyles:
     def _grid(self):
         """floor with a 4-wide, 2-deep raised basin at x 4-7: walls form
         the lip, water fills rows 4-5 (surface row = 4)."""
-        from examples.platformer_pack.dsl import stamp
+        from canon.packs.platformer.dsl import stamp
 
         text = (
             "floor(0,11)\nwall(3,3,5)\nvolume(water,4,7,4)\nwall(8,3,5)\n"
@@ -235,7 +235,7 @@ class TestSwimStyles:
         assert accepted
 
     def test_floater_rejected_in_shallow_strip(self) -> None:
-        from examples.platformer_pack.dsl import stamp
+        from canon.packs.platformer.dsl import stamp
 
         text = "floor(0,11)\npool(water,4,7)\nspawn(0)\nexit(11)"
         grid = stamp(text, self.GRID_W, self.GRID_H).grid  # 1-deep pool
@@ -249,8 +249,8 @@ class TestSwimStyles:
         hold a 1.5 body (the sunlit run's wasted-retries class), a dry
         level holds no swimmer at all, and the deep basin holds all
         three styles it validated for placement."""
-        from examples.platformer_pack.dsl import stamp
-        from examples.platformer_pack.validate import swimmer_spot_exists
+        from canon.packs.platformer.dsl import stamp
+        from canon.packs.platformer.validate import swimmer_spot_exists
 
         shallow = stamp(
             "floor(0,11)\npool(water,4,7)\nspawn(0)\nexit(11)",
@@ -453,7 +453,7 @@ class TestBehaviorDoctrine:
         assert alerted and x >= 11.0 and y >= 9.0  # pressed to the near corner
 
     def test_relentless_variant_overrides_the_leash(self) -> None:
-        from examples.platformer_pack.variants import load_variants
+        from canon.packs.platformer.variants import load_variants
 
         relentless = load_variants().by_name["relentless"]
         assert float(relentless.behavior["leash_range"]) >= 999
@@ -465,8 +465,8 @@ class TestBehaviorDoctrine:
         """The can-occupy rule both surfaces share: hazard cells and
         solid/one-way cells block; a patroller reverses at a spike strip
         instead of strolling into it."""
-        from examples.platformer_pack.dsl import stamp
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.dsl import stamp
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         result = stamp(
             "floor(0,23)\nhazard_strip(spike,12,14)\nspawn(2)\nexit(22)",
@@ -590,7 +590,7 @@ class TestFlyer:
     }
 
     def _open_grid(self):
-        from examples.platformer_pack.dsl import stamp
+        from canon.packs.platformer.dsl import stamp
 
         return stamp(
             "floor(0,15)\nspawn(0)\nexit(15)", self.GRID_W, self.GRID_H
@@ -600,7 +600,7 @@ class TestFlyer:
         """flyer_spot_exists is the roster gate: open airspace over ground is
         feasible; a fully-solid level (no air) and a groundless void (no
         terrain below) are not."""
-        from examples.platformer_pack.validate import flyer_spot_exists
+        from canon.packs.platformer.validate import flyer_spot_exists
 
         g = self._open_grid()
         assert flyer_spot_exists(g, 1.0)
@@ -611,7 +611,7 @@ class TestFlyer:
     def test_flyer_placed_aloft_not_on_the_ground(self) -> None:
         """A flyer validates in open air above the terrain and is REJECTED on
         the ground surface (an airborne creature never stands)."""
-        from examples.platformer_pack.validate import standable_cells
+        from canon.packs.platformer.validate import standable_cells
 
         g = self._open_grid()
         surf = min(y for _, y in standable_cells(g))
@@ -860,8 +860,8 @@ class TestMultiStageRegen:
     def test_bare_level_id_marks_one_stage2_level(self, tmp_path: Path) -> None:
         """`canon regen l5 --mark-only` addressing works across stages —
         global numbering keeps the regen grammar unchanged."""
+        from canon.packs.platformer.dag import run_orchestrated
         from canon.pipeline.orchestrator import mark_stale
-        from examples.platformer_pack.dag import run_orchestrated
 
         out = tmp_path / "run"
         ctx = PipelineContext(

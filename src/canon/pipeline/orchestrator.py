@@ -32,6 +32,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from canon.bible.artifacts import ArtifactStatus
 from canon.bible.models import BibleMetadata
+from canon.pipeline.stats import run_timer
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,25 @@ def orchestrate(
     ``bible.metadata.node_status`` are skipped unless marked STALE by
     :func:`detect_edits`. USER_EDITED nodes are also skipped — the edit
     is authoritative and is never regenerated (§6.3); only its
-    descendants (stale) re-run. ``always`` nodes re-run every time."""
+    descendants (stale) re-run. ``always`` nodes re-run every time.
+
+    The run is bracketed by the same run clock the sequential scheduler
+    uses (``run_timer``): ``ctx.stats`` carries the elapsed from
+    ``run_start`` to ``run_end`` on every exit — done, gated, escalated,
+    cancelled."""
+    with run_timer(getattr(ctx, "stats", None)):
+        return _orchestrate(
+            items, ctx, max_concurrency=max_concurrency, persist_path=persist_path,
+        )
+
+
+def _orchestrate(
+    items: list[Any],
+    ctx: Any,
+    *,
+    max_concurrency: int | None,
+    persist_path: str | Path | None,
+) -> OrchestratorReport:
     cap = max_concurrency or int(getattr(ctx.config, "max_concurrency", 1))
     auto_gates = bool(getattr(ctx.config, "gates_auto_approve", True))
     metadata = _ensure_metadata(ctx)
@@ -308,7 +327,13 @@ def orchestrate(
     try:
         while pending or in_flight:
             progressed = False
-            for nid in list(pending):
+            # ⏹ Stop (row P1-A4.5, master §3.0-D: "start nothing new"). The
+            # node_item boundary check only reaches nodes with an item loop —
+            # a node without one would start and run to completion after the
+            # cancel file landed. In-flight nodes still finish at their own
+            # boundary; what landed stays. No cancel file named = unchanged.
+            stopping = steplog is not None and steplog.cancel_requested()
+            for nid in [] if stopping else list(pending):
                 node = node_map[nid]
                 if deps[nid] & dead:
                     continue  # blocked behind a failure

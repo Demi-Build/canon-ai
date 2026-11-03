@@ -7,10 +7,10 @@ from canon.pipeline.rng import derive_rng
 
 pytest.importorskip("numpy")
 
-from examples.platformer_pack.dsl import stamp  # noqa: E402
-from examples.platformer_pack.level import seam_summary  # noqa: E402
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT  # noqa: E402
-from examples.platformer_pack.sections import (  # noqa: E402
+from canon.packs.platformer.dsl import stamp  # noqa: E402
+from canon.packs.platformer.level import seam_summary  # noqa: E402
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT  # noqa: E402
+from canon.packs.platformer.sections import (  # noqa: E402
     DEFAULT_VOCAB,
     SECTION_OVERLAP,
     composite,
@@ -18,7 +18,7 @@ from examples.platformer_pack.sections import (  # noqa: E402
     plan_sections,
     section_owner_of_x,
 )
-from examples.platformer_pack.validate import (  # noqa: E402
+from canon.packs.platformer.validate import (  # noqa: E402
     auto_bridge_grid,
     place_exit,
     reachable_cells,
@@ -38,7 +38,7 @@ class TestSectionVocab:
 
     def test_unknown_keys_ride_through(self) -> None:
         # The carrier is open (extra="allow") — a game file may sketch a knob.
-        from examples.platformer_pack.sections import SectionArchetype
+        from canon.packs.platformer.sections import SectionArchetype
 
         a = SectionArchetype.model_validate({"axis": "horizontal", "future": 7})
         assert a.model_dump().get("future") == 7
@@ -71,7 +71,7 @@ class TestLevelBlueprint:
     (reachable, both axes)."""
 
     def test_section_count_capped_and_scales_with_width(self) -> None:
-        from examples.platformer_pack.sections import MAX_SECTIONS, plan_level
+        from canon.packs.platformer.sections import MAX_SECTIONS, plan_level
 
         counts = {}
         for w in (48, 72, 104, 132):
@@ -84,7 +84,7 @@ class TestLevelBlueprint:
 
     def test_checkpoint_count_follows_the_rule(self) -> None:
         # 0 for 1-2 sections, 1 for 3-4, 2 for 5 — interior sections only.
-        from examples.platformer_pack.sections import _checkpoint_sections
+        from canon.packs.platformer.sections import _checkpoint_sections
 
         assert _checkpoint_sections(1) == []
         assert _checkpoint_sections(2) == []
@@ -103,7 +103,7 @@ class TestLevelBlueprint:
         assert lp.owner_of(0, 0) == 0
 
     def test_stitcher_places_reachable_checkpoints_both_axes(self) -> None:
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.validate import (
             place_checkpoints_grid,
             reachable_cells,
         )
@@ -287,7 +287,7 @@ class TestAxisAwareRepair:
         assert summit is not None and summit[1] <= 2  # a TOP cell, not dropped
 
     def test_locate_break_frontier_is_high_on_a_climb(self) -> None:
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.validate import (
             _locate_break,
             standable_cells,
         )
@@ -318,7 +318,7 @@ class TestAxisAwareRepair:
         assert summit in reachable_cells(grid, vg.spawn, DEFAULT_MOVEMENT)
 
     def test_owner_routes_by_the_break_gap_not_the_target(self) -> None:
-        from examples.platformer_pack.level import _owner_of_problem
+        from canon.packs.platformer.level import _owner_of_problem
 
         plan = plan_level(132, 16, 3, derive_rng("s", "p", "l")).sections
         msg = (
@@ -336,8 +336,8 @@ class TestAxisAwareRepair:
         """G6: the last-resort whole fallback is a climbable LADDER for a
         vertical level (summit exit, reachable from the base) — not a
         degenerate horizontal floor."""
-        from examples.platformer_pack.level import _whole_fallback
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.level import _whole_fallback
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         v = _whole_fallback(18, 60, "vertical", DEFAULT_TILES)
         assert v.spawn is not None and v.exit is not None
@@ -398,7 +398,7 @@ class TestReachabilityRepairEscalation:
         the LANE must clear the notch — and the cleared cells' hazard RECORDS
         must be dropped so no invisible damage cell survives."""
         from canon.bible.platformer import SparseMaskEntry
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         res = stamp("floor(0,9)\nspawn(2)", 10, 20, validate_markers=False)
         floor_id = DEFAULT_TILES.by_name["floor"].id
@@ -436,13 +436,13 @@ class TestReachabilityRepairEscalation:
         import json
         from pathlib import Path
 
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             _SectionState,
             _stitch_and_repair,
         )
-        from examples.platformer_pack.rules import DEFAULT_RULES
-        from examples.platformer_pack.sections import PlannedSection
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.rules import DEFAULT_RULES
+        from canon.packs.platformer.sections import PlannedSection
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         fixture = json.loads(
             (
@@ -501,7 +501,7 @@ class TestSequentialHandoff:
     occupying the shared band + digests of the level so far."""
 
     def test_rebase_dsl_shifts_every_coordinate_role(self) -> None:
-        from examples.platformer_pack.dsl import rebase_dsl
+        from canon.packs.platformer.dsl import rebase_dsl
 
         src = (
             "floor(0,20)\nplatform(10,10,4)\nledge(13,16,11)\n"
@@ -524,7 +524,7 @@ class TestSequentialHandoff:
         assert "platform(3,27,2)" in vout and "ledge(0,4,31)" in vout
 
     def test_rebase_dsl_drops_junk_lines(self) -> None:
-        from examples.platformer_pack.dsl import rebase_dsl
+        from canon.packs.platformer.dsl import rebase_dsl
 
         out = rebase_dsl("floor(0,5)\nnot a dsl line\nplatform(2,3,2)", 1, 0)
         assert out == "floor(1,6)\nplatform(3,3,2)"
@@ -532,8 +532,8 @@ class TestSequentialHandoff:
     def test_overlap_occupancy_lists_categories_in_receiver_frame(
         self,
     ) -> None:
-        from examples.platformer_pack.level import overlap_occupancy
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.level import overlap_occupancy
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         # A 20-wide section: wall + spike + water near its RIGHT edge.
         res = stamp(
@@ -555,8 +555,8 @@ class TestSequentialHandoff:
         assert "open air" in s2
 
     def test_overlap_occupancy_incoming_side_for_successors(self) -> None:
-        from examples.platformer_pack.level import overlap_occupancy
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.level import overlap_occupancy
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         # Successor's content near its LEFT edge (the band it shares with
         # the section being regenerated before it).
@@ -602,14 +602,14 @@ class TestL2CorridorTrap:
         this fixture used to exercise stay covered by the physics-independent
         full-height-wall traps in TestDoorwayCarve / test_platformer_slice,
         and _body_stand's 1-tall-pocket filter by TestPlanRoom.)"""
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             _SectionState,
             _stitch_and_repair,
         )
-        from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-        from examples.platformer_pack.rules import DEFAULT_RULES
-        from examples.platformer_pack.sections import PlannedSection
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+        from canon.packs.platformer.rules import DEFAULT_RULES
+        from canon.packs.platformer.sections import PlannedSection
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         fx = self._fixture()
         w, h = fx["width"], fx["height"]
@@ -650,10 +650,10 @@ class TestL2CorridorTrap:
         full-height-wall traps.)"""
         import re as _re
 
-        from examples.platformer_pack.level import _generate_sectioned_level
-        from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-        from examples.platformer_pack.rules import DEFAULT_RULES
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.level import _generate_sectioned_level
+        from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+        from canon.packs.platformer.rules import DEFAULT_RULES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         fx = self._fixture()
         w, h = fx["width"], fx["height"]
@@ -670,7 +670,7 @@ class TestL2CorridorTrap:
             max_retries = 3
             seed = "<same hostile seed>"
 
-        from examples.platformer_pack import PlatformerPrompts
+        from canon.packs.platformer import PlatformerPrompts
 
         class _Ctx:
             config = _Cfg()
@@ -707,7 +707,7 @@ class TestDoorwayCarve:
     doorway carved through it."""
 
     def test_walled_lateral_break_gets_a_doorway(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         # A 4-column full-height wall run splitting a flat floor.
         res = stamp(
@@ -730,7 +730,7 @@ class TestDoorwayCarve:
     def test_wide_blocks_stay_design_failures(self) -> None:
         """The doorway is capped (8 columns) — a 10-column solid block is a
         DESIGN failure the owning section must fix, not a tunnel-boring job."""
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         res = stamp(
             "floor(0,29)\nspawn(2)\n" + "\n".join(
@@ -802,7 +802,7 @@ class TestRepairEconomics:
         """3a: the overflow rung is bounded (MAX_FIX_LINE_STAMPS) — a level
         needing more verified bridges than the cap still goes back to its
         sections as a design failure."""
-        from examples.platformer_pack.validate import MAX_FIX_LINE_STAMPS
+        from canon.packs.platformer.validate import MAX_FIX_LINE_STAMPS
 
         floors = "\n".join(
             f"floor({x},{x + 10})" for x in (0, 21, 42, 63, 84)
@@ -833,7 +833,7 @@ class TestRepairEconomics:
         """3b: the detector fires at round 1 for the three paid traces that
         resubmitted into a byte-identical residue (l3/l7/l8r1) and NEVER for
         l8, whose break moved every round (repairs made real progress)."""
-        from examples.platformer_pack.level import _verbatim_repeat
+        from canon.packs.platformer.level import _verbatim_repeat
 
         def first_fire(level_id: str) -> int | None:
             fed: list[dict] = []
@@ -851,7 +851,7 @@ class TestRepairEconomics:
         assert first_fire("l8") is None
 
     def test_verbatim_repeat_ignores_clean_and_single_rounds(self) -> None:
-        from examples.platformer_pack.level import _verbatim_repeat
+        from canon.packs.platformer.level import _verbatim_repeat
 
         assert not _verbatim_repeat([{"problems": ["p"]}])
         # A clean round equals another clean round — nothing to escalate.
@@ -862,8 +862,8 @@ class TestRepairEconomics:
         ADDS a code-computed line per break — the cell rebased to the
         section's local frame plus the section's own ops at/bordering it
         (the paid l7/l8 regens burned prose re-deriving this subtraction)."""
-        from examples.platformer_pack.level import _section_feedback
-        from examples.platformer_pack.sections import PlannedSection
+        from canon.packs.platformer.level import _section_feedback
+        from canon.packs.platformer.sections import PlannedSection
 
         ps = PlannedSection("cave", 54, x_off=63, y_off=0)
         dsl = "wall(8,0,19)\ngap(8,8)\nledge(2,5,10)\nplatform(30,5,2)"
@@ -889,13 +889,13 @@ class TestRepairEconomics:
         spawn cell, snap_spawn_grid found no valid column within its bound,
         and the byte-identical problem burned every round. The clear rung
         removes the covering cell(s) as pure geometry, recorded in snaps."""
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             _SectionState,
             _stitch_and_repair,
         )
-        from examples.platformer_pack.rules import DEFAULT_RULES
-        from examples.platformer_pack.sections import PlannedSection
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.rules import DEFAULT_RULES
+        from canon.packs.platformer.sections import PlannedSection
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         fx = self._fixture("l8r1")
         w, h = fx["grid_width"], fx["grid_height"]

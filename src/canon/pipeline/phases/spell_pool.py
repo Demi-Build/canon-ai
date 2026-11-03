@@ -26,6 +26,7 @@ from typing import Any
 from canon.bible.models import BibleMetadata
 from canon.llm.parsing import extract_json_array
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
+from canon.pipeline.steplog import step
 from canon.skeleton.core import SkeletonSpec, roll_skeleton
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,9 @@ class SpellPoolPhase:
 
     def _generate_pools(self, ctx: Any) -> dict[str, list[dict]]:
         pools: dict[str, list[dict]] = {}
-        for spec in self.pool_specs:
+        # Row P0-10 (§3.0-E/D): one item per pool, through the one emitter.
+        for pool_index, spec in enumerate(self.pool_specs, start=1):
+            step(ctx, self.name, spec.name, pool_index, len(self.pool_specs))
             # Pre-roll one mechanical skeleton per spell; pin field_overrides.
             skeletons: list[dict] = []
             for _ in range(spec.count):

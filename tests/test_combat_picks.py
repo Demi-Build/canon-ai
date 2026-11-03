@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from examples.platformer_pack.rules import GameRules
-from examples.platformer_pack.tiles import DEFAULT_TILES
-from examples.platformer_pack.validate import (
+from canon.packs.platformer.rules import GameRules
+from canon.packs.platformer.tiles import DEFAULT_TILES
+from canon.packs.platformer.validate import (
     check_placements,
     hazard_stand_cells,
 )
-from examples.platformer_pack.variants import DEFAULT_VARIANTS
+from canon.packs.platformer.variants import DEFAULT_VARIANTS
 
 SPIKE = 10
 

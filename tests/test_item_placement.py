@@ -15,12 +15,12 @@ from canon.backends.testing import FakeLLMBackend
 from canon.bible.models import Bible
 from canon.config import CanonConfig
 from canon.llm.client import LLMClient
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.packs.platformer.tiles import DEFAULT_TILES
+from canon.packs.platformer.validate import check_item_placements
 from canon.pipeline.runner import PipelineContext, run_pipeline
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-from examples.platformer_pack.tiles import DEFAULT_TILES
-from examples.platformer_pack.validate import check_item_placements
-from examples.run_platformer_slice import make_fake_responder
 
 W, H = 24, 12
 FLOOR_ROW = H - 2  # anchors stand at H-3? no: floor tiles at H-2, anchors H-3

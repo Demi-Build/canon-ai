@@ -19,6 +19,7 @@ import base64
 import os
 from typing import TYPE_CHECKING
 
+from canon import pricing as _pricing
 from canon.backends.anthropic import DEFAULT_MODEL, PRICING
 
 if TYPE_CHECKING:
@@ -61,6 +62,9 @@ class AnthropicVLMBackend:
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
         self.last_cost: float = 0.0
+        #: Token counts are provider-reported: counts × the table = measured
+        #: (P0 paper P.8.8); an unpriced model flips it to ``estimated``.
+        self.last_cost_accuracy: str = _pricing.MEASURED
 
     def judge(self, prompt: str, images: list[bytes], max_tokens: int = 1024) -> str:
         """Send PNG images + instructions to Claude, return the verdict text."""
@@ -85,7 +89,9 @@ class AnthropicVLMBackend:
 
         self.last_input_tokens = response.usage.input_tokens
         self.last_output_tokens = response.usage.output_tokens
-        pricing = PRICING.get(self.model, {"input": 0.0, "output": 0.0})
+        pricing = PRICING.get(self.model)
+        self.last_cost_accuracy = _pricing.MEASURED if pricing else _pricing.ESTIMATED
+        pricing = pricing or {"input": 0.0, "output": 0.0}
         self.last_cost = (
             self.last_input_tokens * pricing["input"]
             + self.last_output_tokens * pricing["output"]

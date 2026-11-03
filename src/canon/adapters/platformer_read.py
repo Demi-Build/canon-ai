@@ -12,6 +12,11 @@ resolved against their global ``enemy/<id>.json`` definitions. Asset references
 (tilesheet, sprites, backdrop bands) are resolved to absolute paths so a viewer
 can load the bytes directly.
 
+``describe_level`` (row A3) is the token-frugal sibling: a compact summary
+(dims, tile histogram, platform bands, placements, overrides, the validation
+verdict) the agent reads first; ``export_level_bundle(..., window=)`` slices
+the full bundle to a region when it needs the cells themselves.
+
 Nothing here mutates the pack; it is a pure projection of on-disk state.
 """
 
@@ -50,6 +55,10 @@ _CHANGE_LABELS = {
     "hazards_change": "Edited hazards",
     "triggers_change": "Edited triggers",
     "foreground_change": "Edited foreground",
+    # The room GridKind's journal kinds (P0 paper P.3.2 `placements[].journal_kind`),
+    # read here so a room's revision chip labels them once P0-6/P0-8 write them.
+    "npc_move": "Moved an NPC",
+    "event_move": "Moved an event",
 }
 
 
@@ -78,13 +87,24 @@ def level_revision(level_dir: str | Path) -> dict:
 def level_last_change(pack_dir: str | Path, stage_id: str, level_id: str) -> dict | None:
     """The most recent journaled change to this level, for the "how it last
     changed" chip: ``{op, source, kind, actor, ts, hash, label}`` (or None if the
-    level has no journal history). Reads the provenance journal — the single
-    source of truth across generation, improvement, hand-paint and save. The
-    journal is append-ordered, so the last event touching this level is the last
-    write (for a multi-step action like improve+reroll that's its final sub-step)."""
+    level has no journal history). The level's artifact-id family is
+    ``level:<stage>/<level>/<step>``; the scan itself is ``journal_last_change``,
+    shared with the room reader (row P0-5) whose family is ``room:<id>/<step>``."""
+    return journal_last_change(pack_dir, f"level:{stage_id}/{level_id}/")
+
+
+def journal_last_change(pack_dir: str | Path, artifact_prefix: str) -> dict | None:
+    """The newest journal event whose ``artifact_id`` starts with
+    *artifact_prefix* — one grid's artifact family (P0 paper P.9 R1:
+    ``GridKind.artifact_id`` with the step left open) — labelled for the
+    revision chip, or ``None`` when nothing in the family was ever journaled.
+    Reads the provenance journal — the single source of truth across
+    generation, improvement, hand-paint and save. The journal is
+    append-ordered, so the last event touching the family is the last write
+    (for a multi-step action like improve+reroll that's its final sub-step)."""
     from canon import provenance
 
-    prefix = f"level:{stage_id}/{level_id}/"
+    prefix = artifact_prefix
     best_event: dict | None = None
     for e in provenance.all_events(pack_dir):
         if str(e.get("artifact_id", "")).startswith(prefix):
@@ -174,21 +194,13 @@ def _pack_vlm_qa():
     """The platformer pack's ``vlm_qa`` module, or ``None``.
 
     The state vocabulary and the per-state motion briefs are PACK data (they
-    describe this game's animation contract), but they live under ``examples/``
-    rather than in the installed package — same repo-root import the CLI
-    already uses for ``examples.platformer_pack.ops``. Returns None rather than
-    raising: an installed-without-examples canon still reads animations fine,
-    it just can't offer the briefs.
+    describe this game's animation contract); since row P0-4 the pack ships
+    inside the package, so this is a plain deferred import. The ``None``
+    contract stays for the caller's sake: a pack whose optional deps are
+    missing still reads animations fine, it just can't offer the briefs.
     """
-    import sys
-
-    import canon as _canon
-
-    root = Path(_canon.__file__).resolve().parents[2]
-    if (root / "examples").is_dir() and str(root) not in sys.path:
-        sys.path.insert(0, str(root))
     try:
-        from examples.platformer_pack import vlm_qa
+        from canon.packs.platformer import vlm_qa
     except ImportError:  # pragma: no cover — env-specific
         return None
     return vlm_qa
@@ -237,7 +249,7 @@ def _stored_motion_spec(pack: Path, target: str) -> dict:
         bp = pack / "bible.json"
         bible = (_read_json(bp) if bp.is_file() else {}) or {}
         player = bible.get("player") or {}
-        spec = ((player.get("animation") or {})).get("spec")
+        spec = (player.get("animation") or {}).get("spec")
         return spec if isinstance(spec, dict) else {}
     return {}
 
@@ -366,13 +378,86 @@ def read_animation(pack_dir: str | Path, target: str) -> dict:
     }
 
 
-def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
+#: The bundle's per-cell placement layers — every record carries ``x``/``y``
+#: in level cells, so a window filters them all the same way.
+_WINDOWED_LAYERS = ("hazards", "triggers", "foreground", "entities", "items")
+
+
+def normalize_window(window: Any, width: int, height: int) -> dict:
+    """``(x0, y0, w, h)`` → the clamped ``{"x0", "y0", "w", "h"}`` block a
+    windowed bundle carries (Phase 1 §3.4 "windowed grids"; row A3).
+
+    The origin must sit inside the ``width`` × ``height`` grid and the size
+    must be positive; a window running past the far edge is clamped to it
+    (asking for 24 columns from x0 = 110 of a 123-wide level is a 13-wide
+    window, not an error). Malformed shapes are a ``ValueError`` naming the
+    expected form — every CLI/tool caller renders that as its structured
+    error.
+    """
+    try:
+        x0, y0, w, h = (int(v) for v in window)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"window must be four integers x0,y0,w,h (got {window!r})") from exc
+    if w < 1 or h < 1:
+        raise ValueError(f"window size must be positive (got w={w}, h={h})")
+    if x0 < 0 or y0 < 0:
+        raise ValueError(f"window origin must be non-negative (got x0={x0}, y0={y0})")
+    if x0 >= width or y0 >= height:
+        raise ValueError(f"window origin ({x0},{y0}) is outside the {width}x{height} grid")
+    return {"x0": x0, "y0": y0, "w": min(w, width - x0), "h": min(h, height - y0)}
+
+
+def window_bundle(bundle: dict, window: Any) -> dict:
+    """Slice a full level bundle down to ``window`` IN PLACE and return it.
+
+    The three dense grids become the window's rows × columns; every
+    per-cell layer (``_WINDOWED_LAYERS``) keeps only the records inside it —
+    with their ABSOLUTE level coordinates untouched, so a windowed bundle
+    still names the same cells the full level does. ``grid_width`` /
+    ``grid_height`` stay the full dims; the bundle gains ``window``
+    ``{x0, y0, w, h}`` (clamped). Everything else (tileset, spawn/exit,
+    revision, music) rides along unchanged.
+    """
+    collision = bundle["grids"]["collision"]
+    height = len(collision)
+    width = len(collision[0]) if height else 0
+    win = normalize_window(window, width, height)
+    x0, y0, w, h = win["x0"], win["y0"], win["w"], win["h"]
+    bundle["grids"] = {
+        name: [row[x0 : x0 + w] for row in grid[y0 : y0 + h]] for name, grid in bundle["grids"].items()
+    }
+
+    def inside(record: Any) -> bool:
+        try:
+            x, y = int(record.get("x")), int(record.get("y"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return x0 <= x < x0 + w and y0 <= y < y0 + h
+
+    for layer in _WINDOWED_LAYERS:
+        bundle[layer] = [record for record in bundle.get(layer, []) if inside(record)]
+    bundle["window"] = win
+    return bundle
+
+
+def export_level_bundle(pack_dir: str | Path, level_id: str, window: Any = None) -> dict:
     """Assemble a render-ready bundle for one level of a platformer pack.
 
     ``pack_dir`` is the output root (the dir holding ``manifest.json``).
     Raises ``FileNotFoundError`` if the pack or level cannot be located.
+
+    ``window`` (row A3, additive): ``(x0, y0, w, h)`` in level cells slices
+    the grids and filters the per-cell layers to that region via
+    ``window_bundle`` — the token-frugal read the agent uses instead of a
+    full dump (Phase 1 §3.4). ``None`` (every pre-A3 caller, cradle's canvas
+    included) is the full level, byte-for-byte the same document as before.
     """
-    pack = Path(pack_dir)
+    bundle = _export_full_level_bundle(Path(pack_dir), level_id)
+    return window_bundle(bundle, window) if window is not None else bundle
+
+
+def _export_full_level_bundle(pack: Path, level_id: str) -> dict:
+    """The whole-level bundle ``export_level_bundle`` windows."""
     manifest_path = pack / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"not a platformer pack (no manifest.json): {pack}")
@@ -531,6 +616,177 @@ def export_level_bundle(pack_dir: str | Path, level_id: str) -> dict:
         "music_sections": music_sections,
         "stage_music": stage_music,
         "stage_music_abs": _abs(pack, stage_music) if stage_music else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# describe_level — the compact, describe-first read (Phase 1 §3.4; row A3)
+# ---------------------------------------------------------------------------
+
+#: The collision categories a band reports, in the order they print. ``empty``
+#: is the ground everything else sits in, so it never gets a span.
+_BAND_CATEGORIES = ("solid", "one_way", "hazard", "volume")
+
+
+def _tile_categories(manifest: dict) -> dict[int, str]:
+    """tile id → collision category, from the manifest's tile registry — the
+    game's ACTUAL registry (compose persists it); the template default only
+    serves packs from before that landed. The same source ``validate_level``
+    reads, so the histogram and the verdict agree on what a cell is."""
+    from canon.packs.platformer.tiles import DEFAULT_TILES, TileRegistry
+
+    tiles = (
+        TileRegistry.model_validate({"tiles": manifest["tiles"]})
+        if manifest.get("tiles") else DEFAULT_TILES
+    )
+    return {t.id: t.category for t in tiles.tiles}
+
+
+def _row_spans(row: list[int], categories: dict[int, str]) -> dict[str, list[list[int]]]:
+    """Run-length spans ``{category: [[x0, x1], ...]}`` (inclusive) of one
+    row's non-empty cells, keyed only for categories the row has."""
+    spans: dict[str, list[list[int]]] = {}
+    current: str | None = None
+    for x, value in enumerate(row):
+        category = categories.get(int(value), "unknown")
+        if category == "empty":
+            current = None
+            continue
+        if category == current:
+            spans[category][-1][1] = x
+        else:
+            spans.setdefault(category, []).append([x, x])
+            current = category
+    return spans
+
+
+def platform_bands(grid: list[list[int]], categories: dict[int, str]) -> list[dict]:
+    """The grid as a few lines of text-friendly data instead of a grid: one
+    band per run of ADJACENT rows whose span sets are identical — a floor
+    slab is one band, a staircase a band per step. Each band is
+    ``{"rows": [y0, y1], "<category>": [[x0, x1], ...]}`` with inclusive
+    cell ranges, categories per ``_BAND_CATEGORIES`` (plus ``unknown`` for
+    ids the registry does not know). Empty rows are omitted."""
+    bands: list[dict] = []
+    for y, row in enumerate(grid):
+        spans = _row_spans(row, categories)
+        if not spans:
+            continue
+        ordered = {c: spans[c] for c in (*_BAND_CATEGORIES, "unknown") if c in spans}
+        last = bands[-1] if bands else None
+        if last is not None and last["rows"][1] == y - 1 and {k: v for k, v in last.items() if k != "rows"} == ordered:
+            last["rows"][1] = y
+            continue
+        bands.append({"rows": [y, y], **ordered})
+    return bands
+
+
+def _counts(values: list[Any]) -> dict[str, int]:
+    """Sorted ``value → count`` with ``None``/empty rendered as ``"unknown"``."""
+    out: dict[str, int] = {}
+    for value in values:
+        key = str(value) if value not in (None, "") else "unknown"
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _validation_summary(report: dict) -> dict:
+    """``validate_level``'s verdict without its prose: ``ok``, problem counts
+    per check, the repair count, and each secret room's own verdict."""
+    return {
+        "ok": bool(report.get("ok")),
+        "problems": {str(c.get("name")): len(c.get("problems") or []) for c in report.get("checks", [])},
+        "repair_count": int(report.get("repair_count", 0) or 0),
+        "rooms": [
+            {"level_id": str(r.get("level_id", "")), "ok": bool(r.get("ok"))} for r in report.get("rooms", [])
+        ],
+    }
+
+
+def describe_level(pack_dir: str | Path, level_id: str) -> dict:
+    """A compact summary of one level — the describe-first read the agent
+    calls before (and usually instead of) ``export_level_bundle`` (Phase 1
+    §3.4, §4.B; row A3). A projection of the same bundle the canvas renders
+    plus the level's ``validate_level`` verdict; pure read — nothing is
+    written, journaled or snapshotted.
+
+    Returns ``{level_id, stage_id, display_name, brief, dims {width, height,
+    axis}, spawn, exit, rooms, parent_level, tiles {cells, by_category},
+    platforms [bands], entities {count, by_archetype, placed}, items {count,
+    by_kind, placed}, triggers {count, by_type}, hazards {count, by_type},
+    overrides {rules, movement}, validation {ok, problems, repair_count,
+    rooms}, revision, revision_short, last_change}``. ``platforms`` is
+    ``platform_bands`` — run-length spans per row band, not the grid;
+    positions are absolute level cells. Raises ``FileNotFoundError`` when
+    the pack or level cannot be located (the export's contract).
+    """
+    from canon.packs.platformer.ops import validate_level
+
+    pack = Path(pack_dir)
+    bundle = _export_full_level_bundle(pack, level_id)
+    stage_id = bundle["stage_id"]
+    level = _read_json(pack / "level" / stage_id / level_id / "level.json")
+    manifest = _read_json(pack / "manifest.json")
+    categories = _tile_categories(manifest)
+
+    grid = bundle["grids"]["collision"]
+    height = len(grid)
+    width = len(grid[0]) if height else 0
+    histogram: dict[str, int] = {}
+    for row in grid:
+        for value in row:
+            category = categories.get(int(value), "unknown")
+            histogram[category] = histogram.get(category, 0) + 1
+
+    entities = bundle["entities"]
+    items = bundle["items"]
+    return {
+        "level_id": level_id,
+        "stage_id": stage_id,
+        "display_name": bundle["display_name"],
+        "brief": bundle["brief"],
+        "dims": {"width": width, "height": height, "axis": str(level.get("layout_axis") or "horizontal")},
+        "spawn": bundle["spawn"],
+        "exit": bundle["exit"],
+        "rooms": list(level.get("secret_rooms") or []),
+        "parent_level": bundle["parent_level"],
+        "tiles": {"cells": width * height, "by_category": dict(sorted(histogram.items()))},
+        "platforms": platform_bands(grid, categories),
+        "entities": {
+            "count": len(entities),
+            "by_archetype": _counts([e.get("archetype") for e in entities]),
+            "placed": [
+                {
+                    "id": e["enemy_id"], "archetype": e.get("archetype"), "x": e["x"], "y": e["y"],
+                    **({"variant": e["variant"]} if e.get("variant") else {}),
+                }
+                for e in entities
+            ],
+        },
+        "items": {
+            "count": len(items),
+            "by_kind": _counts([i.get("kind") for i in items]),
+            "placed": [
+                {"id": i["item_id"], "kind": i.get("kind"), "x": i["x"], "y": i["y"], "source": i.get("source")}
+                for i in items
+            ],
+        },
+        "triggers": {
+            "count": len(bundle["triggers"]),
+            "by_type": _counts([t.get("type") for t in bundle["triggers"]]),
+        },
+        "hazards": {
+            "count": len(bundle["hazards"]),
+            "by_type": _counts([h.get("type") for h in bundle["hazards"]]),
+        },
+        "overrides": {
+            "rules": dict(level.get("rules_overrides") or {}),
+            "movement": dict(level.get("movement_overrides") or {}),
+        },
+        "validation": _validation_summary(validate_level(pack, level_id)),
+        "revision": bundle["revision"],
+        "revision_short": bundle["revision_short"],
+        "last_change": (bundle["last_change"] or {}).get("label"),
     }
 
 

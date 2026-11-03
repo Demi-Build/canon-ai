@@ -19,19 +19,10 @@ Marked ``@pytest.mark.slow`` so tight CI loops can skip with ``-m "not slow"``.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# Make sure examples/ is importable when running from the repo root
-# ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).parents[3]  # canon-ai/
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
 
 # ---------------------------------------------------------------------------
 # Callable-mode FakeLLMBackend responder
@@ -402,8 +393,8 @@ def make_responder(num_maps: int = 3) -> Any:
 def pipeline_run(tmp_path_factory):
     """Run the full mazeworld pipeline once; return (tmp_path, ctx, bible)."""
     from canon import FakeLLMBackend, LLMClient
+    from canon.packs.dungeon.compose import compose_pipeline
     from canon.pipeline.runner import run_pipeline
-    from examples.mazeworld_pack.compose import compose_pipeline
 
     tmp = tmp_path_factory.mktemp("mazeworld_full")
 
@@ -989,8 +980,8 @@ class TestMazeworldFullPipeline:
     def test_manifest_seed_is_deterministic(self, pipeline_run, tmp_path):
         """Running compose_pipeline with the same seed produces the same seed in manifest."""
         from canon import FakeLLMBackend, LLMClient
+        from canon.packs.dungeon.compose import compose_pipeline
         from canon.pipeline.runner import run_pipeline
-        from examples.mazeworld_pack.compose import compose_pipeline
 
         phases, ctx = compose_pipeline(seed="test", num_maps=3, output_dir=tmp_path)
         ctx.llm = LLMClient(FakeLLMBackend(make_responder(num_maps=3)), stats=ctx.stats)
@@ -1021,8 +1012,8 @@ class TestMazeworldFullPipeline:
         total count, so the assertions are exact.
         """
         from canon import FakeLLMBackend, LLMClient
+        from canon.packs.dungeon.compose import compose_pipeline
         from canon.pipeline.runner import run_pipeline
-        from examples.mazeworld_pack.compose import compose_pipeline
 
         counts = {"npc": 1, "item": 1, "monster": 1, "event": 2, "quest": 1, "class": 2}
         phases, ctx = compose_pipeline(

@@ -1,4 +1,4 @@
-"""Smoke test for examples.mazeworld_pack composition.
+"""Smoke test for canon.packs.dungeon composition.
 
 Does NOT run the pipeline (no LLM calls, no asset generation).
 Just verifies imports work and compose_pipeline() returns sensible output.
@@ -10,7 +10,7 @@ The full end-to-end test lives in tests/reference/test_mazeworld_full.py
 
 
 def test_specs_importable():
-    from examples.mazeworld_pack.specs import (
+    from canon.packs.dungeon.specs import (
         ABILITY_SPEC,
         EVENT_SPEC,
         HEALER_ARCHETYPE,
@@ -34,7 +34,7 @@ def test_specs_importable():
 
 
 def test_parsers_callable():
-    from examples.mazeworld_pack.parsers import (
+    from canon.packs.dungeon.parsers import (
         parse_event,
         parse_item,
         parse_monster,
@@ -52,7 +52,7 @@ def test_parsers_callable():
 
 def test_prompt_set_importable():
     from canon.llm.prompts import DefaultPromptSet, PromptSet
-    from examples.mazeworld_pack.prompts import MazeworldPromptSet
+    from canon.packs.dungeon.prompts import MazeworldPromptSet
 
     ps = MazeworldPromptSet()
     assert isinstance(ps, DefaultPromptSet)
@@ -60,7 +60,7 @@ def test_prompt_set_importable():
 
 
 def test_compose_pipeline_returns_phases_and_ctx():
-    from examples.mazeworld_pack.compose import compose_pipeline
+    from canon.packs.dungeon.compose import compose_pipeline
 
     phases, ctx = compose_pipeline(seed="test", num_maps=2)
     assert len(phases) >= 8  # story, class, maze, char, 5+ db, dialogue, asset, manifest
@@ -69,8 +69,8 @@ def test_compose_pipeline_returns_phases_and_ctx():
 
 
 def test_compose_pipeline_includes_all_database_specs():
+    from canon.packs.dungeon.compose import compose_pipeline
     from canon.pipeline.phases import DatabasePhase
-    from examples.mazeworld_pack.compose import compose_pipeline
 
     phases, ctx = compose_pipeline(seed="test", num_maps=2)
     db_phases = [p for p in phases if isinstance(p, DatabasePhase)]
@@ -79,7 +79,7 @@ def test_compose_pipeline_includes_all_database_specs():
 
 
 def test_compose_pipeline_phase_order():
-    from examples.mazeworld_pack.compose import compose_pipeline
+    from canon.packs.dungeon.compose import compose_pipeline
 
     phases, _ = compose_pipeline(seed="test", num_maps=2)
     names = [p.name for p in phases]
@@ -89,8 +89,8 @@ def test_compose_pipeline_phase_order():
 
 
 def test_compose_mazeworld_specs_returns_list():
+    from canon.packs.dungeon.compose import compose_mazeworld_specs
     from canon.pipeline.phases.database import DatabaseSpec
-    from examples.mazeworld_pack.compose import compose_mazeworld_specs
 
     specs = compose_mazeworld_specs(num_maps=3)
     assert isinstance(specs, list)
@@ -101,13 +101,13 @@ def test_compose_mazeworld_specs_returns_list():
 
 
 def test_npc_spec_has_behavior_type_field():
-    from examples.mazeworld_pack.specs import NPC_SPEC
+    from canon.packs.dungeon.specs import NPC_SPEC
 
     assert "behavior_type" in NPC_SPEC.fields
 
 
 def test_event_spec_has_event_type_and_difficulty():
-    from examples.mazeworld_pack.specs import EVENT_SPEC
+    from canon.packs.dungeon.specs import EVENT_SPEC
 
     assert "event_type" in EVENT_SPEC.fields
     assert "difficulty" in EVENT_SPEC.fields
@@ -115,14 +115,14 @@ def test_event_spec_has_event_type_and_difficulty():
 
 
 def test_quest_spec_has_quest_type_and_reward_tier():
-    from examples.mazeworld_pack.specs import QUEST_SPEC
+    from canon.packs.dungeon.specs import QUEST_SPEC
 
     assert "quest_type" in QUEST_SPEC.fields
     assert "reward_tier" in QUEST_SPEC.fields
 
 
 def test_ability_spec_has_purpose_stat_stamina():
-    from examples.mazeworld_pack.specs import ABILITY_SPEC
+    from canon.packs.dungeon.specs import ABILITY_SPEC
 
     assert "purpose" in ABILITY_SPEC.fields
     assert "stat" in ABILITY_SPEC.fields
@@ -130,7 +130,7 @@ def test_ability_spec_has_purpose_stat_stamina():
 
 
 def test_compose_pipeline_maps_have_environments():
-    from examples.mazeworld_pack.compose import compose_pipeline
+    from canon.packs.dungeon.compose import compose_pipeline
 
     phases, ctx = compose_pipeline(seed="test", num_maps=4)
     maps = list(ctx.bible.maps.values())
@@ -140,7 +140,7 @@ def test_compose_pipeline_maps_have_environments():
 
 
 def test_compose_pipeline_context_has_all_archetypes():
-    from examples.mazeworld_pack.compose import compose_pipeline
+    from canon.packs.dungeon.compose import compose_pipeline
 
     _, ctx = compose_pipeline(seed="test", num_maps=1)
     assert set(ctx.archetypes.keys()) == {"warrior", "mage", "healer", "jester"}
@@ -148,8 +148,8 @@ def test_compose_pipeline_context_has_all_archetypes():
 
 def test_parse_npc_returns_expected_keys():
     """parse_npc returns a dict with all required mazeworld NPC keys."""
+    from canon.packs.dungeon.parsers import parse_npc
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_npc
 
     ctx = BuildContext(
         map_id="room_0",
@@ -189,8 +189,8 @@ def test_parse_npc_returns_expected_keys():
 
 def test_parse_item_weapon_has_item_stats():
     """parse_item for a weapon returns item_stats with attack_dice."""
+    from canon.packs.dungeon.parsers import parse_item
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_item
 
     ctx = BuildContext(
         map_id="room_0",
@@ -227,8 +227,8 @@ def test_parse_item_weapon_has_item_stats():
 
 def test_parse_monster_returns_hp_and_ac_ranges():
     """parse_monster synthesises hp_range and ac_range from skeleton fallback."""
+    from canon.packs.dungeon.parsers import parse_monster
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_monster
 
     ctx = BuildContext(
         map_id="room_0",
@@ -252,8 +252,8 @@ def test_parse_monster_forces_one_boss_at_index_zero():
     """The first monster per room (entity_index 0) is forced to the boss tier so
     every room has exactly one is_boss monster, with boss-scaled bands."""
     from canon.bible.models import Map
+    from canon.packs.dungeon.parsers import parse_monster
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_monster
 
     ctx = BuildContext(
         map_id="room_0",
@@ -278,8 +278,8 @@ def test_monster_skeleton_scales_hp_by_room_level():
     """
     import random
 
+    from canon.packs.dungeon.specs import MONSTER_SPEC
     from canon.skeleton.core import roll_skeleton
-    from examples.mazeworld_pack.specs import MONSTER_SPEC
 
     lvl1 = roll_skeleton(MONSTER_SPEC, random.Random(0), context={"room_level": 1})
     lvl4 = roll_skeleton(MONSTER_SPEC, random.Random(0), context={"room_level": 4})
@@ -297,10 +297,10 @@ def test_parse_monster_uses_scaled_skeleton_and_sets_level():
     import random
 
     from canon.bible.models import Map
+    from canon.packs.dungeon.parsers import parse_monster
+    from canon.packs.dungeon.specs import MONSTER_SPEC
     from canon.pipeline.phases.database import BuildContext
     from canon.skeleton.core import roll_skeleton
-    from examples.mazeworld_pack.parsers import parse_monster
-    from examples.mazeworld_pack.specs import MONSTER_SPEC
 
     skel = roll_skeleton(MONSTER_SPEC, random.Random(3), context={"room_level": 1})
     ctx = BuildContext(
@@ -326,7 +326,7 @@ def test_item_skeleton_is_internally_consistent_and_scaled():
     Regression: items used to come out inert (stamina/health all 0) because the
     skeleton rolled a consumable while the prompt asked for a weapon.
     """
-    from examples.mazeworld_pack.specs import _WEAPON_TYPE_STAT, _scale_item
+    from canon.packs.dungeon.specs import _WEAPON_TYPE_STAT, _scale_item
 
     w = _scale_item(
         {"item_kind": "weapon", "weapon_type": "heavy", "weapon_stat": "STR", "rarity": "common"},
@@ -345,10 +345,10 @@ def test_parse_item_weapon_uses_scaled_skeleton_mechanics():
     import random
 
     from canon.bible.models import Map
+    from canon.packs.dungeon.parsers import parse_item
+    from canon.packs.dungeon.specs import ITEM_SPEC
     from canon.pipeline.phases.database import BuildContext
     from canon.skeleton.core import roll_skeleton
-    from examples.mazeworld_pack.parsers import parse_item
-    from examples.mazeworld_pack.specs import ITEM_SPEC
 
     # roll until we get a weapon (item_kind is weighted toward weapon)
     skel = None
@@ -377,8 +377,8 @@ def test_parse_item_weapon_uses_scaled_skeleton_mechanics():
 
 
 def test_parse_event_combat_has_monster_count():
+    from canon.packs.dungeon.parsers import parse_event
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_event
 
     ctx = BuildContext(
         map_id="room_0",
@@ -396,8 +396,8 @@ def test_parse_event_combat_has_monster_count():
 
 def test_parse_event_difficulty_is_int():
     """Fix 2: parse_event must emit difficulty as an int, never a string."""
+    from canon.packs.dungeon.parsers import parse_event
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_event
 
     for diff_label in ("easy", "medium", "hard", "very_hard", "boss"):
         ctx = BuildContext(
@@ -417,8 +417,8 @@ def test_parse_event_difficulty_is_int():
 
 def test_parse_event_combat_has_monster_ids():
     """Fix 4: combat events include monster_ids list."""
+    from canon.packs.dungeon.parsers import parse_event
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_event
 
     ctx = BuildContext(
         map_id="room_0",
@@ -435,8 +435,8 @@ def test_parse_event_combat_has_monster_ids():
 
 
 def test_parse_event_puzzle_has_choices():
+    from canon.packs.dungeon.parsers import parse_event
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_event
 
     ctx = BuildContext(
         map_id="room_0",
@@ -465,8 +465,8 @@ def test_parse_event_puzzle_has_choices():
 
 
 def test_parse_quest_returns_required_fields():
+    from canon.packs.dungeon.parsers import parse_quest
     from canon.pipeline.phases.database import BuildContext
-    from examples.mazeworld_pack.parsers import parse_quest
 
     ctx = BuildContext(
         map_id="room_0",

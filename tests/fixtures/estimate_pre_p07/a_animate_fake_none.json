@@ -1,0 +1,57 @@
+{
+  "case": "a_animate_fake_none",
+  "kind": "asset",
+  "args": {
+    "builder": "tests.test_estimate._build_tree",
+    "seed": "emberfall_001",
+    "target": "enemy:ash_wraith",
+    "image": "fake",
+    "vlm": "none"
+  },
+  "estimate": {
+    "scope": "animate",
+    "backends": {
+      "image": "fake",
+      "vlm": "none"
+    },
+    "llm": {
+      "by_task": {},
+      "calls": 0.0,
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 4,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {
+        "model": "claude-sonnet-4-6",
+        "animation_authoring": 1,
+        "usd": {
+          "best": 0.0,
+          "worst": 0.0
+        }
+      },
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0,
+      "worst": 0.0
+    },
+    "warnings": []
+  }
+}

@@ -33,6 +33,10 @@ from canon.bible.artifacts import ArtifactStatus  # noqa: E402
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts  # noqa: E402
+from canon.packs.platformer.dag import run_orchestrated  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.tileset_art import DiffusionSheetProducer  # noqa: E402
 from canon.pipeline.orchestrator import (  # noqa: E402
     detect_edits,
     mark_stale,
@@ -40,10 +44,6 @@ from canon.pipeline.orchestrator import (  # noqa: E402
     pinned_ids,
 )
 from canon.pipeline.runner import PipelineContext  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts  # noqa: E402
-from examples.platformer_pack.dag import run_orchestrated  # noqa: E402
-from examples.platformer_pack.tileset_art import DiffusionSheetProducer  # noqa: E402
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
 
 CANON = [sys.executable, "-m", "canon.cli.main"]
 SEED = "emberfall_001"

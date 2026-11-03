@@ -1,0 +1,12 @@
+{
+  "id": "playtester",
+  "label": "Playtester",
+  "actor": "playtester",
+  "model_tier": "mid",
+  "tools": [
+    "describe_pack", "describe_level", "export_level", "validate_level",
+    "db_types", "db_schema", "db_row", "get_history", "get_versions",
+    "list_pack_files", "read_pack_file", "search_pack", "world_map",
+    "capture_frames", "run_trajectory", "view_asset"
+  ]
+}

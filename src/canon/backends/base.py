@@ -11,8 +11,10 @@ in the async variant.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
+from canon.llm.chat import ChatEvent, ChatRequest
 from canon.llm.request import LLMRequest
 
 
@@ -61,6 +63,87 @@ class LLMBackend(Protocol):
     # backend that doesn't set it. LLMClient.generate_batch reads it via
     # ``getattr(backend, "prefers_serial", False)`` so backends can opt in without
     # implementing a full attribute contract.
+
+
+@runtime_checkable
+class ChatBackend(Protocol):
+    """Protocol for streaming, tool-using chat provider adapters (Phase 1 A1).
+
+    Lives BESIDE ``LLMBackend`` rather than widening it: ``generate`` is the
+    pipeline's one-shot prompt→text contract and every pack phase depends on
+    it staying that shape; the agent's conversation loop needs history,
+    tools, thinking and a live token stream. Register implementations with
+    ``BackendRegistry.register_chat()``; ids are registry keys (data), never
+    a Literal union of providers.
+
+    **Event order contract.** ``stream`` is a generator yielding, in order:
+    exactly one ``MessageStart``; then per content block, its deltas
+    (``TextDelta`` / ``ThinkingDelta`` / ``ToolUseStart`` +
+    ``ToolInputDelta``) followed by one ``ContentBlockDone`` carrying the
+    block's final canonical dict; then exactly one ``MessageStop`` carrying
+    the final content list, stop reason, measured usage and any refusal
+    details. ``canon.llm.chat.collect`` assembles a ``ChatResponse`` from
+    that stream and raises ``ChatError`` if ``MessageStop`` never arrives.
+
+    **Cancel contract** (Phase 1 §5.5; master §3.0-D — start nothing new,
+    keep what landed, say what it cost): the caller stops a reply by closing
+    the generator (``gen.close()``). An implementation must release the
+    provider connection on ``GeneratorExit`` — for the anthropic SDK that
+    means exiting the ``messages.stream(...)`` context — so no further
+    tokens are billed. Row A4.5's ⏹ Stop calls exactly this.
+
+    **Stop-reason vocabulary** (``MessageStop.stop_reason`` /
+    ``ChatResponse.stop_reason``, provider-neutral): ``"tool_use"`` — the
+    loop's contract, MUST be emitted whenever the content holds tool_use
+    blocks (the loop executes tools on exactly this value and nothing
+    else); ``"end_turn"`` — finished normally; ``"max_tokens"`` — output
+    budget hit; ``"refusal"`` — declined, ``stop_details`` says why. Any
+    other provider-specific reason passes through as-is (e.g.
+    ``"pause_turn"``, ``"stop_sequence"``) and ends the turn. A second
+    provider maps its finish reasons onto these four — an OpenAI-style
+    ``"tool_calls"`` / ``"stop"`` / ``"length"`` / ``"content_filter"``
+    must become ``"tool_use"`` / ``"end_turn"`` / ``"max_tokens"`` /
+    ``"refusal"``, never pass through unmapped.
+
+    **Usage is measured tokens, not money.** Events carry provider-reported
+    counts (including cache reads/creations); pricing them belongs to the
+    single price/constants module (master §3.0-C, born at row P0-7), never
+    to a backend. Semantics follow the Anthropic convention:
+    ``input_tokens`` EXCLUDES cache reads and creations (the three input
+    counts are disjoint and sum to the prompt size). A provider whose
+    prompt count includes cached tokens (OpenAI's ``prompt_tokens``) must
+    subtract them so the §3.0-C module never double-prices a cache hit.
+
+    Optional attributes, intentionally NOT Protocol members (declaring them
+    would make ``isinstance`` require them, the same reasoning as the
+    ``prefers_serial`` note on ``LLMBackend``): ``id`` (the registry key the
+    impl expects, e.g. ``"anthropic"``), ``model`` (the constructed default
+    model id), ``supports_thinking`` (whether ``ChatRequest.thinking`` does
+    anything). Readers use ``getattr(backend, name, default)``.
+
+    Example::
+
+        backend = FakeChatBackend([[{"type": "text", "text": "hi"}]])
+        response = collect(backend.stream(ChatRequest(messages=[...])))
+        assert response.text == "hi"
+    """
+
+    def stream(self, request: ChatRequest) -> Iterator[ChatEvent]:
+        """Stream one assistant turn for ``request``.
+
+        Args:
+            request: The full ``ChatRequest`` — history, tools, model and
+                generation knobs. ``request.metadata`` is loop-side only and
+                must not be forwarded.
+
+        Yields:
+            ``ChatEvent`` values in the order documented on the class.
+
+        Raises:
+            ChatError: on any provider failure (``retryable`` says whether a
+                retry might clear it).
+        """
+        ...
 
 
 @runtime_checkable

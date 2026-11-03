@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from examples.platformer_pack.vlm_qa import VlmQaPhase
+from canon.packs.platformer.vlm_qa import VlmQaPhase
 from tests.test_vlm_qa import _fake_judge, _run_slice
 
 REPORT = "review/ashen_depths/qa_report.json"

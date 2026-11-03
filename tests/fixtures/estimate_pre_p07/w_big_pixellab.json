@@ -1,0 +1,133 @@
+{
+  "case": "w_big_pixellab",
+  "kind": "world",
+  "args": {
+    "stages": 4,
+    "levels": 18,
+    "enemies": 10,
+    "items": 8,
+    "llm": "anthropic",
+    "image": "pixellab",
+    "music": "lyria",
+    "sfx": "elevenlabs",
+    "vlm": "anthropic"
+  },
+  "estimate": {
+    "scope": "world",
+    "backends": {
+      "llm": "anthropic",
+      "image": "pixellab",
+      "music": "lyria",
+      "sfx": "elevenlabs",
+      "vlm": "anthropic"
+    },
+    "llm": {
+      "by_task": {
+        "plat:decorator": {
+          "calls": 29.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 380,
+          "usd": 0.0812
+        },
+        "plat:enemies": {
+          "calls": 10.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 260,
+          "usd": 0.022
+        },
+        "plat:item_placement": {
+          "calls": 29.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 1800,
+          "output_tokens_per_call": 450,
+          "usd": 0.1174
+        },
+        "plat:items": {
+          "calls": 8.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 700,
+          "output_tokens_per_call": 200,
+          "usd": 0.0136
+        },
+        "plat:layout": {
+          "calls": 89.9,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 2600,
+          "output_tokens_per_call": 900,
+          "usd": 1.9149
+        },
+        "plat:placement": {
+          "calls": 29.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 2200,
+          "output_tokens_per_call": 500,
+          "usd": 0.1363
+        },
+        "plat:stage": {
+          "calls": 4.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 1000,
+          "output_tokens_per_call": 700,
+          "usd": 0.054
+        },
+        "plat:style": {
+          "calls": 4.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 500,
+          "usd": 0.0408
+        },
+        "plat:world": {
+          "calls": 1.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 600,
+          "usd": 0.0117
+        }
+      },
+      "calls": 203.9,
+      "usd": {
+        "best": 2.3919,
+        "worst": 9.5677
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 148,
+        "usd": 5.92
+      },
+      "music": {
+        "count": 4,
+        "usd": 0.4
+      },
+      "sfx": {
+        "count": 4,
+        "usd": 0.2
+      },
+      "vlm": {
+        "model": "claude-sonnet-4-6",
+        "level_judgments": {
+          "best": 18,
+          "worst": 18
+        },
+        "animation_qa": 11,
+        "animation_authoring": 11,
+        "usd": {
+          "best": 0.4212,
+          "worst": 0.4212
+        }
+      },
+      "usd": {
+        "best": 6.9412,
+        "worst": 6.9412
+      }
+    },
+    "total_usd": {
+      "best": 9.3331,
+      "worst": 16.5089
+    },
+    "warnings": []
+  }
+}

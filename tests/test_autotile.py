@@ -23,9 +23,9 @@ pytest.importorskip("PIL")
 from PIL import Image  # noqa: E402
 
 from canon.adapters import JsonOutputAdapter  # noqa: E402
-from examples.platformer_pack.layers import assign_level_terrain  # noqa: E402
-from examples.platformer_pack.tiles import DEFAULT_TILES  # noqa: E402
-from examples.platformer_pack.tileset import (  # noqa: E402
+from canon.packs.platformer.layers import assign_level_terrain  # noqa: E402
+from canon.packs.platformer.tiles import DEFAULT_TILES  # noqa: E402
+from canon.packs.platformer.tileset import (  # noqa: E402
     AUTOTILE_BIT_SEMANTICS,
     PLACEHOLDER_PALETTE,
     PlaceholderTilesetPhase,
@@ -346,7 +346,7 @@ class TestWaterDeepResolution:
 
 class TestDeriveWaterDeep:
     def test_lip_removed_and_mean_recentered(self) -> None:
-        from examples.platformer_pack.tileset import derive_water_deep
+        from canon.packs.platformer.tileset import derive_water_deep
 
         img = Image.new("RGBA", (32, 32), (100, 110, 120, 255))
         for y in range(8):  # the painted surface lip: a bright top band
@@ -360,7 +360,7 @@ class TestDeriveWaterDeep:
         assert (abs(src_mean - out_mean) <= 1.5).all(), (src_mean, out_mean)
 
     def test_deterministic(self) -> None:
-        from examples.platformer_pack.tileset import derive_water_deep
+        from canon.packs.platformer.tileset import derive_water_deep
 
         img = Image.new("RGBA", (16, 16))
         img.putdata(
@@ -375,7 +375,7 @@ class TestDeriveWaterDeep:
         assert (a == b).all()
 
     def test_flat_square_passes_through_visually(self) -> None:
-        from examples.platformer_pack.tileset import derive_water_deep
+        from canon.packs.platformer.tileset import derive_water_deep
 
         flat = Image.new("RGBA", (32, 32), PLACEHOLDER_PALETTE["water"])
         out = derive_water_deep(flat)

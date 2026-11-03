@@ -1,0 +1,77 @@
+{
+  "case": "l_gen_w48_fake",
+  "kind": "level",
+  "args": {
+    "op": "generate",
+    "width": 48,
+    "axis": null,
+    "llm": "fake"
+  },
+  "estimate": {
+    "scope": "generate",
+    "backends": {
+      "llm": "fake"
+    },
+    "llm": {
+      "by_task": {
+        "plat:decorator": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 900,
+          "output_tokens_per_call": 380,
+          "usd": 0.0
+        },
+        "plat:item_placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 1800,
+          "output_tokens_per_call": 450,
+          "usd": 0.0
+        },
+        "plat:layout": {
+          "calls": 2.0,
+          "model": "claude-sonnet-4-6",
+          "input_tokens_per_call": 2600,
+          "output_tokens_per_call": 900,
+          "usd": 0.0
+        },
+        "plat:placement": {
+          "calls": 1.0,
+          "model": "claude-haiku-4-5-20251001",
+          "input_tokens_per_call": 2200,
+          "output_tokens_per_call": 500,
+          "usd": 0.0
+        }
+      },
+      "calls": 5.0,
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "assets": {
+      "images": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "music": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "sfx": {
+        "count": 0,
+        "usd": 0.0
+      },
+      "vlm": {},
+      "usd": {
+        "best": 0.0,
+        "worst": 0.0
+      }
+    },
+    "total_usd": {
+      "best": 0.0,
+      "worst": 0.0
+    },
+    "warnings": []
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "game_coder",
+  "label": "Game coder",
+  "actor": "game_coder",
+  "model_tier": "top",
+  "tools": [
+    "list_pack_files", "read_pack_file", "search_pack", "engine_status", "engine_sync",
+    "edit_project_code",
+    "describe_pack", "describe_level", "validate_level",
+    "capture_frames", "run_trajectory",
+    "restore"
+  ]
+}

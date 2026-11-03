@@ -13,6 +13,7 @@ Code that only needs to check availability can use the lazy re-export from
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,14 +23,22 @@ if TYPE_CHECKING:
 
 # TODO(v0.2.x): handle response shape variations across genai SDK versions
 
+from canon import pricing as _pricing
+from canon.backends.failures import AssetError, classify_exception
+
+logger = logging.getLogger(__name__)
+
+#: The registry id this backend answers to (stamped on failure records).
+PROVIDER_ID = "lyria"
+
 DEFAULT_MODEL_PRO = "lyria-3-pro-preview"
 DEFAULT_MODEL_CLIP = "lyria-3-clip-preview"
 
-# Pricing per call (as of 2026-04, sourced from Google AI pricing page)
-PRICING = {
-    DEFAULT_MODEL_PRO: 0.08,
-    DEFAULT_MODEL_CLIP: 0.04,
-}
+#: Per-track ``{model: usd}`` — a VIEW of ``canon.pricing.MUSIC`` (the only
+#: price source, master §3.0-C, row P0-7); same name and shape as before. A
+#: flat list price is ``estimated`` (P0 paper P.9 J3): Lyria reports no
+#: per-call cost.
+PRICING = {model: row["usd"] for model, row in _pricing.MUSIC.items()}
 
 
 class LyriaMusicBackend:
@@ -70,6 +79,33 @@ class LyriaMusicBackend:
         self.model_clip = model_clip
         self._client = genai.Client(api_key=api_key or os.environ.get("GOOGLE_API_KEY"))
         self.last_cost: float = 0.0
+        #: Priced from the table, never provider-reported (P.9 J3).
+        self.last_cost_accuracy: str = _pricing.ESTIMATED
+        self._unpriced_models: set[str] = set()
+        #: WHY the most recent ``generate_and_save[_async]`` returned False
+        #: (``None`` after a success) — read right after the call, like
+        #: ``last_cost``. A 403 PERMISSION_DENIED at Google's billing gate
+        #: lands here as ``retryable=False``, so it is reported once instead
+        #: of retried eight times.
+        self.last_error: AssetError | None = None
+
+    def _note_cost(self, model: str) -> None:
+        """Price the track that just returned from the table (Lyria reports
+        no cost); LOUD once per unpriced model, never a silent $0 (master
+        §3.0-B) — the same shape as ``image_fal._note_cost``."""
+        row = _pricing.music(model)
+        if row is None:
+            if model not in self._unpriced_models:
+                self._unpriced_models.add(model)
+                logger.warning(
+                    "No canon.pricing.MUSIC row for Lyria model %r — its calls "
+                    "report as $0 (accuracy %r). Add the row to canon.pricing.",
+                    model, _pricing.ESTIMATED,
+                )
+            self.last_cost = 0.0
+        else:
+            self.last_cost = float(row["usd"])
+        self.last_cost_accuracy = _pricing.ESTIMATED
 
     def _select_model(self, duration_seconds: int) -> str:
         """Return clip model for short requests, pro model for full-length."""
@@ -95,7 +131,7 @@ class LyriaMusicBackend:
             config={"response_modalities": ["AUDIO", "TEXT"]},
         )
         audio_bytes = self._extract_audio(response)
-        self.last_cost = PRICING.get(model, 0.0)
+        self._note_cost(model)
         return audio_bytes
 
     async def generate_async(self, prompt: str, duration_seconds: int) -> bytes:
@@ -118,7 +154,7 @@ class LyriaMusicBackend:
                 contents=prompt,
                 config={"response_modalities": ["AUDIO", "TEXT"]},
             )
-            self.last_cost = PRICING.get(model, 0.0)
+            self._note_cost(model)
             return self._extract_audio(response)
         import asyncio
 
@@ -128,27 +164,43 @@ class LyriaMusicBackend:
         """Generate a music track and write it to ``filepath``.
 
         Creates parent directories as needed. Returns ``True`` on success,
-        ``False`` on any exception (network error, API error, etc.).
+        ``False`` on any exception (network error, API error, etc.) — and
+        then ``last_error`` says which, classified for retry.
         """
+        self.last_error = None
         try:
             data = self.generate(prompt, duration_seconds)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
 
     async def generate_and_save_async(
         self, prompt: str, filepath: str, duration_seconds: int
     ) -> bool:
         """Async variant of ``generate_and_save``."""
+        self.last_error = None
         try:
             data = await self.generate_async(prompt, duration_seconds)
             Path(filepath).parent.mkdir(parents=True, exist_ok=True)
             Path(filepath).write_bytes(data)
             return True
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — classified, never discarded
+            self._note_failure(e, filepath)
             return False
+
+    def _note_failure(self, exc: BaseException, filepath: str) -> None:
+        """Record the reason a save failed: ``last_error`` for the caller
+        that reads it, and one log line so the console is never silent."""
+        self.last_error = classify_exception(exc, provider=PROVIDER_ID)
+        logger.warning(
+            "Lyria music generation failed for %s: %s%s (%s)",
+            Path(filepath).name, self.last_error.kind,
+            f" {self.last_error.status}" if self.last_error.status else "",
+            "retryable" if self.last_error.retryable else "not retryable",
+        )
 
     @staticmethod
     def _extract_audio(response) -> bytes:

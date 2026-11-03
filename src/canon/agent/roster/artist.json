@@ -1,0 +1,16 @@
+{
+  "id": "artist",
+  "label": "Artist",
+  "actor": "artist",
+  "model_tier": "mid",
+  "tools": [
+    "describe_pack", "db_types", "db_schema", "db_row", "get_history", "get_versions",
+    "list_pack_files", "read_pack_file", "search_pack",
+    "view_asset", "asset_lineage",
+    "generate_asset", "animate_asset", "generate_music",
+    "renormalize_animation", "edit_animation", "replace_asset", "assign_asset",
+    "library_list", "library_cat", "library_import", "library_publish",
+    "pin", "unpin",
+    "estimate", "restore"
+  ]
+}

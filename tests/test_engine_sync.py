@@ -22,7 +22,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from examples.platformer_pack.godot_export import (  # noqa: E402
+from canon.packs.platformer.godot_export import (  # noqa: E402
     STAMP_REL,
     engine_status,
     engine_sync,
@@ -168,7 +168,7 @@ class TestExportStamps:
     def test_the_export_phase_stamps_what_it_wrote(self, tmp_path: Path):
         """A freshly generated pack must read as current — otherwise cradle
         would nag about staleness the moment a world is created."""
-        from examples.platformer_pack.godot_export import GodotExportPhase
+        from canon.packs.platformer.godot_export import GodotExportPhase
 
         pack = tmp_path / "out"
         pack.mkdir()

@@ -13,6 +13,7 @@ from canon.bible.models import BibleMetadata
 from canon.layout import MazeLayout
 from canon.layout.maze import generate_maze
 from canon.pipeline.rng import derive_rng
+from canon.pipeline.steplog import step
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,9 @@ class MazeLayoutPhase:
         path_template = self.path_template or self._default_path_template(ctx)
 
         config_seed = getattr(ctx.config, "seed", "")
-        for map_id, map_obj in ctx.bible.maps.items():
+        # Row P0-10 (§3.0-E/D): one item per room, through the one emitter.
+        for map_index, (map_id, map_obj) in enumerate(ctx.bible.maps.items(), start=1):
+            step(ctx, self.name, map_id, map_index, len(ctx.bible.maps))
             # Each map's rng is a pure function of (config seed, phase,
             # map_id): reproducible across processes (no hash() salt) and
             # independent of map iteration order — Phase 2 can regenerate a

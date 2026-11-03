@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from canon.llm.parsing import extract_json_object
 from canon.pipeline.retry import default_token_escalation, retry_with_feedback
+from canon.pipeline.steplog import step
 from canon.skeleton.core import SkeletonSpec, roll_skeleton
 
 logger = logging.getLogger(__name__)
@@ -168,9 +169,17 @@ class DatabasePhase:
         seen: dict[str, set] = {field: set() for field in spec.cross_room_dedup}
         entities: list[Any] = []
 
+        # Row P0-10 (master §3.0-E/§3.0-D): every LLM call this phase makes is
+        # announced through the ONE ``node_item`` emitter, which is also the
+        # A4.5 cancel boundary — so a dungeon create reports honest progress
+        # and stops at an item boundary for free. No-op without a StepLog.
         if spec.per_map:
+            total = len(ctx.bible.maps) * spec.count
+            done = 0
             for map_id, map_obj in ctx.bible.maps.items():
                 for i in range(spec.count):
+                    done += 1
+                    step(ctx, self.name, f"{map_id} · {spec.entity_type} {i + 1}", done, total)
                     entity = self._generate_one(
                         ctx,
                         map_id=map_id,
@@ -183,6 +192,7 @@ class DatabasePhase:
                         entities.append(entity)
         else:
             for i in range(spec.count):
+                step(ctx, self.name, f"{spec.entity_type} {i + 1}", i + 1, spec.count)
                 entity = self._generate_one(
                     ctx,
                     map_id=None,

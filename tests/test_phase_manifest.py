@@ -527,3 +527,72 @@ class TestScanAudioDir:
         data = _load(tmp_path / "manifest.json")
         assert data["music"] == {"theme": "somewhere/theme.mp3"}
         assert "battle" not in data["music"]
+
+
+# ---------------------------------------------------------------------------
+# The run clock — kept in the standalone file, stripped from the nested copy
+# ---------------------------------------------------------------------------
+
+
+class TestRunClockInTheStatsFiles:
+    """``generation_time_seconds`` used to serialize the dataclass default
+    (0.0 → "0m 00s") because nothing ever assigned it. A run now clocks
+    itself: the standalone ``generation_stats.json`` (outside the
+    byte-determinism contract) carries the real elapsed, and the copy nested
+    in ``manifest.json`` (emitted pack content) drops the two clock keys the
+    way it already drops the validation report's timestamp."""
+
+    def test_standalone_keeps_the_elapsed_and_the_nested_copy_drops_it(
+        self, tmp_path: Path
+    ) -> None:
+        from canon.pipeline.runner import run_pipeline
+        from canon.pipeline.stats import RUN_CLOCK_KEYS
+
+        ctx = _make_minimal_ctx(tmp_path)
+        run_pipeline([ManifestPhase()], ctx)
+
+        standalone = _load(tmp_path / "generation_stats.json")
+        assert standalone["generation_time_seconds"] > 0
+        assert isinstance(standalone["generation_time_human"], str)
+
+        nested = _load(tmp_path / "manifest.json")["generation_stats"]
+        for key in RUN_CLOCK_KEYS:
+            assert key not in nested, f"{key!r} leaked into the manifest copy"
+        # Everything else in the copy is the same snapshot.
+        assert nested["llm_calls"] == standalone["llm_calls"]
+        assert nested["total_cost_usd"] == standalone["total_cost_usd"]
+        # And at run_end the elapsed is assigned on the stats object itself.
+        assert ctx.stats.generation_time_seconds > 0
+
+    def test_same_seed_runs_emit_identical_manifests(self, tmp_path: Path) -> None:
+        """Two runs differ in elapsed; the emitted manifest must not."""
+        from canon.pipeline.runner import run_pipeline
+
+        for out in (tmp_path / "a", tmp_path / "b"):
+            out.mkdir()
+            run_pipeline([ManifestPhase()], _make_minimal_ctx(out))
+        a, b = tmp_path / "a", tmp_path / "b"
+        assert (a / "manifest.json").read_bytes() == (b / "manifest.json").read_bytes()
+        # The standalone file is where the (non-reproducible) clock lives.
+        assert "generation_time_seconds" in (a / "generation_stats.json").read_text()
+
+    def test_same_seed_stats_differ_only_in_the_clock(self, tmp_path: Path) -> None:
+        """The determinism bar exempts ``generation_stats.json`` for the run
+        clock and nothing wider: strip ``RUN_CLOCK_KEYS`` from two same-seed
+        snapshots and every other key must match byte-for-byte — call
+        counts, tokens, costs, ``by_phase`` — so a stray non-reproducible
+        field cannot hide behind the exemption."""
+        from canon.pipeline.runner import run_pipeline
+        from canon.pipeline.stats import RUN_CLOCK_KEYS
+
+        for out in (tmp_path / "a", tmp_path / "b"):
+            out.mkdir()
+            run_pipeline([ManifestPhase()], _make_minimal_ctx(out))
+        a = _load(tmp_path / "a" / "generation_stats.json")
+        b = _load(tmp_path / "b" / "generation_stats.json")
+        for key in RUN_CLOCK_KEYS:
+            assert key in a and key in b, f"{key!r} missing from the standalone file"
+        assert a["generation_time_seconds"] > 0 and b["generation_time_seconds"] > 0
+        stripped_a = {k: v for k, v in a.items() if k not in RUN_CLOCK_KEYS}
+        stripped_b = {k: v for k, v in b.items() if k not in RUN_CLOCK_KEYS}
+        assert stripped_a == stripped_b

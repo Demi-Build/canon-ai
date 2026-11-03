@@ -32,6 +32,7 @@ from typing import Any
 from canon.bible.models import BibleMetadata
 from canon.llm.request import LLMRequest
 from canon.pipeline.retry import retry_with_feedback
+from canon.pipeline.steplog import step
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,9 @@ class NarrativePhase:
         # 2. Per-map intros
         # ------------------------------------------------------------------
         map_intros: dict[str, str] = {}
-        for map_id, map_obj in ctx.bible.maps.items():
+        # Row P0-10 (§3.0-E/D): one item per room intro, through the one emitter.
+        for map_index, (map_id, map_obj) in enumerate(ctx.bible.maps.items(), start=1):
+            step(ctx, self.name, f"intro · {map_id}", map_index, len(ctx.bible.maps))
             intro_raw = self._generate_text(
                 ctx,
                 request_factory=lambda fb, mid=map_id: (

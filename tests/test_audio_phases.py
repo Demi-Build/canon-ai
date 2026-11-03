@@ -30,16 +30,17 @@ from canon.backends.testing import (  # noqa: E402
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
-from canon.pipeline.orchestrator import detect_edits, mark_stale  # noqa: E402
-from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.audio_phases import (  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.audio_phases import (  # noqa: E402
     SFX_EVENTS,
     build_music_producer,
     build_sfx_producer,
 )
-from examples.platformer_pack.dag import run_orchestrated  # noqa: E402
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.dag import run_orchestrated  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
+from canon.pipeline.orchestrator import detect_edits, mark_stale  # noqa: E402
+from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
+from tests.treediff import assert_trees_byte_identical  # noqa: E402
 
 SEED = "emberfall_001"
 STAGE = "ashen_depths"
@@ -100,12 +101,14 @@ class TestAudioPhase:
         assert manifest["audio"] == {STAGE: {"music": None, "sfx": {}}}
 
     def test_fake_audio_deterministic(self, tmp_path: Path) -> None:
+        # The emitted pack tree, compared through the repo's ONE byte-
+        # determinism helper: same file list, same bytes, minus the documented
+        # observability exemptions (generation_stats.json carries the run
+        # clock, so two same-seed runs never share it byte-for-byte).
         a, b = tmp_path / "a", tmp_path / "b"
         _run(a)
         _run(b)
-        files = sorted(p.relative_to(a) for p in a.rglob("*") if p.is_file())
-        for rel in files:
-            assert (a / rel).read_bytes() == (b / rel).read_bytes(), rel
+        assert_trees_byte_identical(a, b)
 
     def test_sfx_durations_clamped_into_backend_range(
         self, tmp_path: Path
@@ -113,7 +116,7 @@ class TestAudioPhase:
         # ElevenLabs rejects duration_seconds < 0.5 (the first paid run lost
         # every 'jump' SFX at 0.4s). The vocabulary keeps a below-floor
         # value, so the clamp is what must keep the request valid.
-        from examples.platformer_pack.audio_phases import (
+        from canon.packs.platformer.audio_phases import (
             SFX_MAX_SECONDS,
             SFX_MIN_SECONDS,
         )

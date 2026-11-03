@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from PIL import Image  # noqa: E402
 
-from examples.platformer_pack.tileset_art import (  # noqa: E402
+from canon.packs.platformer.tileset_art import (  # noqa: E402
     _trim_frame,
     pack_atlas,
     reconstitute_frame,

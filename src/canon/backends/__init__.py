@@ -17,6 +17,7 @@ Code that only needs to check availability can test for ``None``::
 """
 
 from canon.backends.base import (
+    ChatBackend,
     ImageBackend,
     ImageEditBackend,
     LLMBackend,
@@ -26,6 +27,7 @@ from canon.backends.base import (
 )
 from canon.backends.registry import BackendRegistry
 from canon.backends.testing import (
+    FakeChatBackend,
     FakeImageBackend,
     FakeLLMBackend,
     FakeMusicBackend,
@@ -62,8 +64,19 @@ try:
 except ImportError:
     AnthropicVLMBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from canon.backends.chat_anthropic import AnthropicChatBackend
+except ImportError:
+    AnthropicChatBackend = None  # type: ignore[assignment,misc]
+
+try:
+    from canon.backends.chat_openai import OpenAIChatBackend
+except ImportError:
+    OpenAIChatBackend = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "LLMBackend",
+    "ChatBackend",
     "ImageBackend",
     "ImageEditBackend",
     "MusicBackend",
@@ -71,6 +84,7 @@ __all__ = [
     "VLMBackend",
     "BackendRegistry",
     "FakeLLMBackend",
+    "FakeChatBackend",
     "FakeImageBackend",
     "FakeMusicBackend",
     "FakeSFXBackend",
@@ -80,4 +94,6 @@ __all__ = [
     "LyriaMusicBackend",
     "ElevenLabsSFXBackend",
     "AnthropicVLMBackend",
+    "AnthropicChatBackend",
+    "OpenAIChatBackend",
 ]

@@ -1,4 +1,4 @@
-"""Tests for the platformer vertical slice (examples/platformer_pack).
+"""Tests for the platformer vertical slice (src/canon/packs/platformer).
 
 Covers the deterministic core (DSL/stamp/validators/colors), the schema
 files loading through canon.skeleton.loader, and the end-to-end fake-backend
@@ -23,25 +23,25 @@ from canon.bible.models import Bible  # noqa: E402
 from canon.bible.platformer import TileType  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
-from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from canon.skeleton.loader import load_skeleton_spec  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.dsl import DslError, parse_dsl, stamp  # noqa: E402
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT  # noqa: E402
-from examples.platformer_pack.phases import SCHEMAS_DIR, placeholder_color  # noqa: E402
-from examples.platformer_pack.tiles import TileRegistry, load_tiles  # noqa: E402
-from examples.platformer_pack.validate import (  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.dsl import DslError, parse_dsl, stamp  # noqa: E402
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT  # noqa: E402
+from canon.packs.platformer.phases import SCHEMAS_DIR, placeholder_color  # noqa: E402
+from canon.packs.platformer.run_slice import (  # noqa: E402
+    _FAKE_LAYOUTS,
+    _REFERENCE_DIMS,
+    make_fake_responder,
+)
+from canon.packs.platformer.tiles import TileRegistry, load_tiles  # noqa: E402
+from canon.packs.platformer.validate import (  # noqa: E402
     check_level,
     check_placements,
     standable_cells,
     volume_cells,
 )
-from examples.platformer_pack.variants import load_variants  # noqa: E402
-from examples.run_platformer_slice import (  # noqa: E402
-    _FAKE_LAYOUTS,
-    _REFERENCE_DIMS,
-    make_fake_responder,
-)
+from canon.packs.platformer.variants import load_variants  # noqa: E402
+from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
+from canon.skeleton.loader import load_skeleton_spec  # noqa: E402
 from tests.treediff import assert_trees_byte_identical, tree_files  # noqa: E402
 
 W, H = 48, 16
@@ -161,7 +161,7 @@ class TestValidators:
         on diagonals. These values still drive the located-fix message so it
         teaches the rising-costs-range constraint. Values from the shared
         ballistic model."""
-        from examples.platformer_pack.movement import max_dx_for_rise
+        from canon.packs.platformer.movement import max_dx_for_rise
 
         assert max_dx_for_rise(DEFAULT_MOVEMENT, 3) == 3  # full rise: close
         assert max_dx_for_rise(DEFAULT_MOVEMENT, 2) == 4
@@ -196,7 +196,7 @@ class TestValidators:
         (airtime at run_speed, COMFORT-shaved) — not a hardcoded literal.
         Default physics keeps the familiar 6; lighter gravity hangs the
         player longer and widens it, heavier gravity shrinks it."""
-        from examples.platformer_pack.movement import (
+        from canon.packs.platformer.movement import (
             PlayerMovementSpec,
             run_jump_width,
         )
@@ -222,7 +222,7 @@ class TestValidators:
         m = DEFAULT_MOVEMENT
 
         def simulate(dx_cells: int, rise: int, runway_cells: float) -> bool:
-            # Mirrors examples/platformer_play.py's momentum step: vx
+            # Mirrors canon/packs/platformer/play.py's momentum step: vx
             # accelerates on the GROUND toward run_speed across the runway,
             # the jump PRESERVES vx, air control is weak (air_accel), then
             # gravity + the landing check, same constants and frame order.
@@ -256,7 +256,7 @@ class TestValidators:
                 py = new_y
             return False
 
-        from examples.platformer_pack.movement import max_dx_for_rise
+        from canon.packs.platformer.movement import max_dx_for_rise
 
         # Every rise the vocabulary allows, at its maximum promised dx,
         # must land with the documented run-up available.
@@ -347,7 +347,7 @@ class TestValidators:
         so the TOOL appends the platforms — no LLM round-trip. Under run-up
         momentum the tool must build CLIMBABLE (offset) steps, since a jump
         can't go straight up onto a platform in its own column."""
-        from examples.platformer_pack.validate import auto_bridge
+        from canon.packs.platformer.validate import auto_bridge
 
         cases = (
             # The l3 real-run loop, now beyond a running jump's reach: a
@@ -377,7 +377,7 @@ class TestValidators:
         flight band; simulation is more accurate). Hazards are flown over."""
         import numpy as np
 
-        from examples.platformer_pack.validate import can_reach
+        from canon.packs.platformer.validate import can_reach
 
         m = DEFAULT_MOVEMENT
         # A full-height cliff at col 3 (floor at row 8): impassable.
@@ -412,7 +412,7 @@ class TestValidators:
 
         import numpy as np
 
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.validate import (
             _locate_break,
             _suggest_bridge,
             can_reach,
@@ -472,7 +472,7 @@ class TestValidators:
         strictness is aimed at capped columns, not at vertical ascents."""
         import numpy as np
 
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.validate import (
             can_reach,
             check_level,
             reachable_cells,
@@ -510,7 +510,7 @@ class TestValidators:
         cap, not the mount, is what the simulation rejects."""
         import numpy as np
 
-        from examples.platformer_pack.validate import can_reach, reachable_cells
+        from canon.packs.platformer.validate import can_reach, reachable_cells
 
         m = DEFAULT_MOVEMENT
         dec = {".": 0, "F": 1}
@@ -543,7 +543,7 @@ class TestValidators:
         normal (3-cell) gap needs no run-up at all."""
         import numpy as np
 
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         m = DEFAULT_MOVEMENT
 
@@ -583,13 +583,13 @@ class TestValidators:
         """Ground/platform/wall within a few luminance points of each
         other (the second real palette) are indistinguishable in play —
         pairwise spacing is arithmetic, so a tool spreads them."""
-        from examples.platformer_pack.style import (
+        from canon.packs.platformer.style import (
             MIN_ROLE_SEPARATION,
             _luminance,
             enforce_contrast,
             separate_structural_roles,
         )
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         palette = {  # the real run's near-identical browns
             "background": "#1a1208", "ground": "#4b3b2b",
@@ -628,7 +628,7 @@ class TestValidators:
         is arithmetic, same contract as checkpoint snapping. Both
         observed classes snap: no-floor-under-spawn (raised left edge)
         and standing-cell-covered (terrain stamped over the spawn)."""
-        from examples.platformer_pack.validate import snap_spawn
+        from canon.packs.platformer.validate import snap_spawn
 
         # No ground floor at column 2 (the real l3 attempt-1 message).
         text, moves = snap_spawn(
@@ -655,7 +655,7 @@ class TestValidators:
         second real run's l3 burned all three attempts on them while the
         validator recited the valid columns. Both observed classes snap:
         no-floor-under-it and standing-cell-occupied (spike)."""
-        from examples.platformer_pack.validate import snap_checkpoints
+        from canon.packs.platformer.validate import snap_checkpoints
 
         # Gap under column 22 (the real l1 attempt-1 message) → snaps out.
         text, moves = snap_checkpoints(
@@ -694,8 +694,8 @@ class TestValidators:
         copies of the same dead platform)."""
         import numpy as np
 
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import _suggest_bridge
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import _suggest_bridge
 
         # A sealed box: every cell around the break is solid — nothing fits.
         solid = next(t.id for t in DEFAULT_TILES.tiles if t.name == "floor")
@@ -705,7 +705,7 @@ class TestValidators:
     def test_auto_bridge_never_touches_design_problems(self) -> None:
         """A covered spawn has many valid fixes — that's the agent's
         decision. The tool must return it untouched for LLM feedback."""
-        from examples.platformer_pack.validate import auto_bridge
+        from canon.packs.platformer.validate import auto_bridge
 
         covered_spawn = "floor(0,47)\nplatform(0,13,6)\nspawn(2)\nexit(45)"
         repaired, added, problems = auto_bridge(
@@ -755,7 +755,7 @@ class TestValidators:
         # exit is reachable from spawn across the once-uncrossable gap.
         # (check_level's containment rule needs the free_volume set, which the
         # persisted grid drops; reachability is the property we assert here.)
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         with np.load(tmp_path / "run" / ctx.bible.levels["l1"].collision) as d:
             grid = d["collision"]
@@ -1144,14 +1144,14 @@ class TestValidators:
         loop BEFORE the stitcher stripped it — an unstandable stray failed
         the whole level for a marker about to be discarded anyway. Strays are
         now stripped before the bridge/validate loop."""
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             _SectionState,
             _stitch_and_repair,
         )
-        from examples.platformer_pack.movement import DEFAULT_MOVEMENT
-        from examples.platformer_pack.rules import DEFAULT_RULES
-        from examples.platformer_pack.sections import PlannedSection
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.movement import DEFAULT_MOVEMENT
+        from canon.packs.platformer.rules import DEFAULT_RULES
+        from canon.packs.platformer.sections import PlannedSection
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         width, height = 40, 16
         plan = [
@@ -1234,7 +1234,7 @@ class TestValidators:
         stitched (parsed from the combined section DSL)."""
         import re as _re
 
-        from examples.platformer_pack.level import (
+        from canon.packs.platformer.level import (
             level_section_plan,
             section_encounter_summary,
         )
@@ -1348,8 +1348,8 @@ class TestCappedOnewayRepair:
         return np.array([[m[c] for c in row] for row in rows], dtype=np.int8)
 
     def test_pattern_b_carves_the_cap_and_keeps_the_platform(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import (
             repair_capped_oneways_grid,
         )
 
@@ -1366,8 +1366,8 @@ class TestCappedOnewayRepair:
         assert notes and "carved the cap" in notes[0]
 
     def test_water_on_cap_deletes_the_dead_platform(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import (
             repair_capped_oneways_grid,
         )
 
@@ -1386,8 +1386,8 @@ class TestCappedOnewayRepair:
         assert notes and "spill water" in notes[0]
 
     def test_pattern_a_flush_one_way_is_left_alone(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import (
             repair_capped_oneways_grid,
         )
 
@@ -1403,8 +1403,8 @@ class TestCappedOnewayRepair:
         assert (grid == before).all()
 
     def test_solid_corridor_never_touched(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import (
             repair_capped_oneways_grid,
         )
 
@@ -1419,8 +1419,8 @@ class TestCappedOnewayRepair:
         assert (grid == before).all()
 
     def test_usable_one_way_untouched(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import (
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import (
             repair_capped_oneways_grid,
         )
 
@@ -1455,11 +1455,11 @@ class TestDatabasesDriveReview:
         palette hues — a lava game reserves orange, not hardcoded blue."""
         import colorsys
 
-        from examples.platformer_pack.phases import (
+        from canon.packs.platformer.phases import (
             placeholder_color,
             reserved_hue_bands,
         )
-        from examples.platformer_pack.tiles import load_tiles
+        from canon.packs.platformer.tiles import load_tiles
 
         lava_tiles = load_tiles(
             Path(__file__).parent.parent / "examples/lava_world/tile_types.json"
@@ -1479,8 +1479,8 @@ class TestDatabasesDriveReview:
         """RB1: with stage-background luminances supplied, every
         placeholder clears ACTOR_BG_MIN_LUMA via a hue-preserving shift;
         without them the function is byte-identical to before."""
-        from examples.platformer_pack import color as cm
-        from examples.platformer_pack.phases import (
+        from canon.packs.platformer import color as cm
+        from canon.packs.platformer.phases import (
             ACTOR_BG_MIN_LUMA,
             placeholder_color,
         )
@@ -1509,8 +1509,8 @@ class TestDatabasesDriveReview:
         """RB1 e2e: on the canned run, every enemy AND item placeholder
         sits >= ACTOR_BG_MIN_LUMA from every stage background — the
         dark-navy-beetle-on-near-black class is structurally gone."""
-        from examples.platformer_pack import color as cm
-        from examples.platformer_pack.phases import ACTOR_BG_MIN_LUMA
+        from canon.packs.platformer import color as cm
+        from canon.packs.platformer.phases import ACTOR_BG_MIN_LUMA
 
         run = tmp_path / "run"
         ctx = _run_slice(run)
@@ -1671,7 +1671,7 @@ class TestEndToEnd:
                     continue
                 if placement.overrides.get("variant") == "emberborn":
                     # Hazard-immune: posted ON a footed hazard cell.
-                    from examples.platformer_pack.validate import (
+                    from canon.packs.platformer.validate import (
                         hazard_stand_cells,
                     )
                     assert tuple(placement.pos) in hazard_stand_cells(
@@ -1995,7 +1995,7 @@ class TestEndToEnd:
     def test_water_reachability_model(self) -> None:
         """A pool wider than jump_width is crossable by swimming; the same
         span as a dry gap is not."""
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         contained = stamp(
             "floor(0,47)\nwall(19,12,13)\nwall(31,12,13)\n"
@@ -2013,7 +2013,7 @@ class TestEndToEnd:
     def test_water_containment_rule(self) -> None:
         """GameRules decides: open-sided pools fail 'contained' with a
         locate-and-instruct message, pass 'free' (waterfall games)."""
-        from examples.platformer_pack.rules import GameRules
+        from canon.packs.platformer.rules import GameRules
 
         open_pool = stamp(
             "floor(0,47)\nwater(20,30,12)\nspawn(2)\nexit(45)", W, H
@@ -2035,7 +2035,7 @@ class TestEndToEnd:
         validated (hardened enforcement)."""
         import pydantic
 
-        from examples.platformer_pack.rules import (
+        from canon.packs.platformer.rules import (
             DEFAULT_RULES_PATH,
             GameRules,
             load_rules,
@@ -2061,7 +2061,7 @@ class TestEndToEnd:
     def test_manifest_carries_composed_rules(self, tmp_path: Path) -> None:
         """The manifest reflects the rules the run actually used —
         including inert extras — not the pack defaults."""
-        from examples.platformer_pack.rules import GameRules
+        from canon.packs.platformer.rules import GameRules
 
         run = tmp_path / "run"
         custom = GameRules(water_containment="free", lava_swimmable=True)
@@ -2078,7 +2078,7 @@ class TestEndToEnd:
         assert manifest["rules"]["lava_swimmable"] is True
 
     def test_enemy_water_policy_rules(self) -> None:
-        from examples.platformer_pack.rules import GameRules
+        from canon.packs.platformer.rules import GameRules
 
         pool = stamp(
             "floor(0,47)\nwall(19,12,13)\nwall(31,12,13)\n"
@@ -2238,7 +2238,7 @@ class TestTileRegistry:
     def test_default_registry_mirrors_tiletype(self) -> None:
         """The framework-default enum and the pack's registry file must
         agree — the enum exists so framework code has stable names."""
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         assert {t.name.upper(): t.id for t in DEFAULT_TILES.tiles} == {
             m.name: int(m) for m in TileType
@@ -2307,7 +2307,7 @@ class TestBreakableFloors:
     over a bottomless pit that a consumer's fuse removes in play."""
 
     def test_breakable_stamps_solid_over_a_cleared_pit(self) -> None:
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         bid = DEFAULT_TILES.by_name["breakable"].id
         assert DEFAULT_TILES.by_name["breakable"].category == "solid"
@@ -2323,7 +2323,7 @@ class TestBreakableFloors:
     def test_breakable_is_a_reachable_foothold(self) -> None:
         # A solid breakable counts as footing, so a level bridged only by a
         # breakable stretch is reachable (v1 ignores the break timing).
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         res = stamp(
             "floor(0,9)\nbreakable(10,12)\nfloor(13,23)\nspawn(2)\nexit(22)",
@@ -2336,7 +2336,7 @@ class TestBreakableFloors:
 
     def test_breakable_rejected_without_registry_tile(self) -> None:
         # A game whose registry has no breakable tile rejects the op loudly.
-        from examples.platformer_pack.tiles import load_tiles
+        from canon.packs.platformer.tiles import load_tiles
 
         no_break = load_tiles()
         no_break.tiles = [t for t in no_break.tiles if t.name != "breakable"]
@@ -2523,7 +2523,7 @@ class TestGenericOps:
         into a DISTINCT op backbone, plus intensity pacing + water level — so
         a gauntlet, a cave, and a runway read as different sections to the
         Layout Agent (same legal vocabulary throughout)."""
-        from examples.platformer_pack.sections import DEFAULT_VOCAB
+        from canon.packs.platformer.sections import DEFAULT_VOCAB
 
         p = PlatformerPrompts()
 
@@ -2551,7 +2551,7 @@ class TestGenericOps:
         """Chunk E: the section vocabulary offers water_cloud + reward, teaches
         floating swim-up clouds and secret alcoves, and a cave's feature_bias
         translates the new families (cloud -> water_cloud, secret -> reward)."""
-        from examples.platformer_pack.sections import DEFAULT_VOCAB
+        from canon.packs.platformer.sections import DEFAULT_VOCAB
 
         a = DEFAULT_VOCAB["cave"]
         msg = PlatformerPrompts().section_layout(
@@ -2626,7 +2626,7 @@ class TestGenericOps:
         number the prompt never stated in that vocabulary. The physics block
         now names it foothold-to-foothold, tables max_dx_for_rise per rise,
         and derives the running-jump figure from the movement object."""
-        from examples.platformer_pack.movement import run_jump_width
+        from canon.packs.platformer.movement import run_jump_width
 
         m = PlatformerPrompts().section_layout(
             "l1", "b", "gauntlet", "f", {}, 1, 3, 24, H, DEFAULT_MOVEMENT,
@@ -2648,7 +2648,7 @@ class TestGenericOps:
         widens the advertised running jump and lifts the full-rise reach to
         the width cap — so no '~6' literal survives to lie about this
         level's own physics."""
-        from examples.platformer_pack.movement import (
+        from canon.packs.platformer.movement import (
             PlayerMovementSpec,
             run_jump_width,
         )
@@ -2760,8 +2760,8 @@ class TestSecretAlcoves:
         """A reward is a non-checkpoint trigger: snap_checkpoints_grid leaves
         it untouched, and composite offsets it by the section origin — so it
         rides through the stitcher into the whole level."""
-        from examples.platformer_pack.sections import composite
-        from examples.platformer_pack.validate import snap_checkpoints_grid
+        from canon.packs.platformer.sections import composite
+        from canon.packs.platformer.validate import snap_checkpoints_grid
 
         sec = stamp(
             "floor(0,23)\nwall(10,10,13)\ncarve(10,11,10,11)\nreward(10,11)\n"
@@ -2779,7 +2779,7 @@ class TestSecretAlcoves:
         """The $0 fake exercises the alcove path: a cave section (with the
         reward + cloud ops advertised) stamps clean and tucks a reward into a
         niche off the floor, plus swimmable cloud water."""
-        from examples.run_platformer_slice import _fake_section
+        from canon.packs.platformer.run_slice import _fake_section
 
         dsl = _fake_section(
             24, 16, "cave", 1, 3, "water", "spike",
@@ -2791,7 +2791,7 @@ class TestSecretAlcoves:
         assert (res.grid == int(TileType.WATER)).any()  # the cloud
 
     def test_fake_climb_section_floats_a_water_cloud(self) -> None:
-        from examples.run_platformer_slice import _fake_section
+        from canon.packs.platformer.run_slice import _fake_section
 
         dsl = _fake_section(
             18, 40, "climb", 0, 2, "water", "spike", has_water_cloud=True,
@@ -3012,7 +3012,7 @@ class TestSteppedSlopes:
     def test_water_wall_is_climbable_by_reachability(self) -> None:
         """Swim up the wall, leap out at the top — the existing volume
         reachability rules make water walls vertical paths for free."""
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         # A high ledge reachable ONLY through the adjacent water wall.
         text = (
@@ -3055,7 +3055,7 @@ class TestSteppedSlopes:
         water_block, but its four corners are trimmed to a rounded silhouette
         (only when big enough — the swim-up centre column always survives),
         and it is containment-exempt."""
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         # 5 wide x 3 tall -> corners trimmed, centre full.
         result = stamp(
@@ -3105,7 +3105,7 @@ class TestSteppedSlopes:
         whose neighbour is submerged). The fake placement picker must offer only
         2-wide-capable FLAT-TOP anchors, or a 2-wide surface swimmer gets
         dropped by the footprint check (masked on emberfall_001, hit on others)."""
-        from examples.run_platformer_slice import _fake_spots
+        from canon.packs.platformer.run_slice import _fake_spots
 
         # A trimmed 5x3 cloud: top row cols 3-5, middle 2-6, bottom 3-5.
         vol = "water: y=8: x 3-5; y=9: x 2-6; y=10: x 3-5"
@@ -3185,7 +3185,7 @@ class TestVariantCaps:
         assert "champion" in problems[0] and "elite" in problems[0]
 
     def test_caps_from_game_rules_enforced(self) -> None:
-        from examples.platformer_pack.rules import GameRules
+        from canon.packs.platformer.rules import GameRules
 
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
         accepted, problems, _ = check_placements(
@@ -3202,7 +3202,7 @@ class TestVariantCaps:
         assert problems and "at most 1 'elite'" in problems[0]
 
     def test_uncapped_variant_rides_free(self) -> None:
-        from examples.platformer_pack.rules import GameRules
+        from canon.packs.platformer.rules import GameRules
 
         result = stamp(_FAKE_LAYOUTS["l1"], W, H)
         accepted, problems, _ = check_placements(
@@ -3239,8 +3239,8 @@ class TestStyleGuide:
     seam — no consumer changes."""
 
     def test_palette_validators_locate_and_instruct(self) -> None:
-        from examples.platformer_pack.style import check_palette
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.style import check_palette
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         good = {
             "background": "#2b2331", "ground": "#6e5a4e",
@@ -3311,13 +3311,13 @@ class TestStyleGuide:
         dark color is shifted to the readability bar (hue kept); passing
         colors are untouched. This killed a real 3-retry loop of the
         model nudging dark water against a dark dusk background."""
-        from examples.platformer_pack.style import (
+        from canon.packs.platformer.style import (
             MIN_CONTRAST,
             _luminance,
             check_palette,
             enforce_contrast,
         )
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         # The exact palette shape the real model looped on.
         palette = {
@@ -3362,8 +3362,8 @@ class TestStyleGuide:
         assert len(style_calls) == 1  # accepted first try — tool repaired
         assert ctx.artifacts.get("slice_warnings", []) == []
         manifest = json.loads((tmp_path / "run/manifest.json").read_text())
-        from examples.platformer_pack.style import check_palette
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.style import check_palette
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         assert check_palette(manifest["palettes"]["ashen_depths"], DEFAULT_TILES) == []
         assert manifest["palettes"]["ashen_depths"]["water"] != "#1a4a6b"  # repaired
@@ -3395,13 +3395,13 @@ class TestStyleGuide:
         the safe-liquid band — luminance preserved, other roles
         byte-identical, idempotent. (The paid fire biome shipped water
         6 degrees from `danger`.)"""
-        from examples.platformer_pack import color as cm
-        from examples.platformer_pack.style import (
+        from canon.packs.platformer import color as cm
+        from canon.packs.platformer.style import (
             MIN_VOLUME_HAZARD_HUE_SEP,
             _luminance,
             separate_safe_volumes_from_hazards,
         )
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         palette = {
             "background": "#181820", "ground": "#776459",
@@ -3435,10 +3435,10 @@ class TestStyleGuide:
     def test_safe_volume_clamp_leaves_distant_water_alone(self) -> None:
         """The canned blue water (~211 degrees, >=128 from every hazard)
         must pass untouched — the clamp is a repair, not a restyle."""
-        from examples.platformer_pack.style import (
+        from canon.packs.platformer.style import (
             separate_safe_volumes_from_hazards,
         )
-        from examples.platformer_pack.tiles import DEFAULT_TILES
+        from canon.packs.platformer.tiles import DEFAULT_TILES
 
         palette = {
             "background": "#181820", "ground": "#776459",
@@ -3455,10 +3455,10 @@ class TestStyleGuide:
     def test_damaging_volume_keeps_warm_hue(self) -> None:
         """Lava (damage_per_second on the volume tile) is deliberately
         exempt — warm hue = harmful is CORRECT for a damaging liquid."""
-        from examples.platformer_pack.style import (
+        from canon.packs.platformer.style import (
             separate_safe_volumes_from_hazards,
         )
-        from examples.platformer_pack.tiles import load_tiles
+        from canon.packs.platformer.tiles import load_tiles
 
         lava_tiles = load_tiles(
             Path(__file__).parent.parent / "examples/lava_world/tile_types.json"
@@ -3476,7 +3476,7 @@ class TestLavaWorld:
     LAVA_DIR = Path(__file__).parent.parent / "examples" / "lava_world"
 
     def _run(self, output_dir: Path) -> PipelineContext:
-        from examples.platformer_pack.rules import load_rules
+        from canon.packs.platformer.rules import load_rules
 
         return _run_slice(
             output_dir,
@@ -3598,7 +3598,7 @@ class TestVerticalSections:
     def test_vertical_climb_generates_reachable_and_framed(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.validate import reachable_cells
 
         # A 3-stage world: stage-1 levels stay horizontal (intros), later
         # stages roll some vertical climbs.
@@ -3643,7 +3643,7 @@ class TestPerLevelView:
         assert level_doc["view_cells"] == 30
 
     def test_view_presets_clamp_and_default(self) -> None:
-        from examples.platformer_pack.graphics import GraphicsSpec
+        from canon.packs.platformer.graphics import GraphicsSpec
 
         gfx = GraphicsSpec(view_presets={"vista": 300, "intimate": 2})
         assert gfx.view_for("vista") == 60
@@ -3665,7 +3665,7 @@ class TestAnimFramePick:
     }
 
     def test_first_present_candidate_wins(self) -> None:
-        from examples.platformer_play import pick_anim_frame
+        from canon.packs.platformer.play import pick_anim_frame
 
         # player airborne: jump leads the list and exists
         assert pick_anim_frame(["jump", "walk", "idle"], 0.0, self.S)[0] == "jump"
@@ -3674,7 +3674,7 @@ class TestAnimFramePick:
         assert pick_anim_frame(["idle", "walk"], 0.0, self.S)[0] == "idle"
 
     def test_frame_index_advances_and_wraps(self) -> None:
-        from examples.platformer_play import pick_anim_frame
+        from canon.packs.platformer.play import pick_anim_frame
 
         # walk: uniform 0.10 x 4 looping → idx = int(t/0.10) % 4
         assert pick_anim_frame(["walk"], 0.00, self.S)[1] == 0
@@ -3683,21 +3683,21 @@ class TestAnimFramePick:
         assert pick_anim_frame(["walk"], 0.45, self.S)[1] == 0  # wraps
 
     def test_falls_through_when_no_candidate_exists(self) -> None:
-        from examples.platformer_play import pick_anim_frame
+        from canon.packs.platformer.play import pick_anim_frame
 
         only_idle = {"idle": {"durs": [0.2] * 3, "loop": "loop"}}
         # candidates absent → first state in the dict
         assert pick_anim_frame(["jump", "walk"], 0.0, only_idle)[0] == "idle"
 
     def test_deterministic(self) -> None:
-        from examples.platformer_play import pick_anim_frame
+        from canon.packs.platformer.play import pick_anim_frame
 
         a = pick_anim_frame(["walk"], 0.37, self.S)
         b = pick_anim_frame(["walk"], 0.37, self.S)
         assert a == b
 
     def test_once_clamps_at_the_last_frame(self) -> None:
-        from examples.platformer_play import _anim_index
+        from canon.packs.platformer.play import _anim_index
 
         durs = [0.1, 0.1, 0.1]
         assert _anim_index(0.05, durs, "once") == 0
@@ -3707,7 +3707,7 @@ class TestAnimFramePick:
         assert _anim_index(9.99, durs, "once") == 2
 
     def test_ping_pong_walks_out_and_back(self) -> None:
-        from examples.platformer_play import _anim_index
+        from canon.packs.platformer.play import _anim_index
 
         durs = [0.1] * 4  # cycle: 0 1 2 3 2 1, then wraps to 0
         seq = [_anim_index(0.05 + 0.1 * k, durs, "ping_pong") for k in range(7)]
@@ -3716,7 +3716,7 @@ class TestAnimFramePick:
         assert _anim_index(0.5, [0.1], "ping_pong") == 0
 
     def test_unequal_durations_walk_cumulatively(self) -> None:
-        from examples.platformer_play import _anim_index
+        from canon.packs.platformer.play import _anim_index
 
         durs = [0.05, 0.2, 0.05]  # sum 0.3
         assert _anim_index(0.04, durs, "loop") == 0
@@ -3728,7 +3728,7 @@ class TestAnimFramePick:
     def test_old_shape_back_compat_scalar_duration(self) -> None:
         """frames.json entries WITHOUT the new keys keep today's behavior:
         the scalar duration_ms fans out uniformly and the state loops."""
-        from examples.platformer_play import _anim_timing
+        from canon.packs.platformer.play import _anim_timing
 
         assert _anim_timing({"duration_ms": 120}, 4) == ([0.12] * 4, "loop")
         # keyless entry → the 120ms default, still looping
@@ -3748,7 +3748,7 @@ class TestAnimFramePick:
         )
 
     def test_unknown_loop_mode_wraps_like_loop(self) -> None:
-        from examples.platformer_play import _anim_index
+        from canon.packs.platformer.play import _anim_index
 
         durs = [0.1] * 4
         for t in (0.05, 0.15, 0.45, 1.05):
@@ -3758,7 +3758,7 @@ class TestAnimFramePick:
         """The consumers' latch zeroes the clock on a picked-state change;
         index at t=0 must be frame 0 in every loop mode (both surfaces
         reset then re-index the same tick)."""
-        from examples.platformer_play import _anim_index
+        from canon.packs.platformer.play import _anim_index
 
         for mode in ("loop", "once", "ping_pong"):
             assert _anim_index(0.0, [0.1, 0.2, 0.1], mode) == 0
@@ -3983,7 +3983,7 @@ class TestAnimPreviewTargets:
     target grammar is the only part testable without a display."""
 
     def test_named_targets_resolve_to_base_sprites(self, tmp_path) -> None:
-        from examples.platformer_play import _anim_preview_targets
+        from canon.packs.platformer.play import _anim_preview_targets
 
         assert _anim_preview_targets(tmp_path, "player") == [
             ("player", "sprite/player/base.png")
@@ -3996,7 +3996,7 @@ class TestAnimPreviewTargets:
         ]
 
     def test_all_walks_the_player_then_every_enemy(self, tmp_path) -> None:
-        from examples.platformer_play import _anim_preview_targets
+        from canon.packs.platformer.play import _anim_preview_targets
 
         for eid in ("wisp", "aphid"):
             (tmp_path / "sprite" / "enemy" / eid).mkdir(parents=True)
@@ -4007,14 +4007,14 @@ class TestAnimPreviewTargets:
         self, tmp_path
     ) -> None:
         # A static-only pack must not explode — the viewer says "no sprite".
-        from examples.platformer_play import _anim_preview_targets
+        from canon.packs.platformer.play import _anim_preview_targets
 
         assert _anim_preview_targets(tmp_path, "all") == [
             ("player", "sprite/player/base.png")
         ]
 
     def test_unknown_target_fails_loudly(self, tmp_path) -> None:
-        from examples.platformer_play import _anim_preview_targets
+        from canon.packs.platformer.play import _anim_preview_targets
 
         with pytest.raises(SystemExit, match="unknown target"):
             _anim_preview_targets(tmp_path, "bogus:thing")

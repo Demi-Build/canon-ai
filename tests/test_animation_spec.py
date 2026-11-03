@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from examples.platformer_pack.animation_spec import (  # noqa: E402
+from canon.packs.platformer.animation_spec import (  # noqa: E402
     DEFAULT_SETS,
     DEFAULT_STATES,
     ENEMY_SIGNALS,
@@ -28,11 +28,10 @@ from examples.platformer_pack.animation_spec import (  # noqa: E402
     states_for,
     validate_spec,
 )
-from examples.platformer_play import (  # noqa: E402
+from canon.packs.platformer.play import (  # noqa: E402
     enemy_anim_candidates,
     player_anim_candidates,
 )
-
 
 # --- The ORACLE ---------------------------------------------------------------
 # The hand-written ladders exactly as they read before they became data. The

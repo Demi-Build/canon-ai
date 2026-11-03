@@ -25,11 +25,15 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0",
-    "tqdm>=4.0",
 ]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.39"]
+# Phase 1 A8: openai + kimi (Moonshot OpenAI-compatible) chat backends. The
+# floor is the first SDK carrying every kwarg chat_openai sends
+# (reasoning_effort arrived in 1.58; max_completion_tokens, stream_options,
+# delta.refusal and prompt_tokens_details.cached_tokens are older).
+openai = ["openai>=1.58"]
 huggingface = [
     "torch",
     "transformers",
@@ -39,7 +43,11 @@ huggingface = [
 images = ["fal-client>=0.5", "Pillow"]
 images-local = ["diffusers>=0.30", "torch>=2.0", "Pillow"]
 audio = ["google-genai>=0.5", "elevenlabs>=1.0"]
-cli = ["typer[all]>=0.12"]
+cli = ["typer>=0.12"]  # typer bundles rich + shellingham since 0.12; the old [all] extra no longer exists
+# Phase 1 A2: the agent service sidecar (`python -m canon.agent.service` /
+# `canon agent serve`) — canon's first server dependency, isolated here (I4)
+# so the base install and every generation verb stay server-free.
+agent = ["fastapi>=0.115", "uvicorn>=0.30"]
 # Platformer generation path: dense masks (.npz) + tilesheet/render PNGs.
 platformer = ["numpy>=1.26", "Pillow>=10.0"]
 # Throwaway pygame review harness only — generation never depends on it.
@@ -63,6 +71,24 @@ Issues = "https://github.com/Demi-Build/canon-ai/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Pack DATA ships with the pack code (row P0-4 / W3.2): schemas, cost model,
+# rule overrides, graphics lanes, the Godot template, the dungeon pack's
+# canon.toml. An installed wheel must be self-sufficient — no checkout.
+[tool.setuptools.package-data]
+# Phase 1 A4.5: the roster (specialist json + role prompts + core law) is
+# data the installed wheel must carry — adding a specialist is adding files.
+"canon.agent" = ["roster/*.json", "roster/*.md"]
+"canon.packs.platformer" = [
+    "*.json",
+    "*.md",
+    "schemas/*.json",
+    "graphics_specs/*.json",
+    "godot_template/**",
+]
+# tiles.json: the room tile registry (P0 paper P.6.3; row P0-5).
+# cost_model.json: the dungeon estimator's calibrated counts/tokens (row P0-7).
+"canon.packs.dungeon" = ["canon.toml", "tiles.json", "cost_model.json"]
 
 [tool.ruff]
 target-version = "py311"

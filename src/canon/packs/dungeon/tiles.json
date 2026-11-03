@@ -1,0 +1,29 @@
+{
+  "_comment": "The dungeon tile registry — template DATA (P0 paper P.6.3; P.9 G1/G2), the sibling of the platformer's tile_types.json with the same row shape plus color_role. Only cell VALUES that are tile types live here: -1 (event) and >= 2000 (item id) are placements, never tiles, and -2 (door) is runtime-only and never on disk. tile_px is the engine's GRID_SIZE (P.6.2 row 17). palette.background names a cradle theme token (the open cell takes the app surface); wall_by_environment is the engine's WALL_COLORS table verbatim — an environment it does not name takes wall_fallback, exactly as the engine does (P.9 S8). markers are the block-mode placeholder colours for placements that carry no environment tint of their own.",
+  "tiles": [
+    {"id": 0, "name": "empty", "category": "empty", "color_role": "background"},
+    {"id": 1, "name": "wall", "category": "solid", "color_role": "wall"}
+  ],
+  "tile_px": 20,
+  "palette": {
+    "background": "--bg-sunken",
+    "wall_by_environment": {
+      "forest": "#225022",
+      "cave": "#5a4b3c",
+      "dungeon": "#32323c",
+      "castle": "#8c8782",
+      "house": "#785a3c",
+      "city": "#a09b96",
+      "village": "#6e5f41",
+      "mountain": "#5f554b",
+      "swamp": "#374b2d",
+      "ruins": "#645f55",
+      "desert": "#b4a578"
+    },
+    "wall_fallback": "dungeon"
+  },
+  "markers": {
+    "item": "#ffd700",
+    "npc": "#808080"
+  }
+}

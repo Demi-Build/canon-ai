@@ -28,11 +28,11 @@ from canon.backends.testing import (  # noqa: E402
 from canon.bible.models import Bible  # noqa: E402
 from canon.config import CanonConfig  # noqa: E402
 from canon.llm.client import LLMClient  # noqa: E402
-from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline  # noqa: E402
-from examples.platformer_pack.effects import sanitize_effects  # noqa: E402
-from examples.platformer_pack.graphics import DEFAULT_GRAPHICS  # noqa: E402
-from examples.platformer_pack.tileset_art import (  # noqa: E402
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline  # noqa: E402
+from canon.packs.platformer.effects import sanitize_effects  # noqa: E402
+from canon.packs.platformer.graphics import DEFAULT_GRAPHICS  # noqa: E402
+from canon.packs.platformer.run_slice import make_fake_responder  # noqa: E402
+from canon.packs.platformer.tileset_art import (  # noqa: E402
     _CUTOUT_CATEGORIES,
     DiffusionSheetProducer,
     _bottom_align,
@@ -43,13 +43,13 @@ from examples.platformer_pack.tileset_art import (  # noqa: E402
     remove_background,
     segment_frames,
 )
-from examples.platformer_pack.vlm_qa import (  # noqa: E402
+from canon.packs.platformer.vlm_qa import (  # noqa: E402
     PLAYER_ANIMATION_STATES,
     STATE_LOOP_MODES,
     enemy_animation_states,
     make_fake_vlm_responder,
 )
-from examples.run_platformer_slice import make_fake_responder  # noqa: E402
+from canon.pipeline.runner import PipelineContext, run_pipeline  # noqa: E402
 
 SEED = "emberfall_001"
 STAGE = "ashen_depths"
@@ -139,7 +139,7 @@ class TestRemoveBackground:
         tile and a posterized one."""
         import random
 
-        from examples.platformer_pack.vlm_qa import _mean_rgb
+        from canon.packs.platformer.vlm_qa import _mean_rgb
 
         rng = random.Random(7)
         # A textured purple-ish tile aimed at a hot red (the real spike
@@ -187,7 +187,7 @@ class TestRemoveBackground:
 
 class TestArtDescriptors:
     def test_sentry_sprite_reads_as_stationary(self) -> None:
-        from examples.platformer_pack.art_phases import _enemy_art_descriptor
+        from canon.packs.platformer.art_phases import _enemy_art_descriptor
 
         d = _enemy_art_descriptor("sentry", "a plump spring-legged guardian")
         assert "planted" in d and "immobile" in d
@@ -197,7 +197,7 @@ class TestArtDescriptors:
         assert "walk" in p and "planted" not in p
 
     def test_player_is_a_weaponless_mascot(self) -> None:
-        from examples.platformer_pack.art_phases import PLAYER_DESCRIPTOR
+        from canon.packs.platformer.art_phases import PLAYER_DESCRIPTOR
 
         low = PLAYER_DESCRIPTOR.lower()
         assert "mascot" in low
@@ -263,7 +263,7 @@ class TestSpriteArt:
     def test_pinned_props_survive_a_sprite_reroll(self, tmp_path: Path) -> None:
         """The per-asset pin guard: props:<stage> pinned → a sprite_art
         re-run with a DIFFERENT producer leaves the prop bytes intact."""
-        from examples.platformer_pack.art_phases import SpriteArtPhase
+        from canon.packs.platformer.art_phases import SpriteArtPhase
 
         ctx = _run(tmp_path / "out", _producer(tmp_path))
         rels = list(ctx.bible.props[STAGE].prop_paths.values())
@@ -368,7 +368,7 @@ class TestBackdropArt:
         """graphics.foreground_band=True (a game that IS directing that
         layer) appends band_fg last with depth > 1 and REAL transparency
         (RGBA occluders consumers draw over the world; scenery stays RGB)."""
-        from examples.platformer_pack.art_phases import (
+        from canon.packs.platformer.art_phases import (
             FOREGROUND_DEPTH,
             BackdropArtPhase,
         )
@@ -414,12 +414,12 @@ class TestTilesetRepaintVariants:
         shade_floor_variant with the region mean preserved EXACTLY
         (palette conformance + every region-average consumer depend on
         it)."""
-        from examples.platformer_pack import tileset as tileset_mod
+        from canon.packs.platformer import tileset as tileset_mod
 
         if not hasattr(tileset_mod, "shade_floor_variant"):
             pytest.skip("tileset.shade_floor_variant not landed yet (G5 autotile)")
         from canon.bible.platformer import Tileset, TileSlot
-        from examples.platformer_pack.art_phases import TilesetArtPhase
+        from canon.packs.platformer.art_phases import TilesetArtPhase
 
         ctx = _run(tmp_path / "out")  # placeholder tree: stages + palette
         tile_px = DEFAULT_GRAPHICS.tile_px
@@ -492,7 +492,7 @@ class TestArtRunsAtTheEnd:
         """The user rule: paid art only after the levels validate. In the
         orchestrated DAG the art nodes' completion order sits strictly
         after every level step node."""
-        from examples.platformer_pack.dag import run_orchestrated
+        from canon.packs.platformer.dag import run_orchestrated
 
         ctx = PipelineContext(
             bible=Bible.empty(seed=SEED),
@@ -515,8 +515,8 @@ class TestArtRunsAtTheEnd:
             assert done.index(art) > last_level, art
 
     def test_regen_art_node_rerolls_art_only(self, tmp_path: Path) -> None:
+        from canon.packs.platformer.dag import run_orchestrated
         from canon.pipeline.orchestrator import mark_stale
-        from examples.platformer_pack.dag import run_orchestrated
 
         out = tmp_path / "out"
         ctx = PipelineContext(
@@ -561,7 +561,7 @@ def _corner_pixels(path: Path) -> list[tuple[int, int, int]]:
 
 
 def _expected_checker() -> list[tuple[int, int, int]]:
-    from examples.platformer_pack.tileset_art import _WATERMARK_TONES
+    from canon.packs.platformer.tileset_art import _WATERMARK_TONES
 
     return [
         _WATERMARK_TONES[(dx // 2 + dy // 2) % 2]
@@ -632,7 +632,7 @@ class TestVisibleWatermark:
     def test_on_marks_sprites_bands_splash_never_tiles(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.art_phases import (
+        from canon.packs.platformer.art_phases import (
             BackdropArtPhase,
             SpriteArtPhase,
             TilesetArtPhase,
@@ -709,7 +709,7 @@ class TestWorldArt:
     def test_pinned_splash_keeps_splash_bytes(self, tmp_path: Path) -> None:
         # The card is LEAF art: its pin id is "splash", never "world"
         # (pinning the world id must not be required to protect a card).
-        from examples.platformer_pack.art_phases import WorldArtPhase
+        from canon.packs.platformer.art_phases import WorldArtPhase
 
         ctx = _run(tmp_path / "out", _producer(tmp_path))
         rel = ctx.bible.world.splash_path
@@ -762,7 +762,7 @@ class TestStageEffects:
     def test_vocabulary_prompt_advertises_ranges_and_units(self) -> None:
         """The first real run returned 0-1 normalized params because the
         prompt gave names without ranges — prompts carry constraints."""
-        from examples.platformer_pack.effects import describe_vocabulary
+        from canon.packs.platformer.effects import describe_vocabulary
 
         vocab = describe_vocabulary()
         assert "density 1-200" in vocab
@@ -918,7 +918,7 @@ class TestSpriteAnimation:
     def test_sprite_drift_math(self) -> None:
         # Ticket 7: opaque-mean-RGB distance separates a RECOLOURED character
         # (palette shift, large) from the same character reposed (≈0).
-        from examples.platformer_pack.art_phases import (
+        from canon.packs.platformer.art_phases import (
             SPRITE_DRIFT_MAX,
             _sprite_drift,
         )
@@ -1062,7 +1062,7 @@ class TestSpriteAnimation:
     def test_asymmetric_actor_gets_left_strips_and_atlas_rows(
         self, tmp_path: Path
     ) -> None:
-        from examples.platformer_pack.art_phases import SpriteAnimationPhase
+        from canon.packs.platformer.art_phases import SpriteAnimationPhase
 
         out = tmp_path / "out"
         ctx = _run_animated(out, tmp_path)
@@ -1235,8 +1235,8 @@ class TestCrossStateScale:
     rendered at two different scales, and `fall`/`jump` play on every jump."""
 
     def _states(self, tmp_path: Path) -> dict[str, Image.Image]:
-        from examples.platformer_pack.art_phases import SpriteAnimationPhase
-        from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+        from canon.packs.platformer.art_phases import SpriteAnimationPhase
+        from canon.packs.platformer.tileset_art import DiffusionSheetProducer
 
         out = tmp_path / "out"
         ctx = PipelineContext(
@@ -1305,8 +1305,8 @@ class TestRenormalizeRepair:
     art generated before the per-actor fix."""
 
     def _pack(self, tmp_path: Path) -> tuple:
-        from examples.platformer_pack.art_phases import SpriteAnimationPhase
-        from examples.platformer_pack.tileset_art import DiffusionSheetProducer
+        from canon.packs.platformer.art_phases import SpriteAnimationPhase
+        from canon.packs.platformer.tileset_art import DiffusionSheetProducer
 
         out = tmp_path / "out"
         ctx = PipelineContext(
@@ -1386,3 +1386,26 @@ class TestRenormalizeRepair:
         ctx, phase, out, base_rel = self._pack(tmp_path)
         (out / "sprite/enemy/poser/frames.json").unlink()
         assert phase._renormalize_actor(ctx, base_rel, "enemy:poser") == {}
+
+    def test_manifest_without_loop_falls_back_to_state_default(self, tmp_path: Path) -> None:
+        """A frames.json that predates the playback keys (or a hand-edit that
+        dropped ``loop``) rides through renormalize with ``loop: None``, so
+        the writer's per-state fallback must resolve it. Regression: that
+        fallback once raised NameError because ``STATE_LOOP_MODES`` was only
+        imported inside the generation path."""
+        ctx, phase, out, base_rel = self._pack(tmp_path)
+        manifest = out / "sprite/enemy/poser/frames.json"
+        stripped = {
+            state: {k: v for k, v in meta.items() if k != "loop"}
+            for state, meta in json.loads(manifest.read_text()).items()
+        }
+        assert all("loop" not in meta for meta in stripped.values())
+        manifest.write_text(json.dumps(stripped))
+
+        result = phase._renormalize_actor(ctx, base_rel, "enemy:poser")
+
+        assert set(result["states"]) == {"idle", "jump"}
+        after = json.loads(manifest.read_text())
+        for state in ("idle", "jump"):
+            assert after[state]["loop"] == STATE_LOOP_MODES.get(state, "loop")
+            assert result["states"][state]["loop"] == after[state]["loop"]

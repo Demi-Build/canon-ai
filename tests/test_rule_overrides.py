@@ -12,14 +12,14 @@ import numpy as np
 
 from canon import CanonConfig, FakeLLMBackend, LLMClient, run_pipeline
 from canon.bible.models import Bible
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack import PlatformerPrompts, compose_pipeline
-from examples.platformer_pack.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
-from examples.platformer_pack.rules import (
+from canon.packs.platformer import PlatformerPrompts, compose_pipeline
+from canon.packs.platformer.movement import DEFAULT_MOVEMENT, PlayerMovementSpec
+from canon.packs.platformer.rules import (
     load_override_vocabulary,
     validate_overrides,
 )
-from examples.run_platformer_slice import make_fake_responder
+from canon.packs.platformer.run_slice import make_fake_responder
+from canon.pipeline.runner import PipelineContext
 
 SEED = "emberfall_001"
 
@@ -110,8 +110,8 @@ class TestOverridesEndToEnd:
         the default — proof the sim validates each level under its own
         physics. Gap 8 discriminates (default clears ≤6, g=15 clears
         ≤10 — probed)."""
-        from examples.platformer_pack.tiles import DEFAULT_TILES
-        from examples.platformer_pack.validate import reachable_cells
+        from canon.packs.platformer.tiles import DEFAULT_TILES
+        from canon.packs.platformer.validate import reachable_cells
 
         grid = np.zeros((14, 40), dtype=np.int8)
         grid[12, :] = 1

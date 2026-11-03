@@ -22,13 +22,13 @@ from canon.bible.models import Bible
 from canon.config import CanonConfig
 from canon.llm.client import LLMClient
 from canon.llm.request import LLMRequest
-from canon.pipeline.runner import PipelineContext
-from examples.platformer_pack.models import (
+from canon.packs.platformer.models import (
     DEFAULT_MODEL_TABLE,
     ModelTable,
     load_models,
 )
-from examples.platformer_pack.phases import resolved_model, stamp_provenance
+from canon.packs.platformer.phases import resolved_model, stamp_provenance
+from canon.pipeline.runner import PipelineContext
 
 
 class TestModelTable:
