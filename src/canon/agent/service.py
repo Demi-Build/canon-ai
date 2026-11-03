@@ -1109,6 +1109,12 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    # Provider keys come from the key file only ($CANON_ENV_FILE, which cradle
+    # sets, else ./.env); a key the shell exported is dropped here.
+    from canon import keyfile
+
+    keyfile.apply()
+
     pack = Path(args.pack)
     problem = pack_problem(pack)
     if problem is not None:

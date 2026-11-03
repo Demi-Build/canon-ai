@@ -46,10 +46,14 @@ What one row carries:
     the one place a key is checked, so it must not bill. :func:`test_provider`
     runs it and is only ever reached from an explicit user click.
 
-Deliberately absent, by row ownership: key STORAGE (cradle's keychain, row
-P0-12's Rust half — canon never learns where a value came from, only that the
-env var is set) and the Meshy backend itself (W2.2 — only its key row and its
-price rows exist today).
+``also_reads`` (optional)
+    Further key names the backend reads that are not one-for-one aliases
+    (fal's ``FAL_KEY_ID`` + ``FAL_KEY_SECRET`` pair).
+
+Key STORAGE is :mod:`canon.keyfile`: one ``.env`` file is the only source of
+every name above, and a shell export of any of them is ignored. Deliberately
+absent: the Meshy backend itself (W2.2 — only its key row and its price rows
+exist today).
 """
 
 from __future__ import annotations
@@ -111,6 +115,10 @@ PROVIDER_ROWS: list[dict[str, Any]] = [
         "label": "fal.ai",
         "env_var": "FAL_KEY",
         "aliases": [],
+        # fal's client also takes an id/secret pair in place of FAL_KEY.
+        # Not an alias (it is two names, not one), but still a key, so the
+        # key file is its only source too (``canon.keyfile.key_names``).
+        "also_reads": ["FAL_KEY_ID", "FAL_KEY_SECRET"],
         "unlocks": "Image generation and animation frames on the nano-banana line.",
         "backends": {"image": ["fal"]},
         "docs": "https://fal.ai/dashboard/keys",

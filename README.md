@@ -39,6 +39,19 @@ pip install canon-ai[audio]          # Music (Lyria) + SFX (ElevenLabs)
 pip install canon-ai[cli]            # CLI for use with Cradle / external tools
 ```
 
+## Provider keys
+
+Paid backends use your own provider keys, and canon reads them from one
+`.env` file only: `./.env`, or the file `CANON_ENV_FILE` names (cradle sets
+it to the file its Settings screen writes). A key exported in your shell is
+ignored, so a stale export can never shadow the file.
+
+```bash
+canon keys setup              # first run: asks for each key (hidden) and creates .env
+canon keys set anthropic      # change one key; only its line is rewritten
+canon keys status             # which keys the file holds, by name; never a value
+```
+
 ## Quick Start
 
 ```python
