@@ -512,11 +512,36 @@ def _usage_from(usage: Any) -> Usage:
     )
 
 
+#: Error codes/types a 429 carries when the account is OUT OF MONEY rather
+#: than over a rate: OpenAI ``insufficient_quota``, Moonshot
+#: ``exceeded_current_quota_error``. Waiting never fixes these.
+_QUOTA_CODES = frozenset({"insufficient_quota", "exceeded_current_quota_error", "billing_hard_limit_reached"})
+
+#: Message markers for the same case when a provider names no code (Moonshot
+#: has answered "insufficient balance" / "suspended … billing").
+_QUOTA_WORDS = ("insufficient_quota", "insufficient balance", "quota", "billing", "suspended")
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """Whether a 429 means "top up the account", not "slow down"."""
+    body = getattr(exc, "body", None)
+    err = body.get("error", body) if isinstance(body, dict) else None
+    codes = {getattr(exc, "code", None), getattr(exc, "type", None)}
+    if isinstance(err, dict):
+        codes |= {err.get("code"), err.get("type")}
+    if codes & _QUOTA_CODES:
+        return True
+    message = str(getattr(exc, "message", None) or exc).lower()
+    return any(word in message for word in _QUOTA_WORDS)
+
+
 def _translate_error(exc: Exception, backend_id: str) -> ChatError | None:
     """Map an SDK exception onto ``ChatError`` (``None`` = not an SDK error).
 
     Retryable: rate limits, timeouts, connection drops, 5xx. Not retryable:
-    auth, permission, bad request, not found, unprocessable, other 4xx.
+    auth, permission, bad request, not found, unprocessable, other 4xx — and
+    a 429 that says the account is out of quota or balance (retrying an empty
+    account only burns the retry budget; Pass 4 hit this on Moonshot).
     ``status_code`` / ``request_id`` are copied when the SDK has them.
     """
     import openai
@@ -527,7 +552,7 @@ def _translate_error(exc: Exception, backend_id: str) -> ChatError | None:
     request_id = getattr(exc, "request_id", None)
     if isinstance(exc, openai.RateLimitError | openai.APIConnectionError | openai.InternalServerError):
         # APITimeoutError subclasses APIConnectionError.
-        retryable = True
+        retryable = not (isinstance(exc, openai.RateLimitError) and _is_quota_error(exc))
     elif isinstance(
         exc,
         openai.AuthenticationError

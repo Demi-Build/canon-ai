@@ -15,6 +15,7 @@ DATA". These tests pin the three things that makes real:
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
 
@@ -219,3 +220,79 @@ class TestKeyTest:
 
 def _never(*_args: object, **_kwargs: object) -> tuple[int, str]:
     raise AssertionError("the key test must not contact a provider here")
+
+
+class TestErrorCodes:
+    """Pass 4: a 403 whose body says the PROJECT is billing-denied must not
+    read as "bad key". The body is mined for one enum and dropped."""
+
+    GOOGLE_DUNNING = json.dumps(
+        {
+            "error": {
+                "code": 403,
+                "message": "Lightning dunning decision is deny for project: projects/1",
+                "status": "PERMISSION_DENIED",
+            }
+        }
+    )
+    GOOGLE_BAD_KEY = json.dumps(
+        {
+            "error": {
+                "code": 400,
+                "message": "API key not valid. Please pass a valid API key.",
+                "status": "INVALID_ARGUMENT",
+                "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}],
+            }
+        }
+    )
+    ELEVEN_RESTRICTED = json.dumps(
+        {"detail": {"status": "missing_permissions", "message": "The API key you used is missing user_read"}}
+    )
+
+    def test_error_code_reads_only_the_enum(self) -> None:
+        assert providers.error_code(self.GOOGLE_DUNNING) == "PERMISSION_DENIED"
+        assert providers.error_code(self.GOOGLE_BAD_KEY) == "API_KEY_INVALID"
+        assert providers.error_code(self.ELEVEN_RESTRICTED) == "missing_permissions"
+        assert providers.error_code(json.dumps({"error": {"code": "invalid_api_key"}})) == "invalid_api_key"
+
+    @pytest.mark.parametrize("body", ["", "not json", "[]", json.dumps({"error": {"status": "has spaces sk-x"}})])
+    def test_error_code_drops_anything_else(self, body: str) -> None:
+        assert providers.error_code(body) == ""
+
+    def test_billing_denied_project_is_not_a_bad_key(self) -> None:
+        code = providers.error_code(self.GOOGLE_DUNNING)
+        out = providers.test_provider("lyria", {"GOOGLE_API_KEY": "g"}, fetch=lambda *_: (403, code))
+        assert out["ok"] is False and out["status"] == 403
+        assert "rejected" not in out["reason"]
+        assert "billing" in out["reason"] and out["code"] == "PERMISSION_DENIED"
+
+    def test_google_400_bad_key_reads_rejected(self) -> None:
+        code = providers.error_code(self.GOOGLE_BAD_KEY)
+        out = providers.test_provider("lyria", {"GOOGLE_API_KEY": "g"}, fetch=lambda *_: (400, code))
+        assert "rejected the key" in out["reason"]
+
+    def test_restricted_elevenlabs_key_is_named(self) -> None:
+        code = providers.error_code(self.ELEVEN_RESTRICTED)
+        out = providers.test_provider("elevenlabs", {"ELEVENLABS_API_KEY": "e"}, fetch=lambda *_: (401, code))
+        assert "lacks the permission" in out["reason"]
+
+    def test_a_free_text_code_from_a_custom_fetch_is_ignored(self) -> None:
+        env = {"ANTHROPIC_API_KEY": "sk-leak"}
+        out = providers.test_provider("anthropic", env, fetch=lambda *_: (401, "sk-leak x"))
+        assert "sk-leak" not in repr(out)
+
+    def test_urlopen_mines_the_body_and_never_returns_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import io
+        import urllib.error
+
+        def boom(*_a, **_k):
+            raise urllib.error.HTTPError(
+                "https://x", 403, "Forbidden", {}, io.BytesIO(self.GOOGLE_DUNNING.encode())  # type: ignore[arg-type]
+            )
+
+        monkeypatch.setattr(providers.urllib.request, "urlopen", boom)
+        status, code = providers._urlopen("https://x", {}, 1.0)
+        assert (status, code) == (403, "PERMISSION_DENIED")
+
+    def test_lyria_note_names_the_billing_gate(self) -> None:
+        assert "billing" in providers.row("lyria")["note"]

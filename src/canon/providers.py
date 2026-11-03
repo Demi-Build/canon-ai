@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -127,7 +128,11 @@ PROVIDER_ROWS: list[dict[str, Any]] = [
         "unlocks": "Music generation through Lyria on the Gemini API.",
         "backends": {"music": ["lyria"]},
         "docs": "https://aistudio.google.com/apikey",
-        "note": "Lyria is paid-tier only — a free-tier Gemini key authenticates but cannot generate music.",
+        "note": (
+            "Lyria is paid-tier only. A free-tier key, or a key whose Google Cloud project is "
+            "billing-denied, authenticates here but cannot generate music (a 403 "
+            "PERMISSION_DENIED at generation time)."
+        ),
         "test": _test("https://generativelanguage.googleapis.com/v1beta/models", "x-goog-api-key"),
     },
     {
@@ -303,17 +308,81 @@ def key_status(environ: dict[str, str] | None = None) -> list[dict[str, Any]]:
 Fetch = Callable[[str, dict[str, str], float], tuple[int, str]]
 
 
+#: Longest error body read to find the provider's status enum. The body is
+#: parsed for ONE short code and then dropped; it is never surfaced.
+_ERROR_BODY_LIMIT = 8192
+
+#: A provider status enum is a short identifier; anything else is discarded
+#: so no free text (which could quote the key back) reaches a result.
+_ENUM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,63}$")
+
+
+def error_code(body: str) -> str:
+    """The provider's machine-readable error code from an error body, or "".
+
+    Reads only the enum fields the probed providers publish — Google
+    ``error.status`` (and ``error.details[].reason`` such as
+    ``API_KEY_INVALID``), ElevenLabs ``detail.status``, OpenAI-style
+    ``error.code`` / ``error.type`` — and returns the first that looks like
+    an identifier. Messages are never returned."""
+    try:
+        doc = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    candidates: list[Any] = []
+    if isinstance(doc, dict):
+        err = doc.get("error")
+        if isinstance(err, dict):
+            for d in err.get("details") or []:
+                if isinstance(d, dict):
+                    candidates.append(d.get("reason"))
+            candidates += [err.get("status"), err.get("code"), err.get("type")]
+        detail = doc.get("detail")
+        if isinstance(detail, dict):
+            candidates.append(detail.get("status"))
+    for c in candidates:
+        if isinstance(c, str) and _ENUM_RE.match(c):
+            return c
+    return ""
+
+
 def _urlopen(url: str, headers: dict[str, str], timeout: float) -> tuple[int, str]:
+    """GET ``url``; answer ``(status, code)``. ``code`` is the provider's
+    error enum for an HTTP error (see ``error_code``), the exception type
+    name for a network failure (status 0), and "" on success."""
     request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310 - https literal in the table
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310
             return int(resp.status), ""
     except urllib.error.HTTPError as e:
-        # The STATUS is the answer; the body may quote the key back, so it is
-        # never read and never surfaced.
-        return int(e.code), ""
+        # The STATUS is the answer. The body is read only to pull one short
+        # enum out of it; the body itself may quote the key back, so it is
+        # never stored, logged or surfaced.
+        try:
+            body = e.read(_ERROR_BODY_LIMIT).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 — no body is a fine answer
+            body = ""
+        return int(e.code), error_code(body)
     except Exception as e:  # noqa: BLE001 — a network failure is a result here
         return 0, type(e).__name__
+
+
+#: Provider error enums that mean "the key is fine, the account or project
+#: is not" → the copy the Test button shows instead of "rejected the key".
+_CODE_REASONS: dict[str, str] = {
+    "PERMISSION_DENIED": (
+        "the key authenticated, but the provider refused this project or account "
+        "(billing or permission) — a new key will not fix this; check the account's billing"
+    ),
+    "missing_permissions": (
+        "the key is valid but lacks the permission this read needs — "
+        "a restricted key can still generate if it has the generation permission"
+    ),
+    "insufficient_quota": "the key authenticated, but the account has no quota or credit left",
+}
+
+#: Enums that confirm a bad key (said explicitly so a 400 reads right).
+_BAD_KEY_CODES = frozenset({"API_KEY_INVALID", "invalid_api_key", "UNAUTHENTICATED", "authentication_error"})
 
 
 def _result(provider_id: str, status: int | None, *, ok: bool, reason: str) -> dict[str, Any]:
@@ -363,8 +432,16 @@ def test_provider(
     status, error = (fetch or _urlopen)(spec["url"], headers, TEST_TIMEOUT)
     if status == 0:
         return {"id": provider_id, "ran": True, "ok": False, "status": None, "reason": f"could not reach it ({error})"}
-    if status in (401, 403):
-        return _result(provider_id, status, ok=False, reason="the provider rejected the key")
+    code = error if _ENUM_RE.match(error or "") else ""
+    if code in _CODE_REASONS:
+        out = _result(provider_id, status, ok=False, reason=_CODE_REASONS[code])
+        out["code"] = code
+        return out
+    if status in (401, 403) or code in _BAD_KEY_CODES:
+        out = _result(provider_id, status, ok=False, reason="the provider rejected the key")
+        if code:
+            out["code"] = code
+        return out
     if 200 <= status < 300:
         return _result(provider_id, status, ok=True, reason="the provider accepted the key")
     return {
@@ -381,6 +458,7 @@ __all__ = [
     "TEST_TIMEOUT",
     "backend_key_vars",
     "env_vars",
+    "error_code",
     "key_status",
     "key_var",
     "provider_rows",

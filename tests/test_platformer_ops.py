@@ -1495,6 +1495,20 @@ def _spy_animation_author(monkeypatch) -> list[str | None]:
     return seen
 
 
+def _install_base_sprite(pack_dir: Path, enemy_id: str) -> None:
+    """Give one enemy a real base sprite (the user-art path). The fake image
+    backend's sprite comes back empty after background removal, so a test
+    that animates must install its own rather than lean on an earlier test
+    having done it to the shared module pack (order-dependent under -k / -n)."""
+    from PIL import Image
+
+    from canon.adapters.platformer_write import replace_asset
+
+    png = pack_dir / "base_sprite.png"
+    Image.new("RGBA", (32, 32), (200, 30, 30, 255)).save(png)
+    replace_asset(pack_dir, f"enemy:{enemy_id}", png, actor="test")
+
+
 def test_animate_prompt_override_reaches_the_vlm_author(pack: Path, tmp_path, monkeypatch):
     """The editable animate prompt is the VLM's motion-spec AUTHORING prompt
     (one call per run) — deliberately NOT the per-state img2img sheet prompt,
@@ -1505,6 +1519,7 @@ def test_animate_prompt_override_reaches_the_vlm_author(pack: Path, tmp_path, mo
     p = tmp_path / "animate_override"
     shutil.copytree(pack, p)
     enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    _install_base_sprite(p, enemy_id)
     seen = _spy_animation_author(monkeypatch)
 
     ops.animate_asset(
@@ -1554,6 +1569,7 @@ def test_animate_override_is_inert_for_reuse_spec(pack: Path, tmp_path, monkeypa
     p = tmp_path / "animate_reuse"
     shutil.copytree(pack, p)
     enemy_id = next(iter(ops._load_defs(p, "enemy")))
+    _install_base_sprite(p, enemy_id)
 
     # Seed a stored spec so reuse_spec has something to replay.
     ops.animate_asset(

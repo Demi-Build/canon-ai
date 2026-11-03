@@ -799,6 +799,23 @@ class TestOpenAIChatBackendErrors:
         assert err.request_id == "req_429"
         assert str(err).startswith("openai: ")
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": {"message": "You exceeded your current quota", "type": "insufficient_quota",
+                       "code": "insufficient_quota"}},
+            {"error": {"message": "Your account is suspended due to insufficient balance",
+                       "type": "exceeded_current_quota_error"}},
+        ],
+    )
+    def test_an_empty_account_429_is_not_retryable(self, sdk, body) -> None:
+        import httpx
+
+        response = httpx.Response(429, request=self._request(), headers={"x-request-id": "req_q"})
+        error = sdk.RateLimitError(body["error"]["message"], response=response, body=body)
+        err = self._raise(error, id="kimi")
+        assert err.retryable is False and err.status == 429
+
     def test_error_message_names_the_backend_id(self, sdk) -> None:
         err = self._raise(self._status_error(sdk.RateLimitError, 429), id="kimi")
         assert str(err).startswith("kimi: ")

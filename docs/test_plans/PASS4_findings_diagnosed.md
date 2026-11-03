@@ -9,6 +9,24 @@ $0.99 shortfall against best-case equals the 26 failed units at list price ($1.0
 landed within 2.5% of best-case. **The estimator passed. Reliability and bookkeeping did not.**
 
 
+## Status — 2026-11-03 (merge pass for `september_dev` → `main`)
+
+Canon side, by finding. ✅ = landed with tests · ⏳ = open · 🧭 = needs a decision.
+
+| Finding | Canon | Cradle (not on GitHub yet — lives in the local checkout) |
+|---|---|---|
+| Shell shadowing keys / Test button | ✅ the probe reads one error enum from the body: a billing-denied project (403 `PERMISSION_DENIED`) and a restricted ElevenLabs key (`missing_permissions`) are named instead of "rejected the key"; Google 400 `API_KEY_INVALID` reads "rejected"; Lyria row note names the billing gate. ⏳ fal POST token probe (needs a live check) | ⏳ name the winning key source in the Test result; 🧭 shell-wins vs env-file-wins |
+| Music: Lyria billing gate | ✅ failures recorded, attempted/succeeded split, dungeon manifest warnings, `world new` warnings (a6d52bf). 🧭 preflight: run the music lane first and abort vs drop on a 403 | ⏳ show `result.warnings` on the done card / WorldBibleView |
+| Improve called Claude, one message for every failure | ✅ `dialogue improve` returns `outcome` ∈ proposed / no_changes / clamped / truncated / refused / unparseable, `gen.stop_reason/returned/dropped`, a priced `cost.usd` from canon.pricing, `max_tokens` 16384 + `effort: low`, note "LLM re-author with {backend}" | ⏳ route through the job queue, live state + Stop, outcome copy, `recordSpend` |
+| Platformer spend recorded $0 | ✅ `world new` reports `actual_usd` from `generation_stats.json`; agent `_create_spend` reads it; VLM spend metered (a6d52bf) | ⏳ store.ts / CostDashboard / NewProjectModal read `generation_stats.json` |
+| 26 asset failures silenced | ✅ structured failures, `asset_failed` events, SFX concurrency 2 + 0.5 s floor, `asset generate --target missing` (a6d52bf). 🧭 monster/item rows that share a name share one portrait file (dedup by name costs an extra LLM call on a clash; id-keyed files orphan old portraits) | ⏳ failed-asset summary, "Retry missing ($x)", JobTray "partial" |
+| Animation = Claude; vision calls unmetered | ✅ `vlm_calls` / `vlm_cost_usd` metered (a6d52bf). ⏳ `pack templates` lane options + image family breakdown on the chip | ⏳ relabel the lane, render options from data |
+| Improve card unpriced | ✅ new `canon dialogue estimate` (same args as improve; sized off the real request, priced at the chat model the call runs) | ⏳ `estimate_dialogue` command + card; hide the dead "Edit prompt"; drop "no cap" copy |
+| `generation_time` placeholder | ✅ run clock in `generation_stats.json`, stripped from the manifest copy (a6d52bf) | — |
+
+Also from the Step 0a notes: ✅ an OpenAI/Moonshot 429 that means "out of quota / balance" is no
+longer labelled retryable.
+
 ---
 
 ## Your shell is shadowing your fresh keys (and the Test button)

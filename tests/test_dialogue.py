@@ -905,3 +905,150 @@ def test_improve_on_a_registered_chat_backend_clamps_and_writes_nothing(pack: Pa
         assert (pack / "npcs" / "npcs.json").read_bytes() == before
     finally:
         BackendRegistry.reset()
+
+
+class _MeteredChat:
+    """A scripted chat backend that reports a model and real-looking usage,
+    so the paid leg's outcome naming and pricing run at $0 (no provider)."""
+
+    def __init__(self, text: str, stop_reason: str = "end_turn", model: str = "claude-sonnet-5") -> None:
+        self.text, self.stop_reason, self.model = text, stop_reason, model
+        self.calls: list = []
+
+    def stream(self, request):  # noqa: ANN001, ANN201 — the ChatBackend protocol
+        from canon.llm.chat import MessageStart, MessageStop, Usage
+
+        self.calls.append(request)
+        yield MessageStart(model=self.model)
+        yield MessageStop(
+            stop_reason=self.stop_reason,
+            usage=Usage(input_tokens=1_000, output_tokens=500),
+            content=[{"type": "text", "text": self.text}],
+        )
+
+
+def _improve_with(pack: Path, backend: _MeteredChat) -> dict:
+    from canon.backends import BackendRegistry
+
+    BackendRegistry.reset()
+    try:
+        BackendRegistry.register_chat("metered", lambda: backend)
+        return dialogue_improve(pack, PLAIN_NPC, instruction="tighten", backend="metered")
+    finally:
+        BackendRegistry.reset()
+
+
+_GOOD_ROW = {"tree": f"{PLAIN_NPC}:default", "node_id": "start", "field": "prompt",
+             "choice": None, "after": "Rewritten by the model.", "why": "tighter"}
+_BAD_ROW = {"tree": f"{PLAIN_NPC}:default", "node_id": "no_such_node", "field": "prompt",
+            "choice": None, "after": "dropped", "why": "absent node"}
+
+
+@pytest.mark.parametrize(
+    ("text", "stop", "outcome", "rows"),
+    [
+        (json.dumps([_GOOD_ROW]), "end_turn", "proposed", 1),
+        ("[]", "end_turn", "no_changes", 0),
+        (json.dumps([_BAD_ROW]), "end_turn", "clamped", 0),
+        ('[{"tree": "x", "node_id": "st', "max_tokens", "truncated", 0),
+        ("I can't help with that.", "refusal", "refused", 0),
+        ("Here are my thoughts: the prose is fine.", "end_turn", "unparseable", 0),
+    ],
+)
+def test_improve_names_every_outcome_and_prices_the_call(
+    pack: Path, text: str, stop: str, outcome: str, rows: int
+) -> None:
+    """Pass 4: every non-answer used to collapse to `[]` ("already clean")
+    and `cost.usd` was None. Now the outcome is named and the call priced
+    from canon.pricing — the same figures the agent service bills by."""
+    before = (pack / "npcs" / "npcs.json").read_bytes()
+    result = _improve_with(pack, _MeteredChat(text, stop))
+    assert result["outcome"] == outcome and result["gen"]["outcome"] == outcome
+    assert result["proposal"]["count"] == rows
+    assert result["gen"]["stop_reason"] == stop
+    # claude-sonnet-5 at $2 / $10 per 1M: 1000 in + 500 out
+    assert result["cost"]["usd"] == pytest.approx(0.002 + 0.005)
+    assert result["cost"]["accuracy"] == "measured"
+    assert result["backend_note"] == "LLM re-author with metered"
+    assert result["wrote"] is False and (pack / "npcs" / "npcs.json").read_bytes() == before
+
+
+def test_improve_counts_rows_clamped_away(pack: Path) -> None:
+    result = _improve_with(pack, _MeteredChat(json.dumps([_GOOD_ROW, _BAD_ROW])))
+    assert result["outcome"] == "proposed"
+    assert (result["gen"]["returned"], result["gen"]["dropped"]) == (2, 1)
+
+
+def test_improve_asks_for_room_and_low_effort(pack: Path) -> None:
+    from canon.dialogue.improve import IMPROVE_MAX_TOKENS
+
+    backend = _MeteredChat("[]")
+    _improve_with(pack, backend)
+    (request,) = backend.calls
+    assert request.max_tokens == IMPROVE_MAX_TOKENS >= 16384
+    assert request.effort == "low"
+
+
+def test_improve_on_an_unpriced_model_says_so(pack: Path) -> None:
+    result = _improve_with(pack, _MeteredChat("[]", model="no-such-model-x"))
+    assert result["cost"]["usd"] is None and "no llm price row" in result["cost"]["error"]
+
+
+@pytest.mark.parametrize("backend", ["none", "fake"])
+def test_free_improve_carries_an_outcome(pack: Path, backend: str) -> None:
+    result = dialogue_improve(pack, PLAIN_NPC, backend=backend)
+    assert result["outcome"] in {"proposed", "no_changes"}
+    assert result["cost"] == {"usd": 0.0, "paid": False}
+
+
+# --- the improve card's price (Pass 4: "not estimated" on a paid call) -------
+
+
+def test_free_estimate_is_zero(pack: Path) -> None:
+    from canon.dialogue.improve import dialogue_estimate
+
+    est = dialogue_estimate(pack, PLAIN_NPC, backend="none")
+    assert (est["low"], est["high"]) == (0.0, 0.0)
+    assert est["model"] is None and est["unitLabel"].endswith(("choice", "choices"))
+
+
+def test_paid_estimate_prices_the_real_request_at_the_chat_model(pack: Path) -> None:
+    from canon import pricing
+    from canon.backends.chat_anthropic import DEFAULT_CHAT_MODEL
+    from canon.dialogue.improve import dialogue_estimate
+
+    est = dialogue_estimate(pack, PLAIN_NPC, backend="anthropic", instruction="tighten")
+    assert est["model"] == DEFAULT_CHAT_MODEL, "the chat model improve runs, not the pipeline default"
+    assert 0 < est["low"] < est["high"]
+    task = est["llm"]["by_task"]["dialogue_improve"]
+    rates = pricing.per_token(pricing.llm(DEFAULT_CHAT_MODEL))
+    assert est["high"] == pytest.approx(
+        task["input_tokens_per_call"] * rates["input"] + task["output_tokens_per_call"] * rates["output"], abs=1e-4
+    )
+    # one call, no retry multiplier
+    assert est["llm"]["calls"] == 1.0 and est["accuracy"] == "estimated" and not est["warnings"]
+
+
+def test_estimate_grows_with_scope_and_honours_a_named_model(pack: Path) -> None:
+    from canon.dialogue.improve import dialogue_estimate
+
+    tree = dialogue_estimate(pack, QUEST_NPC, backend="anthropic", scope="tree")
+    whole = dialogue_estimate(pack, QUEST_NPC, backend="anthropic", scope="npc")
+    assert whole["llm"]["by_task"]["dialogue_improve"]["input_tokens_per_call"] > (
+        tree["llm"]["by_task"]["dialogue_improve"]["input_tokens_per_call"]
+    )
+    opus = dialogue_estimate(pack, PLAIN_NPC, backend="anthropic", model="claude-opus-4-8")
+    assert opus["model"] == "claude-opus-4-8"
+
+
+def test_estimate_on_an_unpriced_model_warns(pack: Path) -> None:
+    from canon.dialogue.improve import dialogue_estimate
+
+    est = dialogue_estimate(pack, PLAIN_NPC, backend="anthropic", model="no-such-model-x")
+    assert est["warnings"] and "no-such-model-x" in est["warnings"][0]
+
+
+def test_dialogue_estimate_cli(pack: Path) -> None:
+    code, out = _canon("dialogue", "estimate", str(pack), "--npc", PLAIN_NPC, "--backend", "anthropic")
+    assert code == 0, out
+    assert out["result"] == "estimate" and out["estimate"]["high"] > 0  # type: ignore[index]

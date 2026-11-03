@@ -4069,6 +4069,33 @@ def dialogue_improve_cmd(
     _emit(result)  # type: ignore[possibly-unbound]
 
 
+@dialogue_app.command("estimate")
+def dialogue_estimate_cmd(
+    pack_dir: Path = typer.Argument(..., help="Pack root."),
+    npc: str = typer.Option(..., "--npc", help="NPC row id."),
+    instruction: str = typer.Option("", "--instruction", help="What to improve (sizes the request)."),
+    tree_id: str | None = typer.Option(None, "--tree-id", help="Which tree (default: the first)."),
+    scope: str = typer.Option("tree", "--scope", help="tree | npc"),
+    backend: str = typer.Option("none", "--backend", help="none | fake ($0) | a chat provider id."),
+    model: str | None = typer.Option(None, "--model", help="Price at this model (default: the backend's)."),
+) -> None:
+    """Forecast what `dialogue improve` will cost with the same arguments —
+    sized off the real request, priced from canon.pricing. Reads only; emits
+    `{result: "estimate", estimate}` like `level estimate`."""
+    from canon.dialogue.improve import dialogue_estimate
+    from canon.packs import PackTypeError
+
+    try:
+        est = dialogue_estimate(
+            pack_dir, npc, instruction=instruction, tree_id=tree_id, scope=scope, backend=backend, model=model,
+        )
+    except (FileNotFoundError, ValueError, KeyError, PackTypeError) as e:
+        _emit_not_yet_or_error(e, pack_dir=str(pack_dir), npc=npc)
+    except Exception as e:
+        _emit_error(f"dialogue estimate failed: {e}", traceback=traceback.format_exc())
+    _emit({"result": "estimate", "estimate": est})  # type: ignore[possibly-unbound]
+
+
 @scene_app.command("update")
 def scene_update_cmd(
     pack_dir: Path = typer.Argument(..., help="Pack root."),
